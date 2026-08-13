@@ -1,0 +1,21 @@
+name: Request Trusted Governance Evaluation
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+  merge_group:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  request:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Explain architecture
+        run: |
+          echo "Trusted governance evaluation should be initiated by the installed GitHub App."
+          echo "This workflow is intentionally non-authoritative."
+          echo "Do not put LangSmith/model/GitHub-App private-key secrets here."

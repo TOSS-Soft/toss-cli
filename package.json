@@ -1,0 +1,46 @@
+{
+  "name": "@toss/cli",
+  "version": "1.0.0",
+  "description": "TOSS PM Governance project bootstrap CLI",
+  "type": "module",
+  "bin": {
+    "toss": "./bin/toss.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "templates",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "yaml": "^2.8.1"
+  },
+  "scripts": {
+    "test": "node ./scripts/smoke-test.js",
+    "prepack": "npm test",
+    "release:version": "node ./scripts/release-version.mjs"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TOSS-Soft/toss-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/TOSS-Soft/toss-cli/issues"
+  },
+  "homepage": "https://github.com/TOSS-Soft/toss-cli#readme",
+  "keywords": [
+    "toss",
+    "cli",
+    "project-bootstrap",
+    "governance",
+    "claude-code",
+    "langsmith"
+  ]
+}

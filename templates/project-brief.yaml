@@ -1,0 +1,58 @@
+project:
+  name: ""
+  slug: AUTO
+  description: ""
+
+business:
+  problem: ""
+  target_users: []
+  primary_goal: ""
+
+scope:
+  mvp: []
+  later: []
+  out_of_scope: []
+
+platform:
+  web: true
+  mobile: false
+  api: true
+
+technology:
+  backend: AUTO
+  frontend: AUTO
+  database: AUTO
+  cache: AUTO
+  infrastructure: AUTO
+  containers: AUTO
+
+architecture:
+  tenancy: AUTO
+  api_style: AUTO
+  deployment: AUTO
+
+environments:
+  - development
+  - staging
+  - production
+
+security:
+  data_sensitivity: AUTO
+  personal_data: AUTO
+  financial_data: AUTO
+
+delivery:
+  github_owner: toss-software
+  visibility: private
+  create_github_repository: false
+  create_github_project: false
+  apply_main_ruleset: false
+
+langsmith:
+  project: AUTO
+
+constraints: []
+
+initial_objective:
+  title: ""
+  outcome: ""

@@ -1,0 +1,52 @@
+name: Publish npm package
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    name: npm-publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+
+      - name: Validate tag matches package version
+        shell: bash
+        run: |
+          set -euo pipefail
+          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          echo "package.json: $PACKAGE_VERSION"
+          echo "tag:          $TAG_VERSION"
+          [[ "$PACKAGE_VERSION" == "$TAG_VERSION" ]] || {
+            echo "::error::Tag v$TAG_VERSION does not match package.json version $PACKAGE_VERSION"
+            exit 1
+          }
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Test
+        run: npm test
+
+      - name: Inspect publish payload
+        run: npm pack --dry-run
+
+      - name: Publish to npm with Trusted Publishing
+        run: npm publish --access public

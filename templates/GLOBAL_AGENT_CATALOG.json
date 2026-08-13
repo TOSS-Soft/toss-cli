@@ -1,0 +1,294 @@
+{
+  "catalog_version": "1.0.0",
+  "status": "ACTIVE",
+  "governance_version": "1.6.0",
+  "selection_mode": "project-discovery",
+  "agents": [
+    {
+      "id": "backend.laravel",
+      "status": "APPROVED",
+      "domains": [
+        "backend",
+        "api",
+        "php",
+        "laravel"
+      ],
+      "capabilities": [
+        "php",
+        "laravel",
+        "rest-api",
+        "postgresql-integration",
+        "phpunit"
+      ],
+      "environments": [
+        "LOCAL",
+        "DEVELOPMENT",
+        "STAGING"
+      ],
+      "may_commit": true,
+      "may_open_pr": true,
+      "may_merge": false,
+      "may_deploy_production": false,
+      "may_mutate_production_data": false,
+      "may_assign_agents": false
+    },
+    {
+      "id": "backend.node",
+      "status": "APPROVED",
+      "domains": [
+        "backend",
+        "api",
+        "node"
+      ],
+      "capabilities": [
+        "nodejs",
+        "typescript",
+        "rest-api",
+        "testing"
+      ],
+      "environments": [
+        "LOCAL",
+        "DEVELOPMENT",
+        "STAGING"
+      ],
+      "may_commit": true,
+      "may_open_pr": true,
+      "may_merge": false,
+      "may_deploy_production": false,
+      "may_mutate_production_data": false,
+      "may_assign_agents": false
+    },
+    {
+      "id": "frontend.react",
+      "status": "APPROVED",
+      "domains": [
+        "frontend",
+        "web",
+        "react"
+      ],
+      "capabilities": [
+        "react",
+        "typescript",
+        "ui-integration",
+        "frontend-testing"
+      ],
+      "environments": [
+        "LOCAL",
+        "DEVELOPMENT",
+        "STAGING"
+      ],
+      "may_commit": true,
+      "may_open_pr": true,
+      "may_merge": false,
+      "may_deploy_production": false,
+      "may_mutate_production_data": false,
+      "may_assign_agents": false
+    },
+    {
+      "id": "frontend.nextjs",
+      "status": "APPROVED",
+      "domains": [
+        "frontend",
+        "web",
+        "nextjs"
+      ],
+      "capabilities": [
+        "nextjs",
+        "react",
+        "typescript",
+        "ssr",
+        "frontend-testing"
+      ],
+      "environments": [
+        "LOCAL",
+        "DEVELOPMENT",
+        "STAGING"
+      ],
+      "may_commit": true,
+      "may_open_pr": true,
+      "may_merge": false,
+      "may_deploy_production": false,
+      "may_mutate_production_data": false,
+      "may_assign_agents": false
+    },
+    {
+      "id": "database.postgresql",
+      "status": "APPROVED",
+      "domains": [
+        "database",
+        "postgresql"
+      ],
+      "capabilities": [
+        "postgresql",
+        "schema-design",
+        "migrations",
+        "indexing",
+        "query-analysis"
+      ],
+      "environments": [
+        "LOCAL",
+        "DEVELOPMENT",
+        "STAGING"
+      ],
+      "may_commit": true,
+      "may_open_pr": true,
+      "may_merge": false,
+      "may_deploy_production": false,
+      "may_mutate_production_data": false,
+      "may_assign_agents": false
+    },
+    {
+      "id": "devops.aws",
+      "status": "APPROVED",
+      "domains": [
+        "devops",
+        "cloud",
+        "aws"
+      ],
+      "capabilities": [
+        "aws",
+        "terraform",
+        "docker",
+        "ci-cd",
+        "observability"
+      ],
+      "environments": [
+        "LOCAL",
+        "DEVELOPMENT",
+        "STAGING"
+      ],
+      "may_commit": true,
+      "may_open_pr": true,
+      "may_merge": false,
+      "may_deploy_production": false,
+      "may_mutate_production_data": false,
+      "may_assign_agents": false
+    },
+    {
+      "id": "devops.generic",
+      "status": "APPROVED",
+      "domains": [
+        "devops",
+        "ci-cd"
+      ],
+      "capabilities": [
+        "docker",
+        "ci-cd",
+        "release-engineering",
+        "observability"
+      ],
+      "environments": [
+        "LOCAL",
+        "DEVELOPMENT",
+        "STAGING"
+      ],
+      "may_commit": true,
+      "may_open_pr": true,
+      "may_merge": false,
+      "may_deploy_production": false,
+      "may_mutate_production_data": false,
+      "may_assign_agents": false
+    },
+    {
+      "id": "security.appsec",
+      "status": "APPROVED",
+      "domains": [
+        "security",
+        "application-security"
+      ],
+      "capabilities": [
+        "appsec",
+        "threat-modeling",
+        "iam-review",
+        "secret-review",
+        "dependency-review"
+      ],
+      "environments": [
+        "LOCAL",
+        "DEVELOPMENT",
+        "STAGING"
+      ],
+      "may_commit": false,
+      "may_open_pr": false,
+      "may_merge": false,
+      "may_deploy_production": false,
+      "may_mutate_production_data": false,
+      "may_assign_agents": false
+    },
+    {
+      "id": "qa.e2e",
+      "status": "APPROVED",
+      "domains": [
+        "qa",
+        "testing"
+      ],
+      "capabilities": [
+        "e2e",
+        "regression",
+        "integration-testing",
+        "test-design"
+      ],
+      "environments": [
+        "LOCAL",
+        "DEVELOPMENT",
+        "STAGING"
+      ],
+      "may_commit": true,
+      "may_open_pr": true,
+      "may_merge": false,
+      "may_deploy_production": false,
+      "may_mutate_production_data": false,
+      "may_assign_agents": false
+    },
+    {
+      "id": "architecture.software",
+      "status": "APPROVED",
+      "domains": [
+        "architecture"
+      ],
+      "capabilities": [
+        "software-architecture",
+        "system-design",
+        "integration-design",
+        "tradeoff-analysis"
+      ],
+      "environments": [
+        "LOCAL",
+        "DEVELOPMENT",
+        "STAGING"
+      ],
+      "may_commit": false,
+      "may_open_pr": false,
+      "may_merge": false,
+      "may_deploy_production": false,
+      "may_mutate_production_data": false,
+      "may_assign_agents": false
+    },
+    {
+      "id": "blockchain.solidity",
+      "status": "APPROVED",
+      "domains": [
+        "blockchain",
+        "smart-contracts"
+      ],
+      "capabilities": [
+        "solidity",
+        "evm",
+        "hardhat",
+        "openzeppelin",
+        "smart-contract-testing"
+      ],
+      "environments": [
+        "LOCAL",
+        "DEVELOPMENT",
+        "STAGING"
+      ],
+      "may_commit": true,
+      "may_open_pr": true,
+      "may_merge": false,
+      "may_deploy_production": false,
+      "may_mutate_production_data": false,
+      "may_assign_agents": false
+    }
+  ]
+}
