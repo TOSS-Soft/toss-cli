@@ -24,6 +24,9 @@ Valid states:
 - [ ] Repository identity reconciled
 - [ ] Architecture discovered
 - [ ] Technology stack discovered
+- [ ] Design applicability reconciled
+- [ ] Design Brief state reconciled
+- [ ] Design System state reconciled
 - [ ] Required specialist capabilities identified
 - [ ] Approved catalog agents selected
 - [ ] Project AGENT_REGISTRY.md reconciled
@@ -36,6 +39,23 @@ Valid states:
 - [ ] Initial risks recorded
 - [ ] Known unknowns recorded
 - [ ] PROJECT_STATE.md reconciled
+
+## Design Bootstrap
+
+Status: PENDING
+
+Brief: PENDING
+
+System: PENDING
+
+Valid states:
+
+- PENDING
+- DISCOVERY
+- READY
+- APPROVED
+- BLOCKED
+- NOT_APPLICABLE
 
 ## First CEO Objective
 

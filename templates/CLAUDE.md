@@ -55,6 +55,42 @@ If `project-management/bootstrap/PROJECT_BRIEF.json` exists:
 Project discovery verifies and enriches the brief; it does not silently
 contradict explicit CEO intent.
 
+## Design Brief and Design System Bootstrap
+
+During first bootstrap, read `PROJECT_BRIEF.json.design` before inferring
+design intent.
+
+1. If `design.required` is `false`, set design state to
+   `NOT_APPLICABLE` and do not run design discovery.
+2. If it is `AUTO`, determine applicability only from verified project scope.
+   A verified user-interface requirement starts discovery; repository content
+   alone does not create product intent.
+3. If design is required, preserve every explicit brief value and ask only for
+   missing or `AUTO` decisions, one question at a time, in this order:
+   purpose and success criteria; company system and binding rules; production
+   tool; visual direction and avoided patterns; target devices, responsiveness,
+   and accessibility; required screens, components, and deliverables; approval
+   owner.
+4. Maintain `project-management/design/DESIGN_BRIEF.md` as the canonical
+   discovery and approval input.
+5. Treat a verified company design system as the primary source. Project rules
+   may fill gaps but MUST NOT silently override binding company rules.
+6. Assign Design System production to an approved design specialist under a
+   Task Contract. The PM MUST NOT create visual designs or implement UI
+   components.
+7. Maintain `project-management/design/DESIGN_SYSTEM.md` and record external
+   Figma, Pencil, Claude Design, or code-native outputs as artifact references.
+8. Use design states `PENDING`, `DISCOVERY`, `READY`, `APPROVED`,
+   `BLOCKED`, and `NOT_APPLICABLE`.
+9. An inaccessible required reference, conflicting binding rule, or unresolved
+   protected decision sets the state to `BLOCKED`; do not guess around it.
+10. When design is required, product UI implementation MUST NOT begin until the
+    named approval owner accepts the exact Design System version and its state
+    is `APPROVED`. A material change returns the state to `READY`.
+
+The Project Bootstrap Report MUST include design applicability, source,
+production tool, state, material gaps, and any CEO decision required.
+
 ## Automatic Agent Capability Selection
 
 During first project bootstrap, after technology/architecture discovery and
