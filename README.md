@@ -25,6 +25,7 @@ toss create project-brief.yaml
 - TOSS PM Governance v1.6.0
 - root `CLAUDE.md` with automatic PM startup
 - structured Project Brief context
+- hybrid Design Brief discovery and governed Design System templates
 - Global Agent Catalog
 - project Agent Registry/bootstrap plan
 - GitHub governance workflows
@@ -37,6 +38,52 @@ toss create project-brief.yaml
 ```bash
 toss "Project Name"
 ```
+
+## Design Brief workflow
+
+Known design decisions can be supplied in the Project Brief. Leave unresolved
+values as `AUTO`; during first bootstrap, the PM/Orchestrator asks only for
+the missing decisions and assigns Design System production to an approved
+design specialist.
+
+```yaml
+design:
+  required: true
+  source: company_system
+  company_design_system:
+    name: TOSS Brand System
+    references:
+      - docs/brand-guidelines.md
+    binding_rules:
+      - Preserve approved logo and brand colors
+  production_tool: pencil
+  users_and_accessibility:
+    target_devices: [desktop, mobile]
+    responsive: true
+    accessibility_level: WCAG_2_2_AA
+  deliverables:
+    component_library: true
+    responsive_rules: true
+    key_screens:
+      - Dashboard
+      - Settings
+  approval:
+    owner: CEO
+```
+
+Supported production tools are `figma`, `pencil`, `claude_design`, and
+`code_native`. A verified company design system is the primary source; the
+project system fills gaps without silently overriding binding brand rules.
+
+New projects include:
+
+- `project-management/design/DESIGN_BRIEF.md`
+- `project-management/design/DESIGN_SYSTEM.md`
+
+These repository documents remain canonical for intent, rules, versions, and
+approval. Tool-specific files are referenced production artifacts. When design
+is required, product UI implementation remains locked until the exact Design
+System version is approved.
 
 ## Remote options
 
