@@ -10,7 +10,7 @@ const __dirname = path.dirname(__filename);
 const ROOT = path.resolve(__dirname, "..");
 const TEMPLATE = path.join(ROOT, "templates");
 
-const VERSION = "1.0.0";
+const VERSION = JSON.parse(fs.readFileSync(path.join(ROOT,"package.json"),"utf8")).version;
 const GOVERNANCE_VERSION = "1.6.0";
 
 function die(message, code=1) {
@@ -88,6 +88,24 @@ function nested(data, keys, fallback=null) {
   return cur;
 }
 
+const DESIGN_ENUMS = [
+  [["design","required"],[true,false,"AUTO"]],
+  [["design","source"],["company_system","new_system","AUTO"]],
+  [["design","production_tool"],["figma","pencil","claude_design","code_native","AUTO"]],
+  [["design","users_and_accessibility","responsive"],[true,false,"AUTO"]],
+];
+
+function validateEnum(data, keys, allowed) {
+  let value=data;
+  for (const key of keys) {
+    if (!value || typeof value!=="object" || !(key in value)) return;
+    value=value[key];
+  }
+  if (!allowed.includes(value)) {
+    die(`Project Brief invalid value for ${keys.join(".")}: ${String(value)}. Allowed: ${allowed.join(", ")}`);
+  }
+}
+
 function validateBrief(data) {
   const required=[
     ["project","name"],
@@ -100,6 +118,7 @@ function validateBrief(data) {
     return String(v ?? "").trim()==="";
   }).map(x=>x.join("."));
   if (missing.length) die("Project Brief missing required fields: "+missing.join(", "));
+  for (const [keys,allowed] of DESIGN_ENUMS) validateEnum(data,keys,allowed);
 }
 
 function initBrief(target="project-brief.yaml") {
@@ -214,6 +233,7 @@ function writeBriefContext(dest,data) {
     architecture:data.architecture||{},
     environments:data.environments||[],
     security:data.security||{},
+    design:data.design||{required:"AUTO"},
     delivery:data.delivery||{},
     langsmith:data.langsmith||{},
     constraints:data.constraints||[],
@@ -256,6 +276,8 @@ function createFromConfig(a, briefData=null) {
     [".gitignore",".gitignore"],
     [".env.example",".env.example"],
     ["CLAUDE.md","CLAUDE.md"],
+    ["AGENTS.md","AGENTS.md"],
+    ["SUPERPOWERS.md","SUPERPOWERS.md"],
   ];
   for (const [src,dst] of files) {
     fs.writeFileSync(path.join(dest,dst),render(fs.readFileSync(path.join(TEMPLATE,src),"utf8"),vals),"utf8");
@@ -269,6 +291,10 @@ function createFromConfig(a, briefData=null) {
   fs.copyFileSync(path.join(TEMPLATE,"GLOBAL_AGENT_CATALOG.md"),path.join(dest,"project-management","GLOBAL_AGENT_CATALOG.md"));
   fs.copyFileSync(path.join(TEMPLATE,"AGENT_CAPABILITY_PLAN.md"),path.join(b,"AGENT_CAPABILITY_PLAN.md"));
   fs.copyFileSync(path.join(TEMPLATE,"AGENT_PROPOSAL.md"),path.join(dest,"project-management","templates","AGENT_PROPOSAL.md"));
+  const designDir=path.join(dest,"project-management","design");
+  ensureDir(designDir);
+  fs.copyFileSync(path.join(TEMPLATE,"DESIGN_BRIEF.md"),path.join(designDir,"DESIGN_BRIEF.md"));
+  fs.copyFileSync(path.join(TEMPLATE,"DESIGN_SYSTEM.md"),path.join(designDir,"DESIGN_SYSTEM.md"));
 
   const ruleset=writeRulesetPayload(dest);
 
@@ -300,7 +326,13 @@ function createFromConfig(a, briefData=null) {
   if (briefData) {
     writeBriefContext(dest,briefData);
     applyBriefToState(dest,briefData);
-    updateProjectJson(dest,{project_brief:"LOADED"});
+    const designRequired=nested(briefData,["design","required"],"AUTO");
+    const designState=designRequired===false
+      ? "NOT_APPLICABLE"
+      : designRequired===true
+        ? "DISCOVERY_REQUIRED"
+        : "PENDING";
+    updateProjectJson(dest,{project_brief:"LOADED",design_system:designState});
     const title=nested(briefData,["initial_objective","title"],"");
     const outcome=nested(briefData,["initial_objective","outcome"],"");
     if (String(title).trim() && String(outcome).trim()) {
@@ -321,8 +353,8 @@ function createFromConfig(a, briefData=null) {
   console.log(" GitHub repo:",remote||"not created");
   console.log("\nNext:");
   console.log(`  cd ${slug}`);
-  console.log("  claude");
-  console.log("PM bootstrap starts automatically from CLAUDE.md.");
+  console.log("  start your supported agent host in the project root");
+  console.log("TOSS bootstrap starts from AGENTS.md; Claude Code imports it through CLAUDE.md.");
 }
 
 function parseLegacy(args) {

@@ -17,6 +17,7 @@ The Project Brief is CEO-authored bootstrap input.
 - known platform requirements
 - known technology decisions
 - security/data sensitivity
+- known design decisions and company design-system references
 - constraints
 
 ## AUTO
@@ -26,6 +27,45 @@ discovery.
 
 `AUTO` does not authorize arbitrary scope. If resolving an AUTO field creates
 a genuine A3/product/authority ambiguity, PM escalates it.
+
+## Design
+
+The `design` section supports a hybrid workflow: record known decisions before
+project creation and leave unknown decisions as `AUTO`. During first bootstrap,
+the PM/Orchestrator asks only for missing or `AUTO` values, one question at a
+time, and maintains:
+
+- `project-management/design/DESIGN_BRIEF.md`
+- `project-management/design/DESIGN_SYSTEM.md`
+
+Set `design.required` to:
+
+- `true` when verified project scope requires UI/UX design;
+- `false` when design work is not applicable;
+- `AUTO` when applicability must be reconciled from verified scope.
+
+`design.source` accepts `company_system`, `new_system`, or `AUTO`. When
+`company_system` is selected, verified company design-system and brand rules
+are the primary, binding source. Project decisions may fill gaps but cannot
+silently override those rules. Inaccessible references or conflicting binding
+rules block design discovery until the approval owner resolves them.
+
+`design.production_tool` accepts:
+
+- `figma`
+- `pencil`
+- `claude_design`
+- `code_native`
+- `AUTO`
+
+The production tool creates implementation artifacts; it is not the canonical
+source for intent, governance, or approval. External artifacts are referenced
+from the repository documents.
+
+The PM collects design intent and assigns an approved design specialist. It does
+not create visual designs or implement UI components. When design is required,
+product UI implementation begins only after the named approval owner approves
+the exact Design System version.
 
 ## Initial Objective
 

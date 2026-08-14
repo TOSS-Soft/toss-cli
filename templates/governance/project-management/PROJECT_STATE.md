@@ -80,6 +80,15 @@ State: UNKNOWN
 ### Production
 State: UNKNOWN
 
+## Superpowers State
+
+Requirement: REQUIRED
+Provider: UNKNOWN
+Availability: PENDING_VERIFICATION
+Active Capability: NONE
+Execution State: READY
+Evidence References: NONE
+
 ## LangSmith State
 
 Project: Klinik360

@@ -73,7 +73,7 @@ Within approved governance, the PM MAY:
 
 - capture and maintain Objectives;
 - conduct and delegate discovery;
-- create execution plans;
+- capture governed execution constraints and accept Superpowers plans as evidence;
 - decompose Objectives into Epics and Tasks;
 - manage the GitHub Project;
 - prioritize and sequence work;
@@ -122,11 +122,25 @@ A `FAIL` MUST NOT be represented as `PASS`.
 
 An `UNKNOWN` MUST NOT be represented as `VERIFIED`.
 
+## Superpowers Execution Boundary
+
+The PM owns authorization, orchestration, contracts, state, and evidence
+acceptance. The PM MUST route technical method selection through the canonical
+root `SUPERPOWERS.md` contract.
+
+The PM MUST NOT recreate Superpowers planning, implementation, debugging,
+review, verification, or branch-completion procedures inside TOSS governance.
+
+Before technical assignment, the PM MUST identify the required canonical
+Superpowers capability in the assignment envelope. If that capability is
+unavailable, the Task MUST enter `BLOCKED_SUPERPOWERS_MISSING`; discovery and
+governance records remain valid, but technical execution stops.
+
 ## Operating Loop
 
 For execution requests, the PM SHOULD follow:
 
-`RECEIVE → AUTHENTICATE → HYDRATE → CLASSIFY → CAPTURE OBJECTIVE → DISCOVER → RESOLVE OR ESCALATE AMBIGUITY → BASELINE → PLAN → CREATE OR UPDATE WORK → ASSIGN → MONITOR → REVIEW → VERIFY → DELIVER → OBSERVE → CLOSE → CHECKPOINT`
+`RECEIVE → AUTHENTICATE → HYDRATE → CLASSIFY → CAPTURE OBJECTIVE → DISCOVER → RESOLVE OR ESCALATE AMBIGUITY → FREEZE CONTRACT → ROUTE SUPERPOWERS → ASSIGN → MONITOR EVIDENCE → ACCEPT OR REJECT → DELIVER → OBSERVE → CLOSE → CHECKPOINT`
 
 ## Input Classification
 
@@ -224,6 +238,7 @@ Assignments MUST define:
 - Task ID
 - Contract Revision
 - agent
+- required canonical Superpowers capability
 - workspace or branch when applicable
 - execution authority
 - prohibited actions
@@ -260,6 +275,9 @@ The PM MUST NOT suppress a contradiction because it challenges a previous PM dec
 
 After a failed attempt, the PM MUST diagnose the failure before deciding to retry or reassign.
 
+When the failure trigger matches, the PM MUST require
+`superpowers:systematic-debugging` before retry or reassignment.
+
 After two failures attributable to the same root cause, the PM MUST initiate a Root Cause Review.
 
 The PM MUST NOT issue a third blind retry for the same root cause.
@@ -273,6 +291,10 @@ A specialist may claim completion.
 Only the PM may mark a Task `DONE`.
 
 The PM MUST verify applicable acceptance criteria against sufficient evidence before completion.
+
+The PM MUST require fresh `superpowers:verification-before-completion`
+evidence before marking a Task `DONE`; this evidence does not grant the
+specialist PM completion or release authority.
 
 The canonical evidence progression is:
 
