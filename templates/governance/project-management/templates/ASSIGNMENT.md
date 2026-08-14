@@ -3,6 +3,7 @@
 Task: TASK-XXX  
 Contract Revision: R1  
 Agent: specialist.agent  
+Canonical Superpowers Capability:
 Workspace:  
 Branch:  
 Base:

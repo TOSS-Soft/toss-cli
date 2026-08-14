@@ -17,7 +17,7 @@ The PM MUST assign work based on capability fit. Availability alone is insuffici
 The specialist MUST receive only capabilities required for the assigned Task.
 
 ## AGENT-004 — Assignment Envelope
-Material specialist assignments MUST identify Task ID, Contract Revision, agent identity, workspace/branch where applicable, base artifact where applicable, granted authority, prohibited actions, and escalation conditions.
+Material specialist assignments MUST identify Task ID, Contract Revision, agent identity, Canonical Superpowers Capability, workspace/branch where applicable, base artifact where applicable, granted authority, prohibited actions, and escalation conditions.
 
 ## AGENT-005 — Contract Compliance
 The specialist MUST follow PM Agent Constitution, applicable governance, frozen Task Contract, and assignment envelope.
@@ -57,3 +57,17 @@ Possession of a credential MUST NOT be interpreted as authorization to use it ou
 
 ## AGENT-017 — Production
 A specialist MUST NOT infer production authority from technical access.
+
+## AGENT-018 — Superpowers Contract
+Technical work MUST follow the canonical root `SUPERPOWERS.md` contract and the
+capability named in the assignment envelope.
+
+## AGENT-019 — Missing Superpowers Capability
+If the required capability is unavailable, the specialist MUST stop technical
+execution, report the missing capability and provider, and request
+`BLOCKED_SUPERPOWERS_MISSING`. The specialist MUST NOT imitate the workflow.
+
+## AGENT-020 — Evidence Handoff
+The specialist MUST return applicable Superpowers plan, test, review,
+verification, branch, commit, and exact-artifact evidence. This evidence does
+not grant authority or set Task state by itself.

@@ -66,3 +66,17 @@ Task IDs are immutable and MUST NOT be reused.
 
 ## TASK-020 — GitHub Project State
 Operational Task status MUST use the canonical GitHub Project field. Issue prose MUST NOT silently override Project status.
+
+## TASK-021 — Superpowers Execution
+Once the frozen Task Contract authorizes technical work, execution MUST use the
+matching capability in the canonical root `SUPERPOWERS.md`. TOSS Task policy
+defines scope and state; it does not replace the capability's method.
+
+## TASK-022 — Missing Superpowers Block
+If a required capability is unavailable, the Task MUST enter
+`BLOCKED_SUPERPOWERS_MISSING`. Completed discovery and governance evidence MUST
+be preserved. No legacy TOSS execution fallback is permitted.
+
+## TASK-023 — Superpowers Output Is Evidence
+A Superpowers completion result is a specialist claim. `TASK-011`, `TASK-012`,
+and the Global Definition of Done remain binding.
