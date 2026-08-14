@@ -88,6 +88,24 @@ function nested(data, keys, fallback=null) {
   return cur;
 }
 
+const DESIGN_ENUMS = [
+  [["design","required"],[true,false,"AUTO"]],
+  [["design","source"],["company_system","new_system","AUTO"]],
+  [["design","production_tool"],["figma","pencil","claude_design","code_native","AUTO"]],
+  [["design","users_and_accessibility","responsive"],[true,false,"AUTO"]],
+];
+
+function validateEnum(data, keys, allowed) {
+  let value=data;
+  for (const key of keys) {
+    if (!value || typeof value!=="object" || !(key in value)) return;
+    value=value[key];
+  }
+  if (!allowed.includes(value)) {
+    die(`Project Brief invalid value for ${keys.join(".")}: ${String(value)}. Allowed: ${allowed.join(", ")}`);
+  }
+}
+
 function validateBrief(data) {
   const required=[
     ["project","name"],
@@ -100,6 +118,7 @@ function validateBrief(data) {
     return String(v ?? "").trim()==="";
   }).map(x=>x.join("."));
   if (missing.length) die("Project Brief missing required fields: "+missing.join(", "));
+  for (const [keys,allowed] of DESIGN_ENUMS) validateEnum(data,keys,allowed);
 }
 
 function initBrief(target="project-brief.yaml") {
@@ -214,6 +233,7 @@ function writeBriefContext(dest,data) {
     architecture:data.architecture||{},
     environments:data.environments||[],
     security:data.security||{},
+    design:data.design||{required:"AUTO"},
     delivery:data.delivery||{},
     langsmith:data.langsmith||{},
     constraints:data.constraints||[],

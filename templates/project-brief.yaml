@@ -41,6 +41,39 @@ security:
   personal_data: AUTO
   financial_data: AUTO
 
+design:
+  required: AUTO
+  source: AUTO
+  company_design_system:
+    name: ""
+    references: []
+    binding_rules: []
+  production_tool: AUTO
+  design_direction:
+    personality: []
+    visual_style: ""
+    tone: ""
+    references: []
+    avoid: []
+  users_and_accessibility:
+    target_users: []
+    target_devices: []
+    responsive: AUTO
+    accessibility_level: AUTO
+  deliverables:
+    tokens: true
+    color: true
+    typography: true
+    spacing: true
+    grid: true
+    iconography: AUTO
+    component_library: true
+    responsive_rules: true
+    key_screens: []
+    additional: []
+  approval:
+    owner: CEO
+
 delivery:
   github_owner: toss-software
   visibility: private
