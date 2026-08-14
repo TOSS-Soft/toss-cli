@@ -17,7 +17,7 @@ The PM MUST assign work based on capability fit. Availability alone is insuffici
 The specialist MUST receive only capabilities required for the assigned Task.
 
 ## AGENT-004 — Assignment Envelope
-Material specialist assignments MUST identify Task ID, Contract Revision, agent identity, workspace/branch where applicable, base artifact where applicable, granted authority, prohibited actions, and escalation conditions.
+Material specialist assignments MUST identify Task ID, Contract Revision, agent identity, Canonical Superpowers Capability, workspace/branch where applicable, base artifact where applicable, granted authority, prohibited actions, and escalation conditions.
 
 ## AGENT-005 — Contract Compliance
 The specialist MUST follow PM Agent Constitution, applicable governance, frozen Task Contract, and assignment envelope.

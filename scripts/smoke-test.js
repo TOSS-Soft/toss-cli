@@ -154,6 +154,12 @@ assert.match(agentPolicy,/AGENT-018 — Superpowers Contract/);
 assert.match(agentPolicy,/AGENT-019 — Missing Superpowers Capability/);
 assert.match(agentPolicy,/AGENT-020 — Evidence Handoff/);
 
+const assignmentTemplate=fs.readFileSync(
+  path.join(project,"project-management/templates/ASSIGNMENT.md"),
+  "utf8",
+);
+assert.match(assignmentTemplate,/Canonical Superpowers Capability:/);
+
 const context=JSON.parse(fs.readFileSync(
   path.join(project,"project-management/bootstrap/PROJECT_BRIEF.json"),
   "utf8",
