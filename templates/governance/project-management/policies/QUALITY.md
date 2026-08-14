@@ -72,3 +72,27 @@ Material code changes after review MAY invalidate prior review. Re-review applic
 
 ## QUAL-020 — Validation System Failure
 If a mandatory validation system cannot produce a trustworthy result, the gate MUST remain UNKNOWN or BLOCKED.
+
+## QUAL-021 — Test-Driven Implementation
+Feature and bug-fix implementation MUST use
+`superpowers:test-driven-development`. Resulting tests remain subject to exact
+candidate, applicability, and trustworthiness requirements in this policy.
+
+## QUAL-022 — Systematic Debugging
+Unexpected behavior, test failure, or unexplained validation failure MUST use
+`superpowers:systematic-debugging` before a fix or retry is accepted.
+
+## QUAL-023 — Completion Verification
+A completion claim MUST include fresh evidence produced under
+`superpowers:verification-before-completion`. The PM still determines whether
+the governed gate is VERIFIED.
+
+## QUAL-024 — Code Review Workflow
+Work ready for review MUST use `superpowers:requesting-code-review`; received
+review feedback MUST use `superpowers:receiving-code-review`. Finding severity,
+lifecycle, waiver, and re-review rules remain governed by this policy.
+
+## QUAL-025 — Superpowers Availability
+If a required quality capability cannot run or cannot produce trustworthy
+evidence, the corresponding gate remains UNKNOWN or BLOCKED and the Task uses
+`BLOCKED_SUPERPOWERS_MISSING` when the capability itself is absent.

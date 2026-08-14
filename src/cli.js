@@ -276,6 +276,8 @@ function createFromConfig(a, briefData=null) {
     [".gitignore",".gitignore"],
     [".env.example",".env.example"],
     ["CLAUDE.md","CLAUDE.md"],
+    ["AGENTS.md","AGENTS.md"],
+    ["SUPERPOWERS.md","SUPERPOWERS.md"],
   ];
   for (const [src,dst] of files) {
     fs.writeFileSync(path.join(dest,dst),render(fs.readFileSync(path.join(TEMPLATE,src),"utf8"),vals),"utf8");
@@ -351,8 +353,8 @@ function createFromConfig(a, briefData=null) {
   console.log(" GitHub repo:",remote||"not created");
   console.log("\nNext:");
   console.log(`  cd ${slug}`);
-  console.log("  claude");
-  console.log("PM bootstrap starts automatically from CLAUDE.md.");
+  console.log("  start your supported agent host in the project root");
+  console.log("TOSS bootstrap starts from AGENTS.md; Claude Code imports it through CLAUDE.md.");
 }
 
 function parseLegacy(args) {

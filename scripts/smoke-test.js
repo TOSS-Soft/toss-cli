@@ -66,6 +66,8 @@ assertSuccess(result,"toss create with design");
 const project=path.join(tmp,"design-smoke-project");
 for (const rel of [
   "CLAUDE.md",
+  "AGENTS.md",
+  "SUPERPOWERS.md",
   "project.json",
   "project-management/PM_AGENT.md",
   "project-management/bootstrap/PROJECT_BRIEF.json",
@@ -76,8 +78,118 @@ for (const rel of [
   assert.ok(fs.existsSync(path.join(project,rel)),`Missing ${rel}`);
 }
 
+const claudeBridge=fs.readFileSync(path.join(project,"CLAUDE.md"),"utf8");
+assert.equal(claudeBridge,"@AGENTS.md\n");
+
+const agentsBootstrap=fs.readFileSync(path.join(project,"AGENTS.md"),"utf8");
+assert.match(agentsBootstrap,/SUPERPOWERS\.md/);
+assert.match(agentsBootstrap,/project-management\/PM_AGENT\.md/);
+assert.match(agentsBootstrap,/BLOCKED_SUPERPOWERS_MISSING/);
+
+const superpowersContract=fs.readFileSync(path.join(project,"SUPERPOWERS.md"),"utf8");
+for (const capability of [
+  "superpowers:brainstorming",
+  "superpowers:using-superpowers",
+  "superpowers:writing-plans",
+  "superpowers:using-git-worktrees",
+  "superpowers:test-driven-development",
+  "superpowers:systematic-debugging",
+  "superpowers:subagent-driven-development",
+  "superpowers:executing-plans",
+  "superpowers:verification-before-completion",
+  "superpowers:requesting-code-review",
+  "superpowers:receiving-code-review",
+  "superpowers:finishing-a-development-branch",
+  "superpowers:writing-skills",
+]) {
+  assert.match(superpowersContract,new RegExp(capability.replaceAll("-","\\-")));
+}
+assert.match(superpowersContract,/no TOSS execution fallback/i);
+assert.doesNotMatch(superpowersContract,/\$superpowers|\/superpowers/);
+
+const generatedReadme=fs.readFileSync(path.join(project,"README.md"),"utf8");
+assert.match(generatedReadme,/Superpowers: REQUIRED/);
+assert.match(generatedReadme,/AGENTS\.md/);
+assert.doesNotMatch(generatedReadme,/Start Claude Code/);
+
+const packageMetadata=JSON.parse(fs.readFileSync(path.join(root,"package.json"),"utf8"));
+assert.equal(packageMetadata.version,packageVersion);
+assert.ok(packageMetadata.keywords.includes("superpowers"));
+assert.ok(packageMetadata.keywords.includes("agent-governance"));
+
 const projectState=JSON.parse(fs.readFileSync(path.join(project,"project.json"),"utf8"));
 assert.equal(projectState.bootstrap_state.design_system,"DISCOVERY_REQUIRED");
+assert.deepEqual(projectState.superpowers,{
+  requirement:"REQUIRED",
+  provider:"UNKNOWN",
+  availability:"PENDING_VERIFICATION",
+  active_capability:"NONE",
+  execution_state:"READY",
+  evidence_references:{
+    plan:[],
+    tests:[],
+    reviews:[],
+    verification:[],
+    branches:[],
+    commits:[],
+  },
+});
+
+const canonicalState=fs.readFileSync(
+  path.join(project,"project-management/PROJECT_STATE.md"),
+  "utf8",
+);
+assert.match(canonicalState,/## Superpowers State/);
+assert.match(canonicalState,/Availability: PENDING_VERIFICATION/);
+assert.match(canonicalState,/Execution State: READY/);
+
+const pmConstitution=fs.readFileSync(
+  path.join(project,"project-management/PM_AGENT.md"),
+  "utf8",
+);
+for (const phrase of [
+  "Superpowers Execution Boundary",
+  "ROUTE SUPERPOWERS",
+  "verification-before-completion",
+  "BLOCKED_SUPERPOWERS_MISSING",
+]) {
+  assert.match(pmConstitution,new RegExp(phrase));
+}
+
+const agentPolicy=fs.readFileSync(
+  path.join(project,"project-management/policies/AGENTS.md"),
+  "utf8",
+);
+assert.match(agentPolicy,/AGENT-018 — Superpowers Contract/);
+assert.match(agentPolicy,/AGENT-019 — Missing Superpowers Capability/);
+assert.match(agentPolicy,/AGENT-020 — Evidence Handoff/);
+
+const taskPolicy=fs.readFileSync(
+  path.join(project,"project-management/policies/TASKS.md"),"utf8",
+);
+assert.match(taskPolicy,/TASK-021 — Superpowers Execution/);
+assert.match(taskPolicy,/TASK-022 — Missing Superpowers Block/);
+
+const qualityPolicy=fs.readFileSync(
+  path.join(project,"project-management/policies/QUALITY.md"),"utf8",
+);
+assert.match(qualityPolicy,/QUAL-021 — Test-Driven Implementation/);
+assert.match(qualityPolicy,/QUAL-022 — Systematic Debugging/);
+assert.match(qualityPolicy,/QUAL-023 — Completion Verification/);
+assert.match(qualityPolicy,/QUAL-024 — Code Review Workflow/);
+
+const releasePolicy=fs.readFileSync(
+  path.join(project,"project-management/policies/RELEASES.md"),"utf8",
+);
+assert.match(releasePolicy,/REL-051 — Development Branch Completion/);
+assert.match(releasePolicy,/finishing-a-development-branch/);
+assert.match(releasePolicy,/MUST NOT grant merge, release, deployment, rollout, or production authority/);
+
+const assignmentTemplate=fs.readFileSync(
+  path.join(project,"project-management/templates/ASSIGNMENT.md"),
+  "utf8",
+);
+assert.match(assignmentTemplate,/Canonical Superpowers Capability:/);
 
 const context=JSON.parse(fs.readFileSync(
   path.join(project,"project-management/bootstrap/PROJECT_BRIEF.json"),
