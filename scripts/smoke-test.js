@@ -8,7 +8,13 @@ import YAML from "yaml";
 const root=path.resolve(".");
 const cli=path.join(root,"bin","toss.js");
 const tmp=fs.mkdtempSync(path.join(os.tmpdir(),"toss-cli-"));
-const packageVersion=JSON.parse(fs.readFileSync(path.join(root,"package.json"),"utf8")).version;
+const releasePackageMetadata=JSON.parse(
+  fs.readFileSync(path.join(root,"package.json"),"utf8"),
+);
+const lockMetadata=JSON.parse(
+  fs.readFileSync(path.join(root,"package-lock.json"),"utf8"),
+);
+const packageVersion=releasePackageMetadata.version;
 
 function runCli(args,options={}) {
   return spawnSync(process.execPath,[cli,...args],{
@@ -37,6 +43,14 @@ function completeBrief(data,{name,slug}={}) {
 function writeYaml(file,data) {
   fs.writeFileSync(file,YAML.stringify(data),"utf8");
 }
+
+assert.equal(releasePackageMetadata.name,"@toss-software/cli");
+assert.equal(releasePackageMetadata.bin?.toss,"bin/toss.js");
+assert.equal(lockMetadata.name,releasePackageMetadata.name);
+assert.equal(lockMetadata.version,releasePackageMetadata.version);
+assert.equal(lockMetadata.packages[""].name,releasePackageMetadata.name);
+assert.equal(lockMetadata.packages[""].version,releasePackageMetadata.version);
+assert.deepEqual(lockMetadata.packages[""].bin,releasePackageMetadata.bin);
 
 let result=runCli(["--version"]);
 assertSuccess(result,"toss --version");
