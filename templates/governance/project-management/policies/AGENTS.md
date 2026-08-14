@@ -57,3 +57,17 @@ Possession of a credential MUST NOT be interpreted as authorization to use it ou
 
 ## AGENT-017 — Production
 A specialist MUST NOT infer production authority from technical access.
+
+## AGENT-018 — Superpowers Contract
+Technical work MUST follow the canonical root `SUPERPOWERS.md` contract and the
+capability named in the assignment envelope.
+
+## AGENT-019 — Missing Superpowers Capability
+If the required capability is unavailable, the specialist MUST stop technical
+execution, report the missing capability and provider, and request
+`BLOCKED_SUPERPOWERS_MISSING`. The specialist MUST NOT imitate the workflow.
+
+## AGENT-020 — Evidence Handoff
+The specialist MUST return applicable Superpowers plan, test, review,
+verification, branch, commit, and exact-artifact evidence. This evidence does
+not grant authority or set Task state by itself.

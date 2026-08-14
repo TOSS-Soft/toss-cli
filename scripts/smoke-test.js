@@ -133,6 +133,27 @@ assert.match(canonicalState,/## Superpowers State/);
 assert.match(canonicalState,/Availability: PENDING_VERIFICATION/);
 assert.match(canonicalState,/Execution State: READY/);
 
+const pmConstitution=fs.readFileSync(
+  path.join(project,"project-management/PM_AGENT.md"),
+  "utf8",
+);
+for (const phrase of [
+  "Superpowers Execution Boundary",
+  "ROUTE SUPERPOWERS",
+  "verification-before-completion",
+  "BLOCKED_SUPERPOWERS_MISSING",
+]) {
+  assert.match(pmConstitution,new RegExp(phrase));
+}
+
+const agentPolicy=fs.readFileSync(
+  path.join(project,"project-management/policies/AGENTS.md"),
+  "utf8",
+);
+assert.match(agentPolicy,/AGENT-018 — Superpowers Contract/);
+assert.match(agentPolicy,/AGENT-019 — Missing Superpowers Capability/);
+assert.match(agentPolicy,/AGENT-020 — Evidence Handoff/);
+
 const context=JSON.parse(fs.readFileSync(
   path.join(project,"project-management/bootstrap/PROJECT_BRIEF.json"),
   "utf8",
