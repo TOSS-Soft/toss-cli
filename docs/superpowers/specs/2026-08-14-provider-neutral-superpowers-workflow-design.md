@@ -1,7 +1,7 @@
 # Provider-Neutral Superpowers Workflow Design
 
-**Status:** APPROVED FOR PLANNING  
-**Date:** 2026-08-14  
+**Status:** APPROVED FOR PLANNING
+**Date:** 2026-08-14
 **Target:** TOSS CLI after v1.1.0
 
 ## Purpose

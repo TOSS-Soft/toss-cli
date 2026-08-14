@@ -193,4 +193,3 @@ delegated PM authority.
 
 Escalate only genuine A3 decisions, protected approvals, material risk
 acceptance, or governance authority requirements.
-
