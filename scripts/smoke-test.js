@@ -65,9 +65,14 @@ for (const rel of [
   "project-management/PM_AGENT.md",
   "project-management/bootstrap/PROJECT_BRIEF.json",
   "project-management/GLOBAL_AGENT_CATALOG.json",
+  "project-management/design/DESIGN_BRIEF.md",
+  "project-management/design/DESIGN_SYSTEM.md",
 ]) {
   assert.ok(fs.existsSync(path.join(project,rel)),`Missing ${rel}`);
 }
+
+const projectState=JSON.parse(fs.readFileSync(path.join(project,"project.json"),"utf8"));
+assert.equal(projectState.bootstrap_state.design_system,"DISCOVERY_REQUIRED");
 
 const context=JSON.parse(fs.readFileSync(
   path.join(project,"project-management/bootstrap/PROJECT_BRIEF.json"),
@@ -106,5 +111,29 @@ const legacyContext=JSON.parse(fs.readFileSync(
   "utf8",
 ));
 assert.deepEqual(legacyContext.design,{required:"AUTO"});
+const legacyState=JSON.parse(fs.readFileSync(
+  path.join(tmp,"legacy-smoke-project/project.json"),
+  "utf8",
+));
+assert.equal(legacyState.bootstrap_state.design_system,"PENDING");
+
+const noDesignBrief=path.join(tmp,"no-design-project-brief.yaml");
+const noDesign=completeBrief(structuredClone(explicit),{
+  name:"No Design Smoke Project",
+  slug:"no-design-smoke-project",
+});
+noDesign.design.required=false;
+writeYaml(noDesignBrief,noDesign);
+
+result=runCli(["create",noDesignBrief],{cwd:tmp});
+assertSuccess(result,"toss create without design requirement");
+const noDesignProject=path.join(tmp,"no-design-smoke-project");
+const noDesignState=JSON.parse(fs.readFileSync(
+  path.join(noDesignProject,"project.json"),
+  "utf8",
+));
+assert.equal(noDesignState.bootstrap_state.design_system,"NOT_APPLICABLE");
+assert.ok(fs.existsSync(path.join(noDesignProject,"project-management/design/DESIGN_BRIEF.md")));
+assert.ok(fs.existsSync(path.join(noDesignProject,"project-management/design/DESIGN_SYSTEM.md")));
 
 console.log("TOSS CLI smoke test: PASS");

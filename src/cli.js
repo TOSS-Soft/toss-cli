@@ -289,6 +289,10 @@ function createFromConfig(a, briefData=null) {
   fs.copyFileSync(path.join(TEMPLATE,"GLOBAL_AGENT_CATALOG.md"),path.join(dest,"project-management","GLOBAL_AGENT_CATALOG.md"));
   fs.copyFileSync(path.join(TEMPLATE,"AGENT_CAPABILITY_PLAN.md"),path.join(b,"AGENT_CAPABILITY_PLAN.md"));
   fs.copyFileSync(path.join(TEMPLATE,"AGENT_PROPOSAL.md"),path.join(dest,"project-management","templates","AGENT_PROPOSAL.md"));
+  const designDir=path.join(dest,"project-management","design");
+  ensureDir(designDir);
+  fs.copyFileSync(path.join(TEMPLATE,"DESIGN_BRIEF.md"),path.join(designDir,"DESIGN_BRIEF.md"));
+  fs.copyFileSync(path.join(TEMPLATE,"DESIGN_SYSTEM.md"),path.join(designDir,"DESIGN_SYSTEM.md"));
 
   const ruleset=writeRulesetPayload(dest);
 
@@ -320,7 +324,13 @@ function createFromConfig(a, briefData=null) {
   if (briefData) {
     writeBriefContext(dest,briefData);
     applyBriefToState(dest,briefData);
-    updateProjectJson(dest,{project_brief:"LOADED"});
+    const designRequired=nested(briefData,["design","required"],"AUTO");
+    const designState=designRequired===false
+      ? "NOT_APPLICABLE"
+      : designRequired===true
+        ? "DISCOVERY_REQUIRED"
+        : "PENDING";
+    updateProjectJson(dest,{project_brief:"LOADED",design_system:designState});
     const title=nested(briefData,["initial_objective","title"],"");
     const outcome=nested(briefData,["initial_objective","outcome"],"");
     if (String(title).trim() && String(outcome).trim()) {
