@@ -10,7 +10,7 @@ const __dirname = path.dirname(__filename);
 const ROOT = path.resolve(__dirname, "..");
 const TEMPLATE = path.join(ROOT, "templates");
 
-const VERSION = "1.0.0";
+const VERSION = JSON.parse(fs.readFileSync(path.join(ROOT,"package.json"),"utf8")).version;
 const GOVERNANCE_VERSION = "1.6.0";
 
 function die(message, code=1) {

@@ -8,6 +8,7 @@ import YAML from "yaml";
 const root=path.resolve(".");
 const cli=path.join(root,"bin","toss.js");
 const tmp=fs.mkdtempSync(path.join(os.tmpdir(),"toss-cli-"));
+const packageVersion=JSON.parse(fs.readFileSync(path.join(root,"package.json"),"utf8")).version;
 
 function runCli(args,options={}) {
   return spawnSync(process.execPath,[cli,...args],{
@@ -37,8 +38,12 @@ function writeYaml(file,data) {
   fs.writeFileSync(file,YAML.stringify(data),"utf8");
 }
 
+let result=runCli(["--version"]);
+assertSuccess(result,"toss --version");
+assert.equal(result.stdout.trim(),packageVersion);
+
 const brief=path.join(tmp,"project-brief.yaml");
-let result=runCli(["init",brief]);
+result=runCli(["init",brief]);
 assertSuccess(result,"toss init");
 
 const initialized=YAML.parse(fs.readFileSync(brief,"utf8"));
