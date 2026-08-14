@@ -65,6 +65,7 @@ technical work is performed and how its evidence is produced.
 
 | Trigger | Required Superpowers capability |
 | --- | --- |
+| Start of an agent session or skill-routing decision | `superpowers:using-superpowers` |
 | New feature, creative work, or behavior change | `superpowers:brainstorming` |
 | Approved design requiring an implementation plan | `superpowers:writing-plans` |
 | Implementation workspace setup | `superpowers:using-git-worktrees` |
