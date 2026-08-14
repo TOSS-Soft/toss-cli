@@ -107,6 +107,16 @@ for (const capability of [
 assert.match(superpowersContract,/no TOSS execution fallback/i);
 assert.doesNotMatch(superpowersContract,/\$superpowers|\/superpowers/);
 
+const generatedReadme=fs.readFileSync(path.join(project,"README.md"),"utf8");
+assert.match(generatedReadme,/Superpowers: REQUIRED/);
+assert.match(generatedReadme,/AGENTS\.md/);
+assert.doesNotMatch(generatedReadme,/Start Claude Code/);
+
+const packageMetadata=JSON.parse(fs.readFileSync(path.join(root,"package.json"),"utf8"));
+assert.equal(packageMetadata.version,packageVersion);
+assert.ok(packageMetadata.keywords.includes("superpowers"));
+assert.ok(packageMetadata.keywords.includes("agent-governance"));
+
 const projectState=JSON.parse(fs.readFileSync(path.join(project,"project.json"),"utf8"));
 assert.equal(projectState.bootstrap_state.design_system,"DISCOVERY_REQUIRED");
 assert.deepEqual(projectState.superpowers,{

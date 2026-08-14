@@ -23,7 +23,9 @@ toss create project-brief.yaml
 ## What it creates
 
 - TOSS PM Governance v1.6.0
-- root `CLAUDE.md` with automatic PM startup
+- root `AGENTS.md` shared agent bootstrap
+- root `CLAUDE.md` `@AGENTS.md` compatibility bridge for Claude Code
+- root `SUPERPOWERS.md` technical execution capability contract
 - structured Project Brief context
 - hybrid Design Brief discovery and governed Design System templates
 - Global Agent Catalog
@@ -32,6 +34,22 @@ toss create project-brief.yaml
 - trusted evaluator integration
 - LangSmith configuration context
 - main ruleset payload
+
+## Agent startup
+
+Start a supported agent host in the repository root. Generated `AGENTS.md`
+provides the shared bootstrap, `CLAUDE.md` is only an `@AGENTS.md`
+compatibility bridge, and `SUPERPOWERS.md` defines the required technical
+execution workflow.
+
+## Required Superpowers capability
+
+Generated projects require Superpowers for technical planning, implementation,
+debugging, review, verification, and development-branch completion. TOSS does
+not install provider plugins automatically and does not fall back to its former
+development method. If the active provider cannot invoke a required capability,
+technical execution enters `BLOCKED_SUPERPOWERS_MISSING`; project discovery and
+governance work may continue.
 
 ## Fast scaffold
 

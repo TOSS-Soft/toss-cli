@@ -40,7 +40,8 @@
     "cli",
     "project-bootstrap",
     "governance",
-    "claude-code",
+    "agent-governance",
+    "superpowers",
     "langsmith"
   ]
 }
