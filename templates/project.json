@@ -16,6 +16,21 @@
     "trusted_evaluator_check": "governance-certification",
     "global_agent_catalog": "project-management/GLOBAL_AGENT_CATALOG.json"
   },
+  "superpowers": {
+    "requirement": "REQUIRED",
+    "provider": "UNKNOWN",
+    "availability": "PENDING_VERIFICATION",
+    "active_capability": "NONE",
+    "execution_state": "READY",
+    "evidence_references": {
+      "plan": [],
+      "tests": [],
+      "reviews": [],
+      "verification": [],
+      "branches": [],
+      "commits": []
+    }
+  },
   "langsmith": {
     "enabled": true,
     "project": "{{LANGSMITH_PROJECT}}",

@@ -66,6 +66,8 @@ assertSuccess(result,"toss create with design");
 const project=path.join(tmp,"design-smoke-project");
 for (const rel of [
   "CLAUDE.md",
+  "AGENTS.md",
+  "SUPERPOWERS.md",
   "project.json",
   "project-management/PM_AGENT.md",
   "project-management/bootstrap/PROJECT_BRIEF.json",
@@ -76,8 +78,60 @@ for (const rel of [
   assert.ok(fs.existsSync(path.join(project,rel)),`Missing ${rel}`);
 }
 
+const claudeBridge=fs.readFileSync(path.join(project,"CLAUDE.md"),"utf8");
+assert.equal(claudeBridge,"@AGENTS.md\n");
+
+const agentsBootstrap=fs.readFileSync(path.join(project,"AGENTS.md"),"utf8");
+assert.match(agentsBootstrap,/SUPERPOWERS\.md/);
+assert.match(agentsBootstrap,/project-management\/PM_AGENT\.md/);
+assert.match(agentsBootstrap,/BLOCKED_SUPERPOWERS_MISSING/);
+
+const superpowersContract=fs.readFileSync(path.join(project,"SUPERPOWERS.md"),"utf8");
+for (const capability of [
+  "superpowers:brainstorming",
+  "superpowers:using-superpowers",
+  "superpowers:writing-plans",
+  "superpowers:using-git-worktrees",
+  "superpowers:test-driven-development",
+  "superpowers:systematic-debugging",
+  "superpowers:subagent-driven-development",
+  "superpowers:executing-plans",
+  "superpowers:verification-before-completion",
+  "superpowers:requesting-code-review",
+  "superpowers:receiving-code-review",
+  "superpowers:finishing-a-development-branch",
+  "superpowers:writing-skills",
+]) {
+  assert.match(superpowersContract,new RegExp(capability.replaceAll("-","\\-")));
+}
+assert.match(superpowersContract,/no TOSS execution fallback/i);
+assert.doesNotMatch(superpowersContract,/\$superpowers|\/superpowers/);
+
 const projectState=JSON.parse(fs.readFileSync(path.join(project,"project.json"),"utf8"));
 assert.equal(projectState.bootstrap_state.design_system,"DISCOVERY_REQUIRED");
+assert.deepEqual(projectState.superpowers,{
+  requirement:"REQUIRED",
+  provider:"UNKNOWN",
+  availability:"PENDING_VERIFICATION",
+  active_capability:"NONE",
+  execution_state:"READY",
+  evidence_references:{
+    plan:[],
+    tests:[],
+    reviews:[],
+    verification:[],
+    branches:[],
+    commits:[],
+  },
+});
+
+const canonicalState=fs.readFileSync(
+  path.join(project,"project-management/PROJECT_STATE.md"),
+  "utf8",
+);
+assert.match(canonicalState,/## Superpowers State/);
+assert.match(canonicalState,/Availability: PENDING_VERIFICATION/);
+assert.match(canonicalState,/Execution State: READY/);
 
 const context=JSON.parse(fs.readFileSync(
   path.join(project,"project-management/bootstrap/PROJECT_BRIEF.json"),
