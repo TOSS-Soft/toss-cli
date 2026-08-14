@@ -207,9 +207,23 @@ the existing `templates/CLAUDE.md`. Preserve these behaviors:
 - Global Agent Catalog selection;
 - concise CEO communication.
 
+Convert the four leading Claude-specific `@path` imports into this
+provider-neutral source list; `AGENTS.md` MUST NOT use `@path` import syntax:
+
+```markdown
+## Required Governance Sources
+
+Read these files before the relevant governance or execution work:
+
+- `project-management/PM_AGENT.md`
+- `project-management/GOVERNANCE.md`
+- `project-management/PROJECT_STATE.md`
+- `project-management/AGENT_REGISTRY.md`
+```
+
 Change the title to `# TOSS Provider-Neutral Agent Bootstrap`, replace
 Claude-specific session wording with `agent session`, and add this section after
-the four canonical governance references:
+the required governance source list:
 
 ```markdown
 ## Required Technical Execution Contract
