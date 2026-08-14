@@ -156,3 +156,12 @@ During qualifying incident, PM MAY coordinate previously verified safe rollback 
 
 ## REL-050 — Release Provenance
 PM MUST be able to establish `Production → REL → Artifact → Build → Main SHA → PR → Task → Objective`.
+
+## REL-051 — Development Branch Completion
+After required technical verification and review, development-branch conclusion
+MUST use `superpowers:finishing-a-development-branch`.
+
+Its output MAY propose merge, pull request, retention, or cleanup actions. It
+MUST NOT grant merge, release, deployment, rollout, or production authority.
+All existing TOSS approval, exact-artifact, manifest, and production gates
+remain binding.

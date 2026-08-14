@@ -154,6 +154,27 @@ assert.match(agentPolicy,/AGENT-018 — Superpowers Contract/);
 assert.match(agentPolicy,/AGENT-019 — Missing Superpowers Capability/);
 assert.match(agentPolicy,/AGENT-020 — Evidence Handoff/);
 
+const taskPolicy=fs.readFileSync(
+  path.join(project,"project-management/policies/TASKS.md"),"utf8",
+);
+assert.match(taskPolicy,/TASK-021 — Superpowers Execution/);
+assert.match(taskPolicy,/TASK-022 — Missing Superpowers Block/);
+
+const qualityPolicy=fs.readFileSync(
+  path.join(project,"project-management/policies/QUALITY.md"),"utf8",
+);
+assert.match(qualityPolicy,/QUAL-021 — Test-Driven Implementation/);
+assert.match(qualityPolicy,/QUAL-022 — Systematic Debugging/);
+assert.match(qualityPolicy,/QUAL-023 — Completion Verification/);
+assert.match(qualityPolicy,/QUAL-024 — Code Review Workflow/);
+
+const releasePolicy=fs.readFileSync(
+  path.join(project,"project-management/policies/RELEASES.md"),"utf8",
+);
+assert.match(releasePolicy,/REL-051 — Development Branch Completion/);
+assert.match(releasePolicy,/finishing-a-development-branch/);
+assert.match(releasePolicy,/MUST NOT grant merge, release, deployment, rollout, or production authority/);
+
 const assignmentTemplate=fs.readFileSync(
   path.join(project,"project-management/templates/ASSIGNMENT.md"),
   "utf8",
