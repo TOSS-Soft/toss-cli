@@ -48,6 +48,8 @@ failed `v1.2.0` tag will remain immutable and will not be moved or reused.
 - `package-lock.json`: root package name, patch version, and executable path.
 - `README.md`: package heading, installation, scope authorization, and release
   flow examples.
+- `REPOSITORY_SETUP.md`: operator-facing package and installation guidance.
+- `src/cli.js`: `toss --help` global-install guidance.
 - `scripts/smoke-test.js`: package-publication contract assertions.
 
 ## Test Strategy
@@ -58,6 +60,8 @@ consumer-visible package contract:
 - package name is exactly `@toss-software/cli`;
 - the `toss` executable maps to exactly `bin/toss.js`;
 - lockfile root metadata matches `package.json` for name, version, and bin.
+- `toss --help` recommends `@toss-software/cli` and does not mention the
+  obsolete `@toss/cli` identity.
 
 After the minimal metadata and documentation changes, the full smoke test and
 `npm pack --dry-run` must pass. The generated tarball inspection must identify

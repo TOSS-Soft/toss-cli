@@ -35,12 +35,12 @@ It enforces:
 
 Package:
 
-`@toss/cli`
+`@toss-software/cli`
 
 Installation after publication:
 
 ```bash
-npm install -g @toss/cli
+npm install -g @toss-software/cli
 ```
 
 ## npm Trusted Publisher

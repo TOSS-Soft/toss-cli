@@ -56,6 +56,11 @@ let result=runCli(["--version"]);
 assertSuccess(result,"toss --version");
 assert.equal(result.stdout.trim(),packageVersion);
 
+result=runCli(["--help"]);
+assertSuccess(result,"toss --help");
+assert.match(result.stdout,/npm install -g @toss-software\/cli/);
+assert.doesNotMatch(result.stdout,/npm install -g @toss\/cli/);
+
 const brief=path.join(tmp,"project-brief.yaml");
 result=runCli(["init",brief]);
 assertSuccess(result,"toss init");

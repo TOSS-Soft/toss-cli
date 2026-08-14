@@ -27,36 +27,48 @@
 - Modify: `package.json`
 - Modify: `package-lock.json`
 - Modify: `README.md`
+- Modify: `REPOSITORY_SETUP.md`
+- Modify: `src/cli.js`
 - Test: `scripts/smoke-test.js`
 
 **Interfaces:**
 - Consumes: npm package metadata from `package.json` and the root package entry at `package-lock.json.packages[""]`.
-- Produces: the published package `@toss-software/cli@1.2.1` with executable mapping `{ "toss": "bin/toss.js" }` and matching install documentation.
+- Produces: the published package `@toss-software/cli@1.2.1` with executable mapping `{ "toss": "bin/toss.js" }`, matching install documentation, and correct `toss --help` guidance.
 
 - [ ] **Step 1: Write the failing package-contract assertions**
 
 Replace the existing single `packageVersion` read in `scripts/smoke-test.js` with independently parsed package and lock metadata:
 
 ```js
-const packageMetadata=JSON.parse(
+const releasePackageMetadata=JSON.parse(
   fs.readFileSync(path.join(root,"package.json"),"utf8"),
 );
 const lockMetadata=JSON.parse(
   fs.readFileSync(path.join(root,"package-lock.json"),"utf8"),
 );
-const packageVersion=packageMetadata.version;
+const packageVersion=releasePackageMetadata.version;
 ```
 
 Before the first CLI invocation, add the consumer-visible publication contract:
 
 ```js
-assert.equal(packageMetadata.name,"@toss-software/cli");
-assert.equal(packageMetadata.bin?.toss,"bin/toss.js");
-assert.equal(lockMetadata.name,packageMetadata.name);
-assert.equal(lockMetadata.version,packageMetadata.version);
-assert.equal(lockMetadata.packages[""].name,packageMetadata.name);
-assert.equal(lockMetadata.packages[""].version,packageMetadata.version);
-assert.deepEqual(lockMetadata.packages[""].bin,packageMetadata.bin);
+assert.equal(releasePackageMetadata.name,"@toss-software/cli");
+assert.equal(releasePackageMetadata.bin?.toss,"bin/toss.js");
+assert.equal(lockMetadata.name,releasePackageMetadata.name);
+assert.equal(lockMetadata.version,releasePackageMetadata.version);
+assert.equal(lockMetadata.packages[""].name,releasePackageMetadata.name);
+assert.equal(lockMetadata.packages[""].version,releasePackageMetadata.version);
+assert.deepEqual(lockMetadata.packages[""].bin,releasePackageMetadata.bin);
+```
+
+After the existing `toss --version` assertions, add the user-visible help
+contract:
+
+```js
+result=runCli(["--help"]);
+assertSuccess(result,"toss --help");
+assert.match(result.stdout,/npm install -g @toss-software\/cli/);
+assert.doesNotMatch(result.stdout,/npm install -g @toss\/cli/);
 ```
 
 These assertions catch a package-scope mismatch, an npm-invalid executable
@@ -74,9 +86,12 @@ unlink node_modules
 exit $status
 ```
 
-Expected: FAIL at the package-name assertion because the actual value is
-`@toss/cli` and the expected value is `@toss-software/cli`. This proves the
-test reproduces the observed publishing mismatch before the fix.
+For the initial package-contract cycle, expected: FAIL at the package-name
+assertion because the actual value is `@toss/cli` and the expected value is
+`@toss-software/cli`. After package metadata is corrected but before help text
+is changed, expected: FAIL because `toss --help` still prints
+`npm install -g @toss/cli`. These failures reproduce both active identity
+mismatches before their respective fixes.
 
 - [ ] **Step 3: Apply the minimal package metadata fix**
 
@@ -112,7 +127,13 @@ Set the matching root metadata in `package-lock.json`:
 
 Do not change dependencies, scripts, workflow files, or generated templates.
 
-- [ ] **Step 4: Align public documentation**
+- [ ] **Step 4: Align CLI and public documentation**
+
+Update the `Global package` command emitted by `help()` in `src/cli.js`:
+
+```text
+npm install -g @toss-software/cli
+```
 
 Update only these npm identity references in `README.md`:
 
@@ -125,6 +146,9 @@ Publishing requires authorization for the npm `@toss-software` scope.
 
 PR → main → SemVer version/tag → GitHub Actions → npm @toss-software/cli
 ```
+
+Update `REPOSITORY_SETUP.md` so both its package value and installation command
+use `@toss-software/cli`.
 
 - [ ] **Step 5: Run the smoke test to verify GREEN**
 
@@ -165,16 +189,16 @@ removed.
 ```bash
 git diff --check
 git status -sb
-git diff -- package.json package-lock.json README.md scripts/smoke-test.js
+git diff -- package.json package-lock.json README.md REPOSITORY_SETUP.md src/cli.js scripts/smoke-test.js
 ```
 
-Expected: no whitespace errors and no production files outside the four
+Expected: no whitespace errors and no production files outside the six
 approved paths.
 
 - [ ] **Step 8: Commit the tested fix**
 
 ```bash
-git add package.json package-lock.json README.md scripts/smoke-test.js
+git add package.json package-lock.json README.md REPOSITORY_SETUP.md src/cli.js scripts/smoke-test.js
 git commit -m "fix: align npm package publication"
 ```
 
