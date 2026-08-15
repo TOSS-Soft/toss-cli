@@ -397,7 +397,7 @@ Recommended:
   toss create project-brief.yaml
 
 Global package:
-  npm install -g @toss/cli
+  npm install -g @toss-software/cli
 `);
 }
 

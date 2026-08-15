@@ -1,11 +1,11 @@
-# @toss/cli
+# @toss-software/cli
 
 Global TOSS project bootstrap CLI.
 
 ## Install
 
 ```bash
-npm install -g @toss/cli
+npm install -g @toss-software/cli
 ```
 
 Then:
@@ -140,7 +140,7 @@ The package also sets:
 }
 ```
 
-Publishing requires authorization for the npm `@toss` scope.
+Publishing requires authorization for the npm `@toss-software` scope.
 
 ## Security
 
@@ -159,7 +159,7 @@ The GitHub repository is the version source of truth.
 Release model:
 
 ```text
-PR → main → SemVer version/tag → GitHub Actions → npm @toss/cli
+PR → main → SemVer version/tag → GitHub Actions → npm @toss-software/cli
 ```
 
 npm publication uses GitHub Actions Trusted Publishing/OIDC rather than a
