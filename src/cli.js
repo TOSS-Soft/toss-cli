@@ -4,7 +4,10 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import YAML from "yaml";
-import { resolveGovernanceProfiles } from "./governance-config.js";
+import {
+  resolveGovernanceProfiles,
+  resolveRequiredStatusChecks,
+} from "./governance-config.js";
 import { copyProfileAssets, loadProfileManifest } from "./profile-assets.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -128,28 +131,31 @@ function initBrief(target="project-brief.yaml") {
   console.log(`  toss create ${out}`);
 }
 
-function writeRulesetPayload(projectDir) {
+function writeRulesetPayload(projectDir, requiredChecks=[]) {
+  const rules=[
+    {type:"deletion"},
+    {type:"non_fast_forward"},
+    {type:"pull_request",parameters:{
+      required_approving_review_count:1,
+      dismiss_stale_reviews_on_push:true,
+      require_code_owner_review:false,
+      require_last_push_approval:false,
+      required_review_thread_resolution:true
+    }},
+  ];
+  if (requiredChecks.length > 0) {
+    rules.push({type:"required_status_checks",parameters:{
+      strict_required_status_checks_policy:true,
+      do_not_enforce_on_create:false,
+      required_status_checks:requiredChecks.map(context => ({context})),
+    }});
+  }
   const payload={
     name:"main-governance",
     target:"branch",
     enforcement:"active",
     conditions:{ref_name:{include:["~DEFAULT_BRANCH"],exclude:[]}},
-    rules:[
-      {type:"deletion"},
-      {type:"non_fast_forward"},
-      {type:"pull_request",parameters:{
-        required_approving_review_count:1,
-        dismiss_stale_reviews_on_push:true,
-        require_code_owner_review:false,
-        require_last_push_approval:false,
-        required_review_thread_resolution:true
-      }},
-      {type:"required_status_checks",parameters:{
-        strict_required_status_checks_policy:true,
-        do_not_enforce_on_create:false,
-        required_status_checks:[{context:"governance-certification"}]
-      }}
-    ],
+    rules,
     bypass_actors:[]
   };
   const p=path.join(projectDir,"project-management","bootstrap","main-ruleset.json");
@@ -305,7 +311,7 @@ function createFromConfig(a, briefData=null) {
   fs.copyFileSync(path.join(TEMPLATE,"DESIGN_BRIEF.md"),path.join(designDir,"DESIGN_BRIEF.md"));
   fs.copyFileSync(path.join(TEMPLATE,"DESIGN_SYSTEM.md"),path.join(designDir,"DESIGN_SYSTEM.md"));
 
-  const ruleset=writeRulesetPayload(dest);
+  const ruleset=writeRulesetPayload(dest,a.requiredStatusChecks);
 
   let committed=false;
   if (!a.noGit) {
@@ -421,9 +427,10 @@ function main() {
     const briefPath=path.resolve(args[1]);
     const data=YAML.parse(fs.readFileSync(briefPath,"utf8")) || {};
     validateBrief(data);
-    let governanceProfiles;
+    let governanceProfiles, requiredStatusChecks;
     try {
       governanceProfiles=resolveGovernanceProfiles(data);
+      requiredStatusChecks=resolveRequiredStatusChecks(data);
     } catch (error) {
       die(error.message);
     }
@@ -443,6 +450,7 @@ function main() {
       noGit:false,
       force:false,
       governanceProfiles,
+      requiredStatusChecks,
     };
     return createFromConfig(a,data);
   }
@@ -450,6 +458,7 @@ function main() {
   return createFromConfig({
     ...parseLegacy(args),
     governanceProfiles:{core:true,delivery:false},
+    requiredStatusChecks:[],
   },null);
 }
 

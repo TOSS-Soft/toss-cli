@@ -4,7 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import YAML from "yaml";
-import { resolveGovernanceProfiles } from "../src/governance-config.js";
+import {
+  resolveGovernanceProfiles,
+  resolveRequiredStatusChecks,
+} from "../src/governance-config.js";
 
 assert.deepEqual(resolveGovernanceProfiles({}), { core:true, delivery:false });
 assert.deepEqual(
@@ -22,6 +25,24 @@ assert.throws(
 assert.throws(
   () => resolveGovernanceProfiles({ governance:{ unknown:true } }),
   /unknown governance key: unknown/,
+);
+
+assert.deepEqual(resolveRequiredStatusChecks({}),[]);
+assert.deepEqual(
+  resolveRequiredStatusChecks({delivery:{required_status_checks:["ci","security"]}}),
+  ["ci","security"],
+);
+assert.throws(
+  () => resolveRequiredStatusChecks({delivery:{required_status_checks:"ci"}}),
+  /delivery\.required_status_checks must be an array/,
+);
+assert.throws(
+  () => resolveRequiredStatusChecks({delivery:{required_status_checks:["ci",""]}}),
+  /non-empty strings/,
+);
+assert.throws(
+  () => resolveRequiredStatusChecks({delivery:{required_status_checks:["ci","ci"]}}),
+  /must not contain duplicates/,
 );
 
 const root=path.resolve(".");

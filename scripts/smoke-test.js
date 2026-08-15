@@ -83,6 +83,11 @@ result=runCli(["create",brief],{cwd:tmp});
 assertSuccess(result,"toss create with design");
 
 const project=path.join(tmp,"design-smoke-project");
+const coreRuleset=JSON.parse(fs.readFileSync(
+  path.join(project,"project-management/bootstrap/main-ruleset.json"),
+  "utf8",
+));
+assert.ok(!coreRuleset.rules.some(rule => rule.type==="required_status_checks"));
 const coreFiles=[
   "AGENTS.md",
   "CLAUDE.md",
@@ -224,6 +229,7 @@ const delivery=completeBrief(structuredClone(explicit),{
   slug:"delivery-smoke-project",
 });
 delivery.governance={delivery:true};
+delivery.delivery.required_status_checks=["ci","security"];
 writeYaml(deliveryBrief,delivery);
 
 result=runCli(["create",deliveryBrief],{cwd:tmp});
@@ -237,6 +243,18 @@ const deliveryState=JSON.parse(fs.readFileSync(
   "utf8",
 ));
 assert.equal(deliveryState.governance.profiles.delivery,true);
+const deliveryRuleset=JSON.parse(fs.readFileSync(
+  path.join(deliveryProject,"project-management/bootstrap/main-ruleset.json"),
+  "utf8",
+));
+const requiredStatusChecks=deliveryRuleset.rules.find(
+  rule => rule.type==="required_status_checks",
+);
+assert.deepEqual(
+  requiredStatusChecks.parameters.required_status_checks,
+  [{context:"ci"},{context:"security"}],
+);
+assert.ok(!JSON.stringify(deliveryRuleset).includes("governance-certification"));
 
 const invalidBrief=path.join(tmp,"invalid-design-brief.yaml");
 const invalid=structuredClone(explicit);

@@ -78,6 +78,7 @@ design:
     owner: CEO
 
 delivery:
+  required_status_checks: []
   github_owner: toss-software
   visibility: private
   create_github_repository: false
