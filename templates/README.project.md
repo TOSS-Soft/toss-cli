@@ -9,6 +9,7 @@ This repository uses TOSS PM Governance v2.0.0.
 - Governance root: `/project-management/`
 - Execution SSOT: GitHub Projects
 - Verified CEO GitHub identity: `@toss-software`
+- Delivery profile: {{DELIVERY_PROFILE_STATUS}}. It provides governance records only and does not confer production authority.
 
 ## Agent Startup
 

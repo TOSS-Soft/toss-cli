@@ -260,11 +260,20 @@ function createFromConfig(a, briefData=null) {
   const slug=a.slug || slugify(a.name);
   const coreRoot=path.join(TEMPLATE,"governance","core");
   const coreManifest=loadProfileManifest(coreRoot);
+  let deliveryRoot=null;
+  let deliveryManifest=null;
+  if (a.governanceProfiles.delivery) {
+    deliveryRoot=path.join(TEMPLATE,"governance","profiles","delivery");
+    deliveryManifest=loadProfileManifest(deliveryRoot);
+  }
   const dest=path.resolve(a.directory || slug);
   if (fs.existsSync(dest) && fs.readdirSync(dest).length && !a.force) die(`Destination is not empty: ${dest}`);
   ensureDir(dest);
 
   copyProfileAssets(coreRoot,dest,coreManifest);
+  if (a.governanceProfiles.delivery) {
+    copyProfileAssets(deliveryRoot,dest,deliveryManifest);
+  }
 
   const vals={
     PROJECT_NAME:a.name,
@@ -272,6 +281,7 @@ function createFromConfig(a, briefData=null) {
     DESCRIPTION:a.description || a.name,
     GITHUB_OWNER:a.owner,
     VISIBILITY:a.visibility,
+    DELIVERY_PROFILE_STATUS:a.governanceProfiles.delivery ? "installed" : "not installed",
   };
 
   const files=[

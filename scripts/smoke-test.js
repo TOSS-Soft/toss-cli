@@ -98,8 +98,18 @@ const coreFiles=[
   "project-management/templates/RISK.md",
   "project-management/templates/WAIVER.md",
 ];
+const deliveryFiles=[
+  "project-management/policies/DELIVERY.md",
+  "project-management/policies/OPERATIONS.md",
+  "project-management/templates/RELEASE.md",
+  "project-management/templates/INCIDENT.md",
+  "project-management/templates/DATAFIX.md",
+];
 for (const rel of coreFiles) {
   assert.ok(fs.existsSync(path.join(project,rel)),`Missing ${rel}`);
+}
+for (const rel of deliveryFiles) {
+  assert.ok(!fs.existsSync(path.join(project,rel)),`Unexpected Delivery asset ${rel}`);
 }
 
 for (const rel of [
@@ -207,6 +217,26 @@ assert.equal(context.design.company_design_system.name,"TOSS Brand System");
 assert.deepEqual(context.design.company_design_system.references,["docs/brand.md"]);
 assert.deepEqual(context.governance,{delivery:false});
 assert.ok(!Object.hasOwn(context,"langsmith"));
+
+const deliveryBrief=path.join(tmp,"delivery-project-brief.yaml");
+const delivery=completeBrief(structuredClone(explicit),{
+  name:"Delivery Smoke Project",
+  slug:"delivery-smoke-project",
+});
+delivery.governance={delivery:true};
+writeYaml(deliveryBrief,delivery);
+
+result=runCli(["create",deliveryBrief],{cwd:tmp});
+assertSuccess(result,"toss create with Delivery governance");
+const deliveryProject=path.join(tmp,"delivery-smoke-project");
+for (const rel of deliveryFiles) {
+  assert.ok(fs.existsSync(path.join(deliveryProject,rel)),`Missing Delivery asset ${rel}`);
+}
+const deliveryState=JSON.parse(fs.readFileSync(
+  path.join(deliveryProject,"project.json"),
+  "utf8",
+));
+assert.equal(deliveryState.governance.profiles.delivery,true);
 
 const invalidBrief=path.join(tmp,"invalid-design-brief.yaml");
 const invalid=structuredClone(explicit);

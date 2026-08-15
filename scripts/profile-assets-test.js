@@ -20,8 +20,17 @@ const EXPECTED_CORE_FILES=[
   "project-management/templates/WAIVER.md",
 ];
 
+const EXPECTED_DELIVERY_FILES=[
+  "project-management/policies/DELIVERY.md",
+  "project-management/policies/OPERATIONS.md",
+  "project-management/templates/RELEASE.md",
+  "project-management/templates/INCIDENT.md",
+  "project-management/templates/DATAFIX.md",
+];
+
 const root=path.resolve(".");
 const coreProfile=path.join(root,"templates","governance","core");
+const deliveryProfile=path.join(root,"templates","governance","profiles","delivery");
 const tmp=fs.mkdtempSync(path.join(os.tmpdir(),"toss-profile-assets-"));
 
 function writeManifest(profileRoot,manifest) {
@@ -54,6 +63,18 @@ try {
   for (const relativePath of coreManifest.files) {
     assert.equal(
       fs.statSync(path.join(coreProfile,...relativePath.split("/"))).isFile(),
+      true,
+      `${relativePath} is not a regular file`,
+    );
+  }
+
+  const deliveryManifest=loadProfileManifest(deliveryProfile);
+  assert.equal(deliveryManifest.profile,"delivery");
+  assert.equal(deliveryManifest.version,"2.0.0");
+  assert.deepEqual(deliveryManifest.files,EXPECTED_DELIVERY_FILES);
+  for (const relativePath of deliveryManifest.files) {
+    assert.equal(
+      fs.statSync(path.join(deliveryProfile,...relativePath.split("/"))).isFile(),
       true,
       `${relativePath} is not a regular file`,
     );

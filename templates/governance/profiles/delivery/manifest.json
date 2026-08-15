@@ -1,0 +1,11 @@
+{
+  "profile": "delivery",
+  "version": "2.0.0",
+  "files": [
+    "project-management/policies/DELIVERY.md",
+    "project-management/policies/OPERATIONS.md",
+    "project-management/templates/RELEASE.md",
+    "project-management/templates/INCIDENT.md",
+    "project-management/templates/DATAFIX.md"
+  ]
+}
