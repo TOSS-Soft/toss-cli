@@ -41,6 +41,9 @@ security:
   personal_data: AUTO
   financial_data: AUTO
 
+governance:
+  delivery: false
+
 design:
   required: AUTO
   source: AUTO

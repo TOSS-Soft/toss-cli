@@ -4,6 +4,7 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import YAML from "yaml";
+import { resolveGovernanceProfiles } from "./governance-config.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -415,6 +416,12 @@ function main() {
     const briefPath=path.resolve(args[1]);
     const data=YAML.parse(fs.readFileSync(briefPath,"utf8")) || {};
     validateBrief(data);
+    let governanceProfiles;
+    try {
+      governanceProfiles=resolveGovernanceProfiles(data);
+    } catch (error) {
+      die(error.message);
+    }
     const name=String(nested(data,["project","name"]));
     const slugRaw=nested(data,["project","slug"],"AUTO");
     const lsRaw=nested(data,["langsmith","project"],"AUTO");
@@ -432,11 +439,15 @@ function main() {
       ruleset:Boolean(delivery.apply_main_ruleset),
       noGit:false,
       force:false,
+      governanceProfiles,
     };
     return createFromConfig(a,data);
   }
 
-  return createFromConfig(parseLegacy(args),null);
+  return createFromConfig({
+    ...parseLegacy(args),
+    governanceProfiles:{core:true,delivery:false},
+  },null);
 }
 
 main();
