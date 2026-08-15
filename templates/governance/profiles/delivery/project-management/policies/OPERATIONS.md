@@ -7,8 +7,15 @@ to its recorded class.
 
 ## Datafix Authority
 
-Production data mutation requires explicit recorded authority, scope, and
-executor. Technical access alone is not authority.
+Production data mutation requires explicit verified CEO approval unless the
+applicable governance already records narrower pre-authorized recovery
+authority. That exception MUST name the exact scope, trigger, executor, stop
+conditions, and recovery procedure, and it MUST NOT authorize unrelated
+mutation or new product intent. Technical access alone is not authority.
+
+Production-data mutation authority is distinct from code review, merge,
+deployment, rollout, incident coordination, containment, and recovery
+execution; none may be inferred from another.
 
 ## Dry Run
 

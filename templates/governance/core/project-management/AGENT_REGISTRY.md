@@ -8,7 +8,8 @@ APPROVED, ACTIVE, DISABLED, DEPRECATED, and UNKNOWN identify registry or assignm
 
 | Specialist | Status | Capability | Environment | Allowed Actions | Prohibited Actions |
 | --- | --- | --- | --- | --- | --- |
-| NONE | NONE | NONE | NONE | NONE | NONE |
+
+No specialist is registered initially.
 
 ## Capability
 

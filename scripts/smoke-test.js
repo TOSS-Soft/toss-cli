@@ -251,6 +251,15 @@ const canonicalState=fs.readFileSync(
 );
 assert.match(canonicalState,/## Superpowers State/);
 assert.match(canonicalState,/## Superpowers State\n\nStatus: UNKNOWN/);
+assert.match(canonicalState,/GitHub Project: NONE/);
+assert.match(
+  canonicalState,
+  /## Decision Summary\n\nActive Decisions: NONE\nProtected Decisions: NONE/,
+);
+assert.match(
+  canonicalState,
+  /## Delivery Profile State\n\nStatus: NOT_SELECTED/,
+);
 
 const context=JSON.parse(fs.readFileSync(
   path.join(project,"project-management/bootstrap/PROJECT_BRIEF.json"),
@@ -284,6 +293,14 @@ const deliveryState=JSON.parse(fs.readFileSync(
   "utf8",
 ));
 assert.equal(deliveryState.governance.profiles.delivery,true);
+const deliveryCanonicalState=fs.readFileSync(
+  path.join(deliveryProject,"project-management/PROJECT_STATE.md"),
+  "utf8",
+);
+assert.match(
+  deliveryCanonicalState,
+  /## Delivery Profile State\n\nStatus: INSTALLED/,
+);
 const deliveryRuleset=JSON.parse(fs.readFileSync(
   path.join(deliveryProject,"project-management/bootstrap/main-ruleset.json"),
   "utf8",

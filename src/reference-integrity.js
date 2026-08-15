@@ -34,6 +34,18 @@ const FORBIDDEN_RESIDUE=[
   /Trusted Evaluator/i,
   /governance-certification/i,
 ];
+const KNOWN_JSON_PATH_FIELDS=[
+  {
+    file:"project.json",
+    keys:["governance","root"],
+    expectedType:"directory",
+  },
+  {
+    file:"project.json",
+    keys:["governance","global_agent_catalog"],
+    expectedType:"file",
+  },
+];
 
 function listFiles(root) {
   const files=[];
@@ -96,6 +108,53 @@ function validateLocalReferences(projectRoot,files) {
   }
 }
 
+function readField(value,keys) {
+  let current=value;
+  for (const key of keys) {
+    if (!current || typeof current!=="object" || !(key in current)) return undefined;
+    current=current[key];
+  }
+  return current;
+}
+
+function validateKnownJsonPaths(projectRoot) {
+  const canonicalProjectRoot=fs.realpathSync(projectRoot);
+  for (const field of KNOWN_JSON_PATH_FIELDS) {
+    const source=path.join(projectRoot,...field.file.split("/"));
+    const fieldName=field.keys.join(".");
+    let document;
+    try {
+      document=JSON.parse(fs.readFileSync(source,"utf8"));
+    } catch (error) {
+      assert.fail(`${field.file}: cannot validate ${fieldName}: ${error.message}`);
+    }
+    const value=readField(document,field.keys);
+    assert.ok(
+      typeof value==="string" && value.trim() && !value.includes("\0"),
+      `${field.file}: invalid path field ${fieldName} (${String(value)})`,
+    );
+    assert.ok(
+      !path.posix.isAbsolute(value) && !path.win32.isAbsolute(value),
+      `${field.file}: invalid path field ${fieldName} (${value})`,
+    );
+    const target=path.resolve(projectRoot,value);
+    assert.ok(
+      isWithin(projectRoot,target) && fs.existsSync(target),
+      `${field.file}: invalid path field ${fieldName} (${value})`,
+    );
+    const canonicalTarget=fs.realpathSync(target);
+    assert.ok(
+      isWithin(canonicalProjectRoot,canonicalTarget),
+      `${field.file}: invalid path field ${fieldName} (${value})`,
+    );
+    const stat=fs.statSync(canonicalTarget);
+    assert.ok(
+      field.expectedType==="directory" ? stat.isDirectory() : stat.isFile(),
+      `${field.file}: invalid path field ${fieldName} (${value}); expected ${field.expectedType}`,
+    );
+  }
+}
+
 function validateOwnership(projectRoot,files) {
   const governanceRoot=path.join(projectRoot,"project-management");
   const governanceDocuments=files.filter(file =>
@@ -154,6 +213,7 @@ export function validateGeneratedProject(projectRoot) {
   const root=path.resolve(projectRoot);
   const files=listFiles(root);
   validateLocalReferences(root,files);
+  validateKnownJsonPaths(root);
   validateOwnership(root,files);
   validateAssuranceResidue(root,files);
   validateRootContracts(root);

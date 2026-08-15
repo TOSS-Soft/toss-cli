@@ -83,4 +83,38 @@ assertInvalidBrief({
   error:/governance\.assurance is not supported/,
 });
 
+for (const scenario of [
+  {
+    name:"project-without-repository",
+    args:["--github-project"],
+    error:/--github-project requires --github/,
+  },
+  {
+    name:"ruleset-without-repository",
+    args:["--ruleset"],
+    error:/--ruleset requires --github/,
+  },
+]) {
+  const destination=path.join(tmp,scenario.name);
+  const result=spawnSync(
+    process.execPath,
+    [
+      cli,
+      scenario.name,
+      "--slug",scenario.name,
+      "--dir",destination,
+      "--no-git",
+      ...scenario.args,
+    ],
+    {cwd:tmp,encoding:"utf8"},
+  );
+  assert.notEqual(result.status,0,`${scenario.name} was accepted`);
+  assert.match(result.stderr,scenario.error);
+  assert.equal(
+    fs.existsSync(destination),
+    false,
+    `${scenario.name} left a partial destination after precondition failure`,
+  );
+}
+
 console.log("Governance configuration test: PASS");

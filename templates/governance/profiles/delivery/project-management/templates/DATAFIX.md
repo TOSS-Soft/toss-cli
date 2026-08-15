@@ -29,7 +29,11 @@ NONE
 
 NONE
 
-## Approval
+## Verified CEO Mutation Approval
+
+NONE
+
+## Pre-Authorized Recovery Authority
 
 NONE
 

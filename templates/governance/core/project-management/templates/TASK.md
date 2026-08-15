@@ -15,8 +15,12 @@ Scope: NONE
 Exclusions: NONE
 Acceptance Criteria: NONE
 Assigned Specialist: UNASSIGNED
+Workspace: NONE
+Environment: NONE
 Authority: NONE
+Allowed Actions: NONE
 Prohibited Actions: NONE
+Escalation Conditions: NONE
 Dependencies: NONE
 Risk Impacts: NONE
 Required Evidence: NONE

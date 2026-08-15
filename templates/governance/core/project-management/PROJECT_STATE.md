@@ -9,6 +9,7 @@ status: DRAFT
 
 Name: NONE
 Repository: NONE
+GitHub Project: NONE
 
 ## Bootstrap State
 
@@ -30,6 +31,12 @@ NONE
 
 NONE
 
+## Decision Summary
+
+Active Decisions: NONE
+Protected Decisions: NONE
+Last Updated: NONE
+
 ## Risks
 
 NONE
@@ -44,7 +51,7 @@ Status: UNKNOWN
 
 ## Delivery Profile State
 
-Status: NOT_SELECTED
+Status: {{DELIVERY_PROFILE_STATE}}
 
 ## Agent State
 

@@ -14,6 +14,9 @@ This repository uses TOSS PM Governance v2.0.0.
   `governance.delivery: true` opt-in. It adds Delivery and Operations policies
   plus Release, Incident, and Datafix records; it does not confer production
   authority.
+- Main-branch merge, production deployment, and production data mutation each
+  require explicit, action-specific verified CEO authorization. A narrower
+  pre-authorized recovery authority applies only to its exact recorded scope.
 
 ## Agent Startup
 

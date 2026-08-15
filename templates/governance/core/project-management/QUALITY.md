@@ -32,6 +32,14 @@ Review findings require a recorded disposition and supporting evidence.
 
 Do not expose secrets; validate security controls appropriate to the work.
 
+## Dependency and Supply-Chain Safety
+
+Before acceptance, new or changed dependencies and build inputs MUST be
+reviewed for necessity, provenance, integrity, known vulnerabilities, install
+or build behavior, and lockfile consistency. Material supply-chain risk or an
+UNKNOWN result blocks Done unless an explicit scoped waiver records the actual
+evidence state and accepted risk.
+
 ## Data Safety
 
 Protect production data and require explicit authority for data mutation.

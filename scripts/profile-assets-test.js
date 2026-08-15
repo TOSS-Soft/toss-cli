@@ -5,6 +5,7 @@ import path from "node:path";
 import {
   copyProfileAssets,
   loadProfileManifest,
+  validateContainedFileTargets,
 } from "../src/profile-assets.js";
 
 const EXPECTED_CORE_FILES=[
@@ -168,6 +169,43 @@ try {
     /files.*array/i,
   );
 
+  const outsideSourceFile=path.join(tmp,"outside-source-file.md");
+  fs.writeFileSync(outsideSourceFile,"outside source\n","utf8");
+  const sourceSymlinkProfile=fixture("source-symlink",{
+    profile:"fixture",
+    version:"2.0.0",
+    files:["project-management/WORK.md"],
+  });
+  fs.mkdirSync(path.join(sourceSymlinkProfile,"project-management"),{recursive:true});
+  fs.symlinkSync(
+    outsideSourceFile,
+    path.join(sourceSymlinkProfile,"project-management","WORK.md"),
+  );
+  assert.throws(
+    () => loadProfileManifest(sourceSymlinkProfile),
+    /symbolic link|symlink/i,
+    "manifest loading followed a source-file symlink",
+  );
+
+  const outsideSourceDirectory=path.join(tmp,"outside-source-directory");
+  fs.mkdirSync(outsideSourceDirectory);
+  fs.writeFileSync(path.join(outsideSourceDirectory,"WORK.md"),"outside ancestor\n","utf8");
+  const sourceAncestorProfile=fixture("source-ancestor-symlink",{
+    profile:"fixture",
+    version:"2.0.0",
+    files:["project-management/WORK.md"],
+  });
+  fs.symlinkSync(
+    outsideSourceDirectory,
+    path.join(sourceAncestorProfile,"project-management"),
+    "dir",
+  );
+  assert.throws(
+    () => loadProfileManifest(sourceAncestorProfile),
+    /symbolic link|symlink/i,
+    "manifest loading followed a source-ancestor symlink",
+  );
+
   const validProfile=fixture("valid",{
     profile:"fixture",
     version:"2.0.0",
@@ -175,6 +213,124 @@ try {
   },["project-management/WORK.md","project-management/templates/TASK.md"]);
   const destination=path.join(tmp,"destination");
   const validatedManifest=loadProfileManifest(validProfile);
+
+  const outsideDestinationDirectory=path.join(tmp,"outside-destination-directory");
+  const ancestorSymlinkDestination=path.join(tmp,"ancestor-symlink-destination");
+  fs.mkdirSync(outsideDestinationDirectory);
+  fs.mkdirSync(ancestorSymlinkDestination);
+  fs.symlinkSync(
+    outsideDestinationDirectory,
+    path.join(ancestorSymlinkDestination,"project-management"),
+    "dir",
+  );
+  assert.throws(
+    () => copyProfileAssets(validProfile,ancestorSymlinkDestination,validatedManifest),
+    /destination.*symbolic link|symlink.*destination/i,
+    "profile copying followed a destination-ancestor symlink",
+  );
+  assert.equal(
+    fs.existsSync(path.join(outsideDestinationDirectory,"WORK.md")),
+    false,
+    "profile copying wrote through a destination-ancestor symlink",
+  );
+
+  const outsideDestinationFile=path.join(tmp,"outside-destination-file.md");
+  const fileSymlinkDestination=path.join(tmp,"file-symlink-destination");
+  fs.writeFileSync(outsideDestinationFile,"outside destination\n","utf8");
+  fs.mkdirSync(path.join(fileSymlinkDestination,"project-management"),{recursive:true});
+  fs.symlinkSync(
+    outsideDestinationFile,
+    path.join(fileSymlinkDestination,"project-management","WORK.md"),
+  );
+  assert.throws(
+    () => copyProfileAssets(validProfile,fileSymlinkDestination,validatedManifest),
+    /destination.*symbolic link|symlink.*destination/i,
+    "profile copying followed a destination-file symlink",
+  );
+  assert.equal(
+    fs.readFileSync(outsideDestinationFile,"utf8"),
+    "outside destination\n",
+    "profile copying mutated a destination-file symlink target",
+  );
+
+  const outsideDestinationRoot=path.join(tmp,"outside-destination-root");
+  const symlinkDestinationRoot=path.join(tmp,"symlink-destination-root");
+  fs.mkdirSync(outsideDestinationRoot);
+  fs.symlinkSync(outsideDestinationRoot,symlinkDestinationRoot,"dir");
+  assert.throws(
+    () => copyProfileAssets(validProfile,symlinkDestinationRoot,validatedManifest),
+    /destination root.*symbolic link|symbolic link.*destination root/i,
+    "profile copying accepted a symlink destination root",
+  );
+  assert.equal(
+    fs.existsSync(path.join(outsideDestinationRoot,"project-management","WORK.md")),
+    false,
+    "profile copying wrote through a symlink destination root",
+  );
+
+  const lateOutsideDirectory=path.join(tmp,"late-outside-destination");
+  const lateSymlinkDestination=path.join(tmp,"late-symlink-destination");
+  fs.mkdirSync(lateOutsideDirectory);
+  fs.mkdirSync(path.join(lateSymlinkDestination,"project-management"),{
+    recursive:true,
+  });
+  fs.writeFileSync(
+    path.join(lateSymlinkDestination,"project-management","WORK.md"),
+    "original destination\n",
+    "utf8",
+  );
+  fs.symlinkSync(
+    lateOutsideDirectory,
+    path.join(lateSymlinkDestination,"project-management","templates"),
+    "dir",
+  );
+  assert.throws(
+    () => copyProfileAssets(validProfile,lateSymlinkDestination,validatedManifest),
+    /destination.*symbolic link|symlink.*destination/i,
+    "profile copying accepted a later destination-ancestor symlink",
+  );
+  assert.equal(
+    fs.readFileSync(
+      path.join(lateSymlinkDestination,"project-management","WORK.md"),
+      "utf8",
+    ),
+    "original destination\n",
+    "profile copying mutated earlier assets before rejecting a later symlink",
+  );
+  assert.equal(
+    fs.existsSync(path.join(lateOutsideDirectory,"TASK.md")),
+    false,
+    "profile copying wrote a later asset outside the destination root",
+  );
+
+  const readOnlyPreflightDestination=path.join(tmp,"read-only-preflight");
+  const readOnlyPreflightOutside=path.join(tmp,"read-only-preflight-outside");
+  fs.mkdirSync(
+    path.join(readOnlyPreflightDestination,"project-management"),
+    {recursive:true},
+  );
+  fs.mkdirSync(readOnlyPreflightOutside);
+  fs.symlinkSync(
+    readOnlyPreflightOutside,
+    path.join(readOnlyPreflightDestination,"project-management","bootstrap"),
+    "dir",
+  );
+  assert.throws(
+    () => validateContainedFileTargets(readOnlyPreflightDestination,[
+      "project-management/design/DESIGN_BRIEF.md",
+      "project-management/bootstrap/PROJECT_BRIEF.json",
+    ]),
+    /destination.*symbolic link|symlink.*destination/i,
+    "target preflight accepted a later destination-ancestor symlink",
+  );
+  assert.equal(
+    fs.existsSync(
+      path.join(readOnlyPreflightDestination,"project-management","design"),
+    ),
+    false,
+    "target preflight created an earlier missing directory before refusal",
+  );
+
   fs.rmSync(path.join(validProfile,"manifest.json"));
   copyProfileAssets(validProfile,destination,validatedManifest);
   for (const relativePath of ["project-management/WORK.md","project-management/templates/TASK.md"]) {

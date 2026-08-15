@@ -8,15 +8,70 @@ import {
   resolveGovernanceProfiles,
   resolveRequiredStatusChecks,
 } from "./governance-config.js";
-import { copyProfileAssets, loadProfileManifest } from "./profile-assets.js";
+import {
+  loadProfileAssets,
+  loadProfileManifest,
+  validateContainedFileTargets,
+  writeContainedFiles,
+} from "./profile-assets.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT = path.resolve(__dirname, "..");
 const TEMPLATE = path.join(ROOT, "templates");
+const NO_FOLLOW=fs.constants.O_NOFOLLOW ?? 0;
 
 const VERSION = JSON.parse(fs.readFileSync(path.join(ROOT,"package.json"),"utf8")).version;
 const GOVERNANCE_VERSION = "2.0.0";
+const DELIVERY_PROFILE_FILES=[
+  "project-management/policies/DELIVERY.md",
+  "project-management/policies/OPERATIONS.md",
+  "project-management/templates/RELEASE.md",
+  "project-management/templates/INCIDENT.md",
+  "project-management/templates/DATAFIX.md",
+];
+const LEGACY_GOVERNANCE_MARKERS=[
+  "project-management/PM_AGENT.md",
+  "project-management/policies/AUTHORITY.md",
+  "project-management/policies/SECURITY.md",
+  "project-management/policies/LANGSMITH.md",
+  "project-management/LANGSMITH_INTEGRATION.md",
+  ".github/workflows/pm-governance-certification.yml",
+  ".github/workflows/request-trusted-governance-evaluation.yml",
+];
+const RUNTIME_TEMPLATE_ASSETS=[
+  {source:"README.project.md",target:"README.md",render:true},
+  {source:"project.json",target:"project.json",render:true},
+  {source:"gitignore.template",target:".gitignore",render:true},
+  {source:"CLAUDE.md",target:"CLAUDE.md",render:true},
+  {source:"AGENTS.md",target:"AGENTS.md",render:true},
+  {source:"SUPERPOWERS.md",target:"SUPERPOWERS.md",render:true},
+  {
+    source:"GLOBAL_AGENT_CATALOG.json",
+    target:"project-management/GLOBAL_AGENT_CATALOG.json",
+    render:false,
+  },
+  {
+    source:"GLOBAL_AGENT_CATALOG.md",
+    target:"project-management/GLOBAL_AGENT_CATALOG.md",
+    render:false,
+  },
+  {
+    source:"DESIGN_BRIEF.md",
+    target:"project-management/design/DESIGN_BRIEF.md",
+    render:false,
+  },
+  {
+    source:"DESIGN_SYSTEM.md",
+    target:"project-management/design/DESIGN_SYSTEM.md",
+    render:false,
+  },
+  {
+    source:"PROJECT_BRIEF_GUIDE.md",
+    target:"project-management/bootstrap/PROJECT_BRIEF_GUIDE.md",
+    render:false,
+  },
+];
 
 function die(message, code=1) {
   console.error(message);
@@ -59,26 +114,164 @@ function render(text, vals) {
   return text;
 }
 
-function renderTree(root, vals) {
-  const walk = dir => {
-    for (const entry of fs.readdirSync(dir,{withFileTypes:true})) {
-      const p=path.join(dir,entry.name);
-      if (entry.isDirectory()) walk(p);
-      else {
-        try {
-          const t=fs.readFileSync(p,"utf8");
-          if (Object.keys(vals).some(k => t.includes(`{{${k}}}`))) {
-            fs.writeFileSync(p,render(t,vals),"utf8");
-          }
-        } catch {}
-      }
+function isWithin(root,target) {
+  const relative=path.relative(root,target);
+  return relative!==".."
+    && !relative.startsWith(`..${path.sep}`)
+    && !path.isAbsolute(relative);
+}
+
+function loadRuntimeTemplateAssets() {
+  let templateRootStat;
+  try {
+    templateRootStat=fs.lstatSync(TEMPLATE);
+  } catch {
+    throw new TypeError("Runtime template root is missing: templates");
+  }
+  if (templateRootStat.isSymbolicLink() || !templateRootStat.isDirectory()) {
+    throw new TypeError("Runtime template root is not a regular directory: templates");
+  }
+  const canonicalTemplateRoot=fs.realpathSync(TEMPLATE);
+
+  return RUNTIME_TEMPLATE_ASSETS.map(asset => {
+    const source=path.join(TEMPLATE,asset.source);
+    let stat;
+    try {
+      stat=fs.lstatSync(source);
+    } catch {
+      throw new TypeError(`Runtime template is missing: templates/${asset.source}`);
     }
-  };
-  walk(root);
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      throw new TypeError(
+        `Runtime template is not a regular file: templates/${asset.source}`,
+      );
+    }
+    let descriptor;
+    try {
+      descriptor=fs.openSync(source,fs.constants.O_RDONLY|NO_FOLLOW);
+    } catch (error) {
+      if (error?.code==="ELOOP") {
+        throw new TypeError(
+          `Runtime template is not a regular file: templates/${asset.source}`,
+        );
+      }
+      throw error;
+    }
+    try {
+      const descriptorStat=fs.fstatSync(descriptor);
+      const canonicalSource=fs.realpathSync(source);
+      const pathStat=fs.statSync(canonicalSource);
+      if (
+        !descriptorStat.isFile()
+        || !isWithin(canonicalTemplateRoot,canonicalSource)
+        || descriptorStat.dev!==pathStat.dev
+        || descriptorStat.ino!==pathStat.ino
+      ) {
+        throw new TypeError(
+          `Runtime template changed or escaped its root: templates/${asset.source}`,
+        );
+      }
+      return {...asset,contents:fs.readFileSync(descriptor,"utf8")};
+    } finally {
+      fs.closeSync(descriptor);
+    }
+  });
+}
+
+function writeRuntimeTemplateAssets(destination,assets,values) {
+  writeContainedFiles(destination,assets.map(asset => ({
+    relativePath:asset.target,
+    contents:asset.render ? render(asset.contents,values) : asset.contents,
+  })));
 }
 
 function readJson(p) { return JSON.parse(fs.readFileSync(p,"utf8")); }
 function writeJson(p,obj) { fs.writeFileSync(p,JSON.stringify(obj,null,2)+"\n","utf8"); }
+
+function pathEntryExists(file) {
+  try {
+    fs.lstatSync(file);
+    return true;
+  } catch (error) {
+    if (error?.code==="ENOENT") return false;
+    throw error;
+  }
+}
+
+function profileLabel(profiles) {
+  return profiles.delivery ? "Core+Delivery" : "Core";
+}
+
+function validateForceOverlay(destination,requestedProfiles,force) {
+  if (!pathEntryExists(destination)) return;
+  const destinationStat=fs.lstatSync(destination);
+  if (destinationStat.isSymbolicLink()) {
+    throw new TypeError(`Destination must not be a symbolic link: ${destination}`);
+  }
+  if (!destinationStat.isDirectory()) {
+    throw new TypeError(`Destination must be a directory: ${destination}`);
+  }
+  if (fs.readdirSync(destination).length===0) return;
+  if (!force) throw new TypeError(`Destination is not empty: ${destination}`);
+
+  const statePath=path.join(destination,"project.json");
+  if (!pathEntryExists(statePath)) {
+    throw new TypeError(
+      "Refusing --force over an unrecognized non-empty destination; use a deliberate manual migration.",
+    );
+  }
+  const stateStat=fs.lstatSync(statePath);
+  if (stateStat.isSymbolicLink() || !stateStat.isFile()) {
+    throw new TypeError(
+      "Refusing --force because project.json is not a regular project-state file.",
+    );
+  }
+
+  let state;
+  try {
+    state=readJson(statePath);
+  } catch {
+    throw new TypeError(
+      "Refusing --force because project.json is not valid JSON; use a deliberate manual migration.",
+    );
+  }
+  const version=state?.governance?.version;
+  const hasLegacyState=LEGACY_GOVERNANCE_MARKERS.some(relativePath =>
+    pathEntryExists(path.join(destination,...relativePath.split("/"))))
+    || Object.hasOwn(state,"langsmith")
+    || Object.hasOwn(state?.bootstrap_state ?? {},"langsmith")
+    || Object.hasOwn(state?.governance?.profiles ?? {},"assurance");
+  if (version!==GOVERNANCE_VERSION || hasLegacyState) {
+    throw new TypeError(
+      "Refusing --force over governance v1 or legacy governance assets; follow the manual migration guide.",
+    );
+  }
+
+  const installedProfiles=state.governance?.profiles;
+  if (
+    installedProfiles?.core!==true
+    || typeof installedProfiles?.delivery!=="boolean"
+  ) {
+    throw new TypeError(
+      "Refusing --force because the installed governance profile state is incomplete or ambiguous.",
+    );
+  }
+  const deliveryPresence=DELIVERY_PROFILE_FILES.map(relativePath =>
+    pathEntryExists(path.join(destination,...relativePath.split("/"))));
+  if (
+    (installedProfiles.delivery && deliveryPresence.some(present => !present))
+    || (!installedProfiles.delivery && deliveryPresence.some(Boolean))
+  ) {
+    throw new TypeError(
+      "Refusing --force because installed Delivery assets contradict project.json profile state.",
+    );
+  }
+  if (installedProfiles.delivery!==requestedProfiles.delivery) {
+    throw new TypeError(
+      `Refusing --force profile overlay from ${profileLabel(installedProfiles)} to ${profileLabel(requestedProfiles)}; use a deliberate manual migration.`,
+    );
+  }
+}
 
 function nested(data, keys, fallback=null) {
   let cur=data;
@@ -186,8 +379,6 @@ function initGit(cwd) {
 }
 
 function createGithubRepo(cwd,owner,slug,visibility,description) {
-  if (!exists("gh")) die("GitHub CLI 'gh' is required for GitHub creation.");
-  run("gh",["auth","status"]);
   const remote=`${owner}/${slug}`;
   const args=["repo","create",remote,`--${visibility}`,"--source=.","--remote=origin"];
   if (description) args.push("--description",description);
@@ -222,19 +413,26 @@ function updateGovernanceProfiles(dest,profiles) {
   writeJson(p,d);
 }
 
-function hydrateProjectState(dest,name,remote,projectUrl) {
+function hydrateProjectState(dest,name,remote,projectUrl,profiles=null) {
   const p=path.join(dest,"project-management","PROJECT_STATE.md");
   let t=fs.readFileSync(p,"utf8");
   t=t.replace(/^Name:.*$/m,`Name: ${name}`);
+  if (profiles) {
+    t=t.replace(
+      "{{DELIVERY_PROFILE_STATE}}",
+      profiles.delivery ? "INSTALLED" : "NOT_SELECTED",
+    );
+  }
   if (remote) t=t.replace(/^Repositor(?:y|ies):.*$/m,`Repository: https://github.com/${remote}`);
   if (projectUrl) t=t.replace(/^GitHub Project:.*$/m,`GitHub Project: ${projectUrl}`);
   fs.writeFileSync(p,t,"utf8");
 }
 
-function writeBriefContext(dest,data) {
+function writeBriefContext(dest,data,inputMode="PROJECT_BRIEF_FILE") {
   const b=path.join(dest,"project-management","bootstrap");
   ensureDir(b);
   const context={
+    input_mode:inputMode,
     project:data.project||{},
     business:data.business||{},
     scope:data.scope||{},
@@ -250,7 +448,6 @@ function writeBriefContext(dest,data) {
     initial_objective:data.initial_objective||{}
   };
   writeJson(path.join(b,"PROJECT_BRIEF.json"),context);
-  fs.copyFileSync(path.join(TEMPLATE,"PROJECT_BRIEF_GUIDE.md"),path.join(b,"PROJECT_BRIEF_GUIDE.md"));
 }
 
 function applyBriefToState(dest,data) {
@@ -262,24 +459,62 @@ function applyBriefToState(dest,data) {
   fs.writeFileSync(p,t,"utf8");
 }
 
+function preflightExecutionRequirements(a) {
+  if (a.githubProject && !a.github) {
+    die("--github-project requires --github.");
+  }
+  if (a.ruleset && !a.github) {
+    die("--ruleset requires --github.");
+  }
+  if (a.github && a.noGit) {
+    die("--github cannot be combined with --no-git.");
+  }
+  if (!a.noGit && !exists("git")) {
+    die("git is required unless --no-git is used.");
+  }
+  if (a.github) {
+    if (!exists("gh")) {
+      die("GitHub CLI 'gh' is required for GitHub creation.");
+    }
+    run("gh",["auth","status"]);
+  }
+}
+
 function createFromConfig(a, briefData=null) {
+  preflightExecutionRequirements(a);
   const slug=a.slug || slugify(a.name);
+  const runtimeAssets=loadRuntimeTemplateAssets();
   const coreRoot=path.join(TEMPLATE,"governance","core");
   const coreManifest=loadProfileManifest(coreRoot);
+  const coreAssets=loadProfileAssets(coreRoot,coreManifest);
   let deliveryRoot=null;
   let deliveryManifest=null;
+  let deliveryAssets=[];
   if (a.governanceProfiles.delivery) {
     deliveryRoot=path.join(TEMPLATE,"governance","profiles","delivery");
     deliveryManifest=loadProfileManifest(deliveryRoot);
+    deliveryAssets=loadProfileAssets(deliveryRoot,deliveryManifest);
   }
   const dest=path.resolve(a.directory || slug);
-  if (fs.existsSync(dest) && fs.readdirSync(dest).length && !a.force) die(`Destination is not empty: ${dest}`);
-  ensureDir(dest);
-
-  copyProfileAssets(coreRoot,dest,coreManifest);
-  if (a.governanceProfiles.delivery) {
-    copyProfileAssets(deliveryRoot,dest,deliveryManifest);
+  try {
+    validateForceOverlay(dest,a.governanceProfiles,a.force);
+  } catch (error) {
+    die(error.message);
   }
+  ensureDir(dest);
+  try {
+    validateContainedFileTargets(dest,[
+      ...coreManifest.files,
+      ...(deliveryManifest?.files ?? []),
+      ...runtimeAssets.map(asset => asset.target),
+      "project-management/bootstrap/main-ruleset.json",
+      "project-management/bootstrap/PROJECT_BRIEF.json",
+    ]);
+  } catch (error) {
+    die(`${a.force ? "Refusing --force because " : ""}${error.message}`);
+  }
+
+  writeContainedFiles(dest,[...coreAssets,...deliveryAssets]);
 
   const vals={
     PROJECT_NAME:a.name,
@@ -288,34 +523,17 @@ function createFromConfig(a, briefData=null) {
     GITHUB_OWNER:a.owner,
     VISIBILITY:a.visibility,
     DELIVERY_PROFILE_STATUS:a.governanceProfiles.delivery ? "installed" : "not installed",
+    DELIVERY_PROFILE_STATE:a.governanceProfiles.delivery ? "INSTALLED" : "NOT_SELECTED",
   };
 
-  const files=[
-    ["README.project.md","README.md"],
-    ["project.json","project.json"],
-    [".gitignore",".gitignore"],
-    ["CLAUDE.md","CLAUDE.md"],
-    ["AGENTS.md","AGENTS.md"],
-    ["SUPERPOWERS.md","SUPERPOWERS.md"],
-  ];
-  for (const [src,dst] of files) {
-    fs.writeFileSync(path.join(dest,dst),render(fs.readFileSync(path.join(TEMPLATE,src),"utf8"),vals),"utf8");
-  }
-  renderTree(dest,vals);
+  writeRuntimeTemplateAssets(dest,runtimeAssets,vals);
   updateGovernanceProfiles(dest,a.governanceProfiles);
-
-  fs.copyFileSync(path.join(TEMPLATE,"GLOBAL_AGENT_CATALOG.json"),path.join(dest,"project-management","GLOBAL_AGENT_CATALOG.json"));
-  fs.copyFileSync(path.join(TEMPLATE,"GLOBAL_AGENT_CATALOG.md"),path.join(dest,"project-management","GLOBAL_AGENT_CATALOG.md"));
-  const designDir=path.join(dest,"project-management","design");
-  ensureDir(designDir);
-  fs.copyFileSync(path.join(TEMPLATE,"DESIGN_BRIEF.md"),path.join(designDir,"DESIGN_BRIEF.md"));
-  fs.copyFileSync(path.join(TEMPLATE,"DESIGN_SYSTEM.md"),path.join(designDir,"DESIGN_SYSTEM.md"));
+  hydrateProjectState(dest,a.name,null,null,a.governanceProfiles);
 
   const ruleset=writeRulesetPayload(dest,a.requiredStatusChecks);
 
   let committed=false;
   if (!a.noGit) {
-    if (!exists("git")) die("git is required unless --no-git is used.");
     committed=initGit(dest);
   }
 
@@ -325,17 +543,15 @@ function createFromConfig(a, briefData=null) {
     updateProjectJson(dest,{github_repository:"CREATED"});
   }
   if (a.githubProject) {
-    if (!a.github) die("--github-project requires GitHub repository creation.");
     gp=createGithubProject(a.owner,`${a.name} — Execution`);
     updateProjectJson(dest,{github_project:"CREATED"});
   }
   if (a.ruleset) {
-    if (!remote) die("--ruleset requires GitHub repository creation.");
     applyRuleset(remote,ruleset);
     updateProjectJson(dest,{ruleset:"APPLIED"});
   }
 
-  hydrateProjectState(dest,a.name,remote,gp?.url||null);
+  hydrateProjectState(dest,a.name,remote,gp?.url||null,a.governanceProfiles);
 
   if (briefData) {
     writeBriefContext(dest,briefData);
@@ -352,6 +568,17 @@ function createFromConfig(a, briefData=null) {
     if (String(title).trim() && String(outcome).trim()) {
       updateProjectJson(dest,{initial_objective:"CEO_AUTHORED_PENDING_PM_CAPTURE"});
     }
+  } else {
+    writeBriefContext(dest,{
+      project:{
+        name:a.name,
+        slug,
+        description:a.description || a.name,
+      },
+      governance:{delivery:false},
+      design:{required:"AUTO"},
+    },"FAST_SCAFFOLD_ARGUMENTS");
+    updateProjectJson(dest,{project_brief:"FAST_SCAFFOLD_ARGUMENTS"});
   }
 
   if (!a.noGit) {
@@ -424,6 +651,11 @@ function main() {
 
   if (args[0]==="create") {
     if (!args[1]) die("Usage: toss create <project-brief.yaml>");
+    let force=false;
+    for (const option of args.slice(2)) {
+      if (option==="--force" && !force) force=true;
+      else die(`Unknown option: ${option}`);
+    }
     const briefPath=path.resolve(args[1]);
     const data=YAML.parse(fs.readFileSync(briefPath,"utf8")) || {};
     validateBrief(data);
@@ -448,7 +680,7 @@ function main() {
       githubProject:Boolean(delivery.create_github_project),
       ruleset:Boolean(delivery.apply_main_ruleset),
       noGit:false,
-      force:false,
+      force,
       governanceProfiles,
       requiredStatusChecks,
     };

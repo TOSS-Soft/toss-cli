@@ -57,6 +57,92 @@ try {
   validateGeneratedProject(coreProject);
   validateGeneratedProject(deliveryProject);
 
+  const fastProject=path.join(tmp,"fast-integrity-project");
+  const fastResult=spawnSync(
+    process.execPath,
+    [
+      cli,
+      "Fast Integrity Project",
+      "--slug","fast-integrity-project",
+      "--dir",fastProject,
+      "--no-git",
+    ],
+    {cwd:tmp,encoding:"utf8"},
+  );
+  assert.equal(
+    fastResult.status,
+    0,
+    `fast scaffold failed\nstdout:\n${fastResult.stdout}\nstderr:\n${fastResult.stderr}`,
+  );
+  validateGeneratedProject(fastProject);
+
+  const missingCatalogProject=copyProject(coreProject,"missing-json-catalog-project");
+  const missingCatalogStateFile=path.join(missingCatalogProject,"project.json");
+  const missingCatalogState=JSON.parse(
+    fs.readFileSync(missingCatalogStateFile,"utf8"),
+  );
+  missingCatalogState.governance.global_agent_catalog=
+    "project-management/DOES_NOT_EXIST.json";
+  fs.writeFileSync(
+    missingCatalogStateFile,
+    JSON.stringify(missingCatalogState,null,2)+"\n",
+    "utf8",
+  );
+  assert.throws(
+    () => validateGeneratedProject(missingCatalogProject),
+    error => {
+      assert.match(error.message,/project\.json/);
+      assert.match(error.message,/governance\.global_agent_catalog/);
+      assert.match(error.message,/project-management\/DOES_NOT_EXIST\.json/);
+      return true;
+    },
+  );
+
+  const missingRootProject=copyProject(coreProject,"missing-json-root-project");
+  const missingRootStateFile=path.join(missingRootProject,"project.json");
+  const missingRootState=JSON.parse(fs.readFileSync(missingRootStateFile,"utf8"));
+  missingRootState.governance.root="project-management/DOES_NOT_EXIST";
+  fs.writeFileSync(
+    missingRootStateFile,
+    JSON.stringify(missingRootState,null,2)+"\n",
+    "utf8",
+  );
+  assert.throws(
+    () => validateGeneratedProject(missingRootProject),
+    error => {
+      assert.match(error.message,/project\.json/);
+      assert.match(error.message,/governance\.root/);
+      assert.match(error.message,/project-management\/DOES_NOT_EXIST/);
+      return true;
+    },
+  );
+
+  const escapingRootProject=copyProject(coreProject,"escaping-json-root-project");
+  const outsideGovernanceRoot=path.join(tmp,"outside-governance-root");
+  fs.mkdirSync(outsideGovernanceRoot);
+  fs.symlinkSync(
+    outsideGovernanceRoot,
+    path.join(escapingRootProject,"external-governance"),
+    "dir",
+  );
+  const escapingRootStateFile=path.join(escapingRootProject,"project.json");
+  const escapingRootState=JSON.parse(fs.readFileSync(escapingRootStateFile,"utf8"));
+  escapingRootState.governance.root="external-governance";
+  fs.writeFileSync(
+    escapingRootStateFile,
+    JSON.stringify(escapingRootState,null,2)+"\n",
+    "utf8",
+  );
+  assert.throws(
+    () => validateGeneratedProject(escapingRootProject),
+    error => {
+      assert.match(error.message,/project\.json/);
+      assert.match(error.message,/governance\.root/);
+      assert.match(error.message,/external-governance/);
+      return true;
+    },
+  );
+
   const inRootProject=copyProject(coreProject,"in-root-reference-project");
   fs.mkdirSync(path.join(inRootProject,"scripts","generated"),{recursive:true});
   fs.writeFileSync(path.join(inRootProject,"scripts","existing.js"),"export {};\n","utf8");

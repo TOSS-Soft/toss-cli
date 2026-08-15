@@ -54,8 +54,9 @@ governance:
 Delivery adds `project-management/policies/DELIVERY.md`,
 `project-management/policies/OPERATIONS.md`, and the Release, Incident, and
 Datafix record templates. These records do not grant production authority.
-Deployment, rollout, or production data mutation still requires the authority
-recorded by the project.
+Main-branch merge, production deployment, and production data mutation require
+their own explicit verified CEO authorization. Only an exact, previously
+verified recovery scope may use narrower pre-authorized recovery authority.
 
 Assurance is unavailable in v2. TOSS CLI will not offer it until a complete,
 versioned external module supplies its runtime, evaluator, configuration,
