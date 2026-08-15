@@ -46,72 +46,125 @@ function fixture(name,manifest,assets=[]) {
   return profileRoot;
 }
 
-const coreManifest=loadProfileManifest(coreProfile);
-assert.equal(coreManifest.profile,"core");
-assert.equal(coreManifest.version,"2.0.0");
-assert.deepEqual(coreManifest.files,EXPECTED_CORE_FILES);
-for (const relativePath of coreManifest.files) {
-  assert.equal(
-    fs.statSync(path.join(coreProfile,...relativePath.split("/"))).isFile(),
-    true,
-    `${relativePath} is not a regular file`,
+try {
+  const coreManifest=loadProfileManifest(coreProfile);
+  assert.equal(coreManifest.profile,"core");
+  assert.equal(coreManifest.version,"2.0.0");
+  assert.deepEqual(coreManifest.files,EXPECTED_CORE_FILES);
+  for (const relativePath of coreManifest.files) {
+    assert.equal(
+      fs.statSync(path.join(coreProfile,...relativePath.split("/"))).isFile(),
+      true,
+      `${relativePath} is not a regular file`,
+    );
+  }
+
+  assert.throws(
+    () => loadProfileManifest(fixture("empty-profile",{
+      profile:"",
+      version:"2.0.0",
+      files:[],
+    })),
+    /profile.*non-empty string/i,
   );
-}
-
-assert.throws(
-  () => loadProfileManifest(fixture("duplicate",{
-    profile:"fixture",
-    version:"2.0.0",
-    files:["project-management/WORK.md","project-management/WORK.md"],
-  },["project-management/WORK.md"])),
-  /duplicate/i,
-);
-assert.throws(
-  () => loadProfileManifest(fixture("absolute",{
-    profile:"fixture",
-    version:"2.0.0",
-    files:[path.resolve(tmp,"outside.md")],
-  })),
-  /Unsafe profile asset path/,
-);
-assert.throws(
-  () => loadProfileManifest(fixture("traversal",{
-    profile:"fixture",
-    version:"2.0.0",
-    files:["project-management/../outside.md"],
-  })),
-  /Unsafe profile asset path/,
-);
-assert.throws(
-  () => loadProfileManifest(fixture("missing",{
-    profile:"fixture",
-    version:"2.0.0",
-    files:["project-management/MISSING.md"],
-  })),
-  /missing|regular file/i,
-);
-assert.throws(
-  () => loadProfileManifest(fixture("non-array",{
-    profile:"fixture",
-    version:"2.0.0",
-    files:"project-management/WORK.md",
-  })),
-  /files.*array/i,
-);
-
-const validProfile=fixture("valid",{
-  profile:"fixture",
-  version:"2.0.0",
-  files:["project-management/WORK.md","project-management/templates/TASK.md"],
-},["project-management/WORK.md","project-management/templates/TASK.md"]);
-const destination=path.join(tmp,"destination");
-copyProfileAssets(validProfile,destination);
-for (const relativePath of ["project-management/WORK.md","project-management/templates/TASK.md"]) {
-  assert.equal(
-    fs.readFileSync(path.join(destination,...relativePath.split("/")),"utf8"),
-    "asset",
-    `${relativePath} was not copied to its relative destination`,
+  assert.throws(
+    () => loadProfileManifest(fixture("non-string-profile",{
+      profile:42,
+      version:"2.0.0",
+      files:[],
+    })),
+    /profile.*non-empty string/i,
   );
-}
+  assert.throws(
+    () => loadProfileManifest(fixture("wrong-version",{
+      profile:"fixture",
+      version:"1.0.0",
+      files:[],
+    })),
+    /version must be 2\.0\.0/i,
+  );
+  assert.throws(
+    () => loadProfileManifest(fixture("duplicate",{
+      profile:"fixture",
+      version:"2.0.0",
+      files:["project-management/WORK.md","project-management/WORK.md"],
+    },["project-management/WORK.md"])),
+    /duplicate/i,
+  );
+  assert.throws(
+    () => loadProfileManifest(fixture("dot-alias",{
+      profile:"fixture",
+      version:"2.0.0",
+      files:["dir/asset.md","dir/./asset.md"],
+    },["dir/asset.md"])),
+    /duplicate/i,
+  );
+  assert.throws(
+    () => loadProfileManifest(fixture("separator-alias",{
+      profile:"fixture",
+      version:"2.0.0",
+      files:["dir/asset.md","dir\\asset.md"],
+    },["dir/asset.md","dir\\asset.md"])),
+    /duplicate/i,
+  );
+  for (const relativePath of [
+    path.resolve(tmp,"outside.md"),
+    "C:\\outside.md",
+    "\\\\server\\share\\outside.md",
+    "\\rooted.md",
+  ]) {
+    assert.throws(
+      () => loadProfileManifest(fixture(`absolute-${relativePath.length}`,{
+        profile:"fixture",
+        version:"2.0.0",
+        files:[relativePath],
+      })),
+      /Unsafe profile asset path/,
+    );
+  }
+  assert.throws(
+    () => loadProfileManifest(fixture("traversal",{
+      profile:"fixture",
+      version:"2.0.0",
+      files:["project-management/../outside.md"],
+    })),
+    /Unsafe profile asset path/,
+  );
+  assert.throws(
+    () => loadProfileManifest(fixture("missing",{
+      profile:"fixture",
+      version:"2.0.0",
+      files:["project-management/MISSING.md"],
+    })),
+    /missing|regular file/i,
+  );
+  assert.throws(
+    () => loadProfileManifest(fixture("non-array",{
+      profile:"fixture",
+      version:"2.0.0",
+      files:"project-management/WORK.md",
+    })),
+    /files.*array/i,
+  );
 
-console.log("Profile assets test: PASS");
+  const validProfile=fixture("valid",{
+    profile:"fixture",
+    version:"2.0.0",
+    files:["project-management/WORK.md","project-management/templates/TASK.md"],
+  },["project-management/WORK.md","project-management/templates/TASK.md"]);
+  const destination=path.join(tmp,"destination");
+  const validatedManifest=loadProfileManifest(validProfile);
+  fs.rmSync(path.join(validProfile,"manifest.json"));
+  copyProfileAssets(validProfile,destination,validatedManifest);
+  for (const relativePath of ["project-management/WORK.md","project-management/templates/TASK.md"]) {
+    assert.equal(
+      fs.readFileSync(path.join(destination,...relativePath.split("/")),"utf8"),
+      "asset",
+      `${relativePath} was not copied to its relative destination`,
+    );
+  }
+
+  console.log("Profile assets test: PASS");
+} finally {
+  fs.rmSync(tmp,{recursive:true,force:true});
+}

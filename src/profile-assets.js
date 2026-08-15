@@ -5,9 +5,17 @@ function assertSafeRelativePath(relativePath) {
   if (typeof relativePath !== "string" || !relativePath.trim()) {
     throw new TypeError("Profile manifest file paths must be non-empty strings.");
   }
-  if (path.isAbsolute(relativePath) || relativePath.split(/[\\/]/).includes("..")) {
+  if (
+    path.posix.isAbsolute(relativePath)
+    || path.win32.isAbsolute(relativePath)
+    || relativePath.split(/[\\/]/).includes("..")
+  ) {
     throw new TypeError(`Unsafe profile asset path: ${relativePath}`);
   }
+}
+
+function canonicalizeRelativePath(relativePath) {
+  return path.posix.normalize(relativePath.replaceAll("\\","/"));
 }
 
 function validateManifest(manifest,profileRoot) {
@@ -28,16 +36,17 @@ function validateManifest(manifest,profileRoot) {
   const paths=new Set();
   for (const relativePath of manifest.files) {
     assertSafeRelativePath(relativePath);
-    if (paths.has(relativePath)) {
+    const canonicalPath=canonicalizeRelativePath(relativePath);
+    if (paths.has(canonicalPath)) {
       throw new TypeError(`Profile manifest contains duplicate file path: ${relativePath}`);
     }
-    paths.add(relativePath);
+    paths.add(canonicalPath);
 
-    const source=path.join(profileRoot,relativePath);
+    const source=path.join(profileRoot,canonicalPath);
     if (!fs.existsSync(source) || !fs.statSync(source).isFile()) {
       throw new TypeError(`Profile asset is missing or not a regular file: ${relativePath}`);
     }
-    files.push(relativePath);
+    files.push(canonicalPath);
   }
 
   return {profile:manifest.profile,version:manifest.version,files};
