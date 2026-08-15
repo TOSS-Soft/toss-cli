@@ -40,7 +40,6 @@ function listFiles(root) {
   function walk(directory) {
     for (const entry of fs.readdirSync(directory,{withFileTypes:true}).sort((a,b) =>
       a.name.localeCompare(b.name))) {
-      if (entry.name===".git") continue;
       const absolutePath=path.join(directory,entry.name);
       if (entry.isDirectory()) walk(absolutePath);
       else if (entry.isFile()) files.push(absolutePath);
@@ -66,14 +65,31 @@ function localReferenceTokens(text) {
   return tokens;
 }
 
+function isWithin(root,target) {
+  const relative=path.relative(root,target);
+  return relative!==".." &&
+    !relative.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relative);
+}
+
 function validateLocalReferences(projectRoot,files) {
+  const canonicalProjectRoot=fs.realpathSync(projectRoot);
   for (const file of files) {
     if (!REFERENCE_EXTENSIONS.has(path.extname(file).toLowerCase())) continue;
     const text=fs.readFileSync(file,"utf8");
     for (const token of localReferenceTokens(text)) {
       const reference=token.replace(/^\//,"").split("#",1)[0];
+      const target=path.resolve(projectRoot,reference);
       assert.ok(
-        fs.existsSync(path.resolve(projectRoot,reference)),
+        isWithin(projectRoot,target),
+        `${relativeFile(projectRoot,file)}: invalid local reference ${token}`,
+      );
+      assert.ok(
+        fs.existsSync(target),
+        `${relativeFile(projectRoot,file)}: invalid local reference ${token}`,
+      );
+      assert.ok(
+        isWithin(canonicalProjectRoot,fs.realpathSync(target)),
         `${relativeFile(projectRoot,file)}: invalid local reference ${token}`,
       );
     }

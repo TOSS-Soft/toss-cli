@@ -40,6 +40,12 @@ function generateProject(name,slug,delivery) {
   return path.join(tmp,slug);
 }
 
+function copyProject(source,name) {
+  const destination=path.join(tmp,name);
+  fs.cpSync(source,destination,{recursive:true});
+  return destination;
+}
+
 try {
   const coreProject=generateProject("Core Integrity Project","core-integrity-project",false);
   const deliveryProject=generateProject(
@@ -50,6 +56,59 @@ try {
 
   validateGeneratedProject(coreProject);
   validateGeneratedProject(deliveryProject);
+
+  const inRootProject=copyProject(coreProject,"in-root-reference-project");
+  fs.mkdirSync(path.join(inRootProject,"scripts","generated"),{recursive:true});
+  fs.writeFileSync(path.join(inRootProject,"scripts","existing.js"),"export {};\n","utf8");
+  fs.writeFileSync(
+    path.join(inRootProject,"REFERENCES.md"),
+    "Use `scripts/existing.js` and `scripts/generated`.\n",
+    "utf8",
+  );
+  validateGeneratedProject(inRootProject);
+
+  const traversalProject=copyProject(coreProject,"traversal-reference-project");
+  const outsideTraversalTarget=path.join(tmp,"outside-target");
+  fs.writeFileSync(outsideTraversalTarget,"outside\n","utf8");
+  const traversalDocument=path.join(traversalProject,"TRAVERSAL.md");
+  const traversalToken="scripts/../../outside-target";
+  fs.writeFileSync(traversalDocument,`See \`${traversalToken}\`.\n`,"utf8");
+  assert.throws(
+    () => validateGeneratedProject(traversalProject),
+    error => {
+      assert.match(error.message,/TRAVERSAL\.md/);
+      assert.match(error.message,/scripts\/\.\.\/\.\.\/outside-target/);
+      return true;
+    },
+  );
+
+  const symlinkProject=copyProject(coreProject,"symlink-reference-project");
+  const outsideSymlinkTarget=path.join(tmp,"outside-symlink-target.js");
+  fs.writeFileSync(outsideSymlinkTarget,"export {};\n","utf8");
+  fs.mkdirSync(path.join(symlinkProject,"scripts"),{recursive:true});
+  fs.symlinkSync(outsideSymlinkTarget,path.join(symlinkProject,"scripts","outside.js"));
+  const symlinkDocument=path.join(symlinkProject,"SYMLINK.md");
+  fs.writeFileSync(symlinkDocument,"See `scripts/outside.js`.\n","utf8");
+  assert.throws(
+    () => validateGeneratedProject(symlinkProject),
+    error => {
+      assert.match(error.message,/SYMLINK\.md/);
+      assert.match(error.message,/scripts\/outside\.js/);
+      return true;
+    },
+  );
+
+  const gitResidueProject=copyProject(coreProject,"git-residue-project");
+  const gitResidueDocument=path.join(gitResidueProject,".git","generated-note");
+  fs.writeFileSync(gitResidueDocument,"Trusted Evaluator\n","utf8");
+  assert.throws(
+    () => validateGeneratedProject(gitResidueProject),
+    error => {
+      assert.match(error.message,/\.git\/generated-note/);
+      assert.match(error.message,/Trusted Evaluator/);
+      return true;
+    },
+  );
 
   const brokenDocument=path.join(coreProject,"BROKEN.md");
   fs.writeFileSync(brokenDocument,"See `scripts/missing.js`.\n","utf8");
