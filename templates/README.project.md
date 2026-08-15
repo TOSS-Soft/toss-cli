@@ -33,6 +33,8 @@ The agent hydrates:
 6. relevant GitHub Project state
 
 Core owns intent, authority, work, state, quality outcomes, and evidence
-acceptance. Superpowers supplies the required technical method. When Delivery
-is installed, branch-protection checks come only from the explicit
-`delivery.required_status_checks` list in the Project Brief.
+acceptance. Superpowers supplies the required technical method.
+
+Required status checks come only from the exact contexts configured in
+`delivery.required_status_checks`, independently of whether the optional
+Delivery governance profile is installed.

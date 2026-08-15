@@ -19,35 +19,49 @@ templates. Never blindly delete or overwrite a populated `PROJECT_STATE`,
 decision, risk, release, incident, datafix, or waiver record. Preserve its
 history and content, then reconcile it into the v2 document or record shape.
 
-## Core Consolidation Map
+## Core Policy and State Consolidation
 
 | v1 source | v2 destination | Migration action |
 | --- | --- | --- |
 | `project-management/PM_AGENT.md`, `project-management/GOVERNANCE.md`, `project-management/policies/AUTHORITY.md` | `project-management/GOVERNANCE.md` | Reconcile project-specific authority, protected decisions, and instruction precedence into the new canonical governance document. |
 | `project-management/policies/OBJECTIVES.md`, `project-management/policies/TASKS.md`, `project-management/policies/AGENTS.md` | `project-management/WORK.md` | Preserve active Objective and Task state, assignments, scope boundaries, and change decisions. Do not copy duplicated technical procedures. |
 | `project-management/policies/EVIDENCE.md`, `project-management/policies/QUALITY.md` | `project-management/QUALITY.md` | Preserve applicable validation, evidence, findings, waivers, and Definition of Done decisions. |
-| `project-management/templates/TASK_CONTRACT.md`, `ASSIGNMENT.md`, `CHANGE_REQUEST.md`, `COMPLETION_REPORT.md`, `AGENT_HANDOVER.md` | `project-management/templates/TASK.md` | Use the lifecycle sections in the v2 Task record. Migrate each populated Task individually rather than replacing it with a blank template. |
-| v1 bootstrap/project state | `project-management/PROJECT_STATE.md` | Reconcile the current project checkpoint; retain active work, decisions, risks, waivers, environment state, and known unknowns. |
-| populated decision, risk, and waiver records | `project-management/templates/DECISION.md`, `RISK.md`, `WAIVER.md` shapes | Retain record identity and history while adopting the v2 fields that apply. |
+| `project-management/PROJECT_STATE.md`, `project-management/bootstrap/PM_BOOTSTRAP_STATE.md` | `project-management/PROJECT_STATE.md` | Reconcile both populated state sources into the current project checkpoint; retain active work, decisions, risks, waivers, environment state, and known unknowns. |
+
+## Core Record and Template Consolidation
+
+| v1 record or template source | v2 record-template destination | Migration action |
+| --- | --- | --- |
+| `project-management/templates/TASK_CONTRACT.md`, `project-management/templates/ASSIGNMENT.md`, `project-management/templates/CHANGE_REQUEST.md`, `project-management/templates/COMPLETION_REPORT.md`, `project-management/templates/AGENT_HANDOVER.md` | `project-management/templates/TASK.md` | Use the lifecycle sections in the v2 Task record. Migrate each populated Task individually rather than replacing it with a blank template. |
+| `project-management/DECISIONS.md`, `project-management/templates/DECISION.md` | `project-management/templates/DECISION.md` | Preserve each populated decision's identity and history while adopting the v2 record shape. |
+| `project-management/RISKS.md`, `project-management/templates/RISK.md` | `project-management/templates/RISK.md` | Preserve each populated risk's identity and history while adopting the v2 record shape. |
+| `project-management/templates/WAIVER.md` | `project-management/templates/WAIVER.md` | Preserve each populated waiver's identity and history while adopting the v2 record shape. |
 
 The root `SUPERPOWERS.md` is now the sole technical-method contract. Keep
 project intent, scope, authority, state, and evidence acceptance in Core; do
 not carry duplicated technical workflow instructions into Core documents.
 
-## Optional Delivery Map
+## Optional Delivery Policy Consolidation
 
 Delivery is not installed by default. Enable it only by setting
 `governance.delivery: true` in the Project Brief, then migrate the applicable
 operational content:
 
-| v1 source | v2 Delivery destination |
-| --- | --- |
-| `project-management/policies/RELEASES.md` | `project-management/policies/DELIVERY.md` and `project-management/templates/RELEASE.md` |
-| `project-management/policies/INFRASTRUCTURE.md` | `project-management/policies/DELIVERY.md` |
-| advanced delivery rules from `project-management/policies/SECURITY.md` | `project-management/policies/DELIVERY.md` |
-| `project-management/policies/DATA.md` | `project-management/policies/OPERATIONS.md` and `project-management/templates/DATAFIX.md` |
-| `project-management/policies/INCIDENTS.md` | `project-management/policies/OPERATIONS.md` and `project-management/templates/INCIDENT.md` |
-| `project-management/templates/RELEASE_MANIFEST.md` | `project-management/templates/RELEASE.md` |
+| v1 policy source | v2 Delivery policy destination | Migration action |
+| --- | --- | --- |
+| `project-management/policies/RELEASES.md` | `project-management/policies/DELIVERY.md` | Reconcile release authority, validation, approval, rollout, and rollback rules into the Delivery policy. |
+| `project-management/policies/INFRASTRUCTURE.md` | `project-management/policies/DELIVERY.md` | Reconcile infrastructure preview, configuration, execution, and rollback rules into the Delivery policy. |
+| Advanced delivery rules from `project-management/policies/SECURITY.md` | `project-management/policies/DELIVERY.md` | Move only delivery-specific security gates; retain basic security outcomes in Core quality rules. |
+| `project-management/policies/DATA.md` | `project-management/policies/OPERATIONS.md` | Reconcile production data classification, authority, dry-run, backup, recovery, and mutation rules into Operations. |
+| `project-management/policies/INCIDENTS.md` | `project-management/policies/OPERATIONS.md` | Reconcile incident severity, containment, evidence, stabilization, review, and corrective-work rules into Operations. |
+
+## Optional Delivery Record and Template Consolidation
+
+| v1 record or template source | v2 Delivery record-template destination | Migration action |
+| --- | --- | --- |
+| `project-management/templates/RELEASE_MANIFEST.md` | `project-management/templates/RELEASE.md` | Preserve each populated release record and reconcile it into the v2 Release shape. |
+| `project-management/templates/DATAFIX.md` | `project-management/templates/DATAFIX.md` | Preserve each populated datafix record and reconcile it into the v2 Datafix shape. |
+| `project-management/templates/INCIDENT.md` | `project-management/templates/INCIDENT.md` | Preserve each populated incident record and reconcile it into the v2 Incident shape. |
 
 Basic secret hygiene, dependency safety, and data-safety expectations remain
 in Core `project-management/QUALITY.md`. Preserve every populated release,

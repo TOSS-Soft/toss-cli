@@ -175,6 +175,10 @@ const generatedReadme=fs.readFileSync(path.join(project,"README.md"),"utf8");
 assert.match(generatedReadme,/Superpowers: REQUIRED/);
 assert.match(generatedReadme,/AGENTS\.md/);
 assert.doesNotMatch(generatedReadme,/Start Claude Code/);
+assert.match(
+  generatedReadme,
+  /Required status checks come only from the exact contexts configured in\s+`delivery\.required_status_checks`, independently of whether the optional\s+Delivery governance profile is installed\./,
+);
 
 const projectBriefTemplate=fs.readFileSync(
   path.join(root,"templates/project-brief.yaml"),
@@ -190,6 +194,31 @@ assert.equal(lockMetadata.packages[""].version,"2.0.0");
 assert.equal(packageMetadata.keywords.includes("langsmith"),false);
 assert.ok(packageMetadata.keywords.includes("modular-governance"));
 assert.ok(fs.existsSync(path.join(root,"docs/migrations/governance-v2.md")));
+const migrationGuide=fs.readFileSync(
+  path.join(root,"docs/migrations/governance-v2.md"),
+  "utf8",
+);
+for (const row of [
+  "| `project-management/PROJECT_STATE.md`, `project-management/bootstrap/PM_BOOTSTRAP_STATE.md` | `project-management/PROJECT_STATE.md` |",
+  "| `project-management/templates/TASK_CONTRACT.md`, `project-management/templates/ASSIGNMENT.md`, `project-management/templates/CHANGE_REQUEST.md`, `project-management/templates/COMPLETION_REPORT.md`, `project-management/templates/AGENT_HANDOVER.md` | `project-management/templates/TASK.md` |",
+  "| `project-management/DECISIONS.md`, `project-management/templates/DECISION.md` | `project-management/templates/DECISION.md` |",
+  "| `project-management/RISKS.md`, `project-management/templates/RISK.md` | `project-management/templates/RISK.md` |",
+  "| `project-management/templates/WAIVER.md` | `project-management/templates/WAIVER.md` |",
+  "| `project-management/policies/RELEASES.md` | `project-management/policies/DELIVERY.md` |",
+  "| `project-management/policies/INFRASTRUCTURE.md` | `project-management/policies/DELIVERY.md` |",
+  "| Advanced delivery rules from `project-management/policies/SECURITY.md` | `project-management/policies/DELIVERY.md` |",
+  "| `project-management/policies/DATA.md` | `project-management/policies/OPERATIONS.md` |",
+  "| `project-management/policies/INCIDENTS.md` | `project-management/policies/OPERATIONS.md` |",
+  "| `project-management/templates/RELEASE_MANIFEST.md` | `project-management/templates/RELEASE.md` |",
+  "| `project-management/templates/DATAFIX.md` | `project-management/templates/DATAFIX.md` |",
+  "| `project-management/templates/INCIDENT.md` | `project-management/templates/INCIDENT.md` |",
+]) {
+  assert.ok(migrationGuide.includes(row),`Missing exact migration row: ${row}`);
+}
+assert.ok(
+  packageMetadata.files.includes("docs/migrations/governance-v2.md"),
+  "package files allowlist omits docs/migrations/governance-v2.md",
+);
 assert.ok(packageMetadata.keywords.includes("superpowers"));
 assert.ok(packageMetadata.keywords.includes("agent-governance"));
 

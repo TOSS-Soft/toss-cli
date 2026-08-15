@@ -10,6 +10,7 @@
     "bin",
     "src",
     "templates",
+    "docs/migrations/governance-v2.md",
     "README.md",
     "LICENSE"
   ],
