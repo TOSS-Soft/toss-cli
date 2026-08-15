@@ -20,7 +20,7 @@
     "yaml": "^2.8.1"
   },
   "scripts": {
-    "test": "node ./scripts/governance-config-test.js && node ./scripts/profile-assets-test.js && node ./scripts/smoke-test.js",
+    "test": "node ./scripts/governance-config-test.js && node ./scripts/profile-assets-test.js && node ./scripts/smoke-test.js && node ./scripts/reference-integrity-test.js",
     "prepack": "npm test",
     "release:version": "node ./scripts/release-version.mjs"
   },

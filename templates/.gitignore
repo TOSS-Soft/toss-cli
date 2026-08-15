@@ -11,5 +11,3 @@ build/
 coverage/
 .cache/
 out/
-governance-certification.json
-governance-certification.md
