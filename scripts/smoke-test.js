@@ -176,8 +176,20 @@ assert.match(generatedReadme,/Superpowers: REQUIRED/);
 assert.match(generatedReadme,/AGENTS\.md/);
 assert.doesNotMatch(generatedReadme,/Start Claude Code/);
 
+const projectBriefTemplate=fs.readFileSync(
+  path.join(root,"templates/project-brief.yaml"),
+  "utf8",
+);
+assert.doesNotMatch(projectBriefTemplate,/^langsmith:/m);
+
 const packageMetadata=JSON.parse(fs.readFileSync(path.join(root,"package.json"),"utf8"));
 assert.equal(packageMetadata.version,packageVersion);
+assert.equal(packageMetadata.version,"2.0.0");
+assert.equal(lockMetadata.version,"2.0.0");
+assert.equal(lockMetadata.packages[""].version,"2.0.0");
+assert.equal(packageMetadata.keywords.includes("langsmith"),false);
+assert.ok(packageMetadata.keywords.includes("modular-governance"));
+assert.ok(fs.existsSync(path.join(root,"docs/migrations/governance-v2.md")));
 assert.ok(packageMetadata.keywords.includes("superpowers"));
 assert.ok(packageMetadata.keywords.includes("agent-governance"));
 

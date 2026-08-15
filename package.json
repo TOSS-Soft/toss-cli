@@ -1,6 +1,6 @@
 {
   "name": "@toss-software/cli",
-  "version": "1.2.1",
+  "version": "2.0.0",
   "description": "TOSS PM Governance project bootstrap CLI",
   "type": "module",
   "bin": {
@@ -42,6 +42,6 @@
     "governance",
     "agent-governance",
     "superpowers",
-    "langsmith"
+    "modular-governance"
   ]
 }

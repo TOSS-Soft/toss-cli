@@ -85,9 +85,6 @@ delivery:
   create_github_project: false
   apply_main_ruleset: false
 
-langsmith:
-  project: AUTO
-
 constraints: []
 
 initial_objective:
