@@ -1,7 +1,7 @@
 # Global Agent Catalog
 
 Catalog Version: 1.0.0  
-Governance Version: 1.6.0  
+Governance Version: 2.0.0
 Status: ACTIVE
 
 ## Purpose

@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import YAML from "yaml";
 import { resolveGovernanceProfiles } from "./governance-config.js";
+import { copyProfileAssets, loadProfileManifest } from "./profile-assets.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -12,7 +13,7 @@ const ROOT = path.resolve(__dirname, "..");
 const TEMPLATE = path.join(ROOT, "templates");
 
 const VERSION = JSON.parse(fs.readFileSync(path.join(ROOT,"package.json"),"utf8")).version;
-const GOVERNANCE_VERSION = "1.6.0";
+const GOVERNANCE_VERSION = "2.0.0";
 
 function die(message, code=1) {
   console.error(message);
@@ -47,10 +48,6 @@ function slugify(name) {
 }
 
 function ensureDir(p) { fs.mkdirSync(p,{recursive:true}); }
-
-function copyTree(src,dst) {
-  fs.cpSync(src,dst,{recursive:true});
-}
 
 function render(text, vals) {
   for (const [k,v] of Object.entries(vals)) {
@@ -212,13 +209,19 @@ function updateProjectJson(dest, updates) {
   writeJson(p,d);
 }
 
-function hydrateProjectState(dest,name,remote,projectUrl,langsmith) {
+function updateGovernanceProfiles(dest,profiles) {
+  const p=path.join(dest,"project.json");
+  const d=readJson(p);
+  d.governance={...d.governance,profiles:{...profiles}};
+  writeJson(p,d);
+}
+
+function hydrateProjectState(dest,name,remote,projectUrl) {
   const p=path.join(dest,"project-management","PROJECT_STATE.md");
   let t=fs.readFileSync(p,"utf8");
-  t=t.replace("Name:\n",`Name: ${name}\n`);
-  if (remote) t=t.replace("Repositories:\n",`Repositories: https://github.com/${remote}\n`);
-  if (projectUrl) t=t.replace("GitHub Project:\n",`GitHub Project: ${projectUrl}\n`);
-  if (langsmith) t=t.replace(/Project: .*/,`Project: ${langsmith}`);
+  t=t.replace(/^Name:.*$/m,`Name: ${name}`);
+  if (remote) t=t.replace(/^Repositor(?:y|ies):.*$/m,`Repository: https://github.com/${remote}`);
+  if (projectUrl) t=t.replace(/^GitHub Project:.*$/m,`GitHub Project: ${projectUrl}`);
   fs.writeFileSync(p,t,"utf8");
 }
 
@@ -236,7 +239,7 @@ function writeBriefContext(dest,data) {
     security:data.security||{},
     design:data.design||{required:"AUTO"},
     delivery:data.delivery||{},
-    langsmith:data.langsmith||{},
+    governance:data.governance ?? {delivery:false},
     constraints:data.constraints||[],
     initial_objective:data.initial_objective||{}
   };
@@ -255,12 +258,13 @@ function applyBriefToState(dest,data) {
 
 function createFromConfig(a, briefData=null) {
   const slug=a.slug || slugify(a.name);
-  const langsmith=a.langsmithProject || slug;
+  const coreRoot=path.join(TEMPLATE,"governance","core");
+  const coreManifest=loadProfileManifest(coreRoot);
   const dest=path.resolve(a.directory || slug);
   if (fs.existsSync(dest) && fs.readdirSync(dest).length && !a.force) die(`Destination is not empty: ${dest}`);
   ensureDir(dest);
 
-  copyTree(path.join(TEMPLATE,"governance"),dest);
+  copyProfileAssets(coreRoot,dest,coreManifest);
 
   const vals={
     PROJECT_NAME:a.name,
@@ -268,14 +272,12 @@ function createFromConfig(a, briefData=null) {
     DESCRIPTION:a.description || a.name,
     GITHUB_OWNER:a.owner,
     VISIBILITY:a.visibility,
-    LANGSMITH_PROJECT:langsmith,
   };
 
   const files=[
     ["README.project.md","README.md"],
     ["project.json","project.json"],
     [".gitignore",".gitignore"],
-    [".env.example",".env.example"],
     ["CLAUDE.md","CLAUDE.md"],
     ["AGENTS.md","AGENTS.md"],
     ["SUPERPOWERS.md","SUPERPOWERS.md"],
@@ -284,14 +286,10 @@ function createFromConfig(a, briefData=null) {
     fs.writeFileSync(path.join(dest,dst),render(fs.readFileSync(path.join(TEMPLATE,src),"utf8"),vals),"utf8");
   }
   renderTree(dest,vals);
+  updateGovernanceProfiles(dest,a.governanceProfiles);
 
-  const b=path.join(dest,"project-management","bootstrap");
-  ensureDir(b);
-  fs.copyFileSync(path.join(TEMPLATE,"PM_BOOTSTRAP_STATE.md"),path.join(b,"PM_BOOTSTRAP_STATE.md"));
   fs.copyFileSync(path.join(TEMPLATE,"GLOBAL_AGENT_CATALOG.json"),path.join(dest,"project-management","GLOBAL_AGENT_CATALOG.json"));
   fs.copyFileSync(path.join(TEMPLATE,"GLOBAL_AGENT_CATALOG.md"),path.join(dest,"project-management","GLOBAL_AGENT_CATALOG.md"));
-  fs.copyFileSync(path.join(TEMPLATE,"AGENT_CAPABILITY_PLAN.md"),path.join(b,"AGENT_CAPABILITY_PLAN.md"));
-  fs.copyFileSync(path.join(TEMPLATE,"AGENT_PROPOSAL.md"),path.join(dest,"project-management","templates","AGENT_PROPOSAL.md"));
   const designDir=path.join(dest,"project-management","design");
   ensureDir(designDir);
   fs.copyFileSync(path.join(TEMPLATE,"DESIGN_BRIEF.md"),path.join(designDir,"DESIGN_BRIEF.md"));
@@ -321,8 +319,7 @@ function createFromConfig(a, briefData=null) {
     updateProjectJson(dest,{ruleset:"APPLIED"});
   }
 
-  updateProjectJson(dest,{langsmith:"CONFIG_READY"});
-  hydrateProjectState(dest,a.name,remote,gp?.url||null,langsmith);
+  hydrateProjectState(dest,a.name,remote,gp?.url||null);
 
   if (briefData) {
     writeBriefContext(dest,briefData);
@@ -350,7 +347,6 @@ function createFromConfig(a, briefData=null) {
   console.log(" Project:",a.name);
   console.log(" Directory:",dest);
   console.log(" Governance: v"+GOVERNANCE_VERSION);
-  console.log(" LangSmith:",langsmith);
   console.log(" GitHub repo:",remote||"not created");
   console.log("\nNext:");
   console.log(`  cd ${slug}`);
@@ -361,7 +357,7 @@ function createFromConfig(a, briefData=null) {
 function parseLegacy(args) {
   const a={
     name:args[0], owner:"toss-software", visibility:"private",
-    description:"", directory:null, slug:null, langsmithProject:null,
+    description:"", directory:null, slug:null,
     github:false, githubProject:false, ruleset:false, noGit:false, force:false
   };
   for (let i=1;i<args.length;i++) {
@@ -372,7 +368,6 @@ function parseLegacy(args) {
     else if (x==="--visibility") a.visibility=value();
     else if (x==="--dir") a.directory=value();
     else if (x==="--slug") a.slug=value();
-    else if (x==="--langsmith-project") a.langsmithProject=value();
     else if (x==="--github") a.github=true;
     else if (x==="--github-project") a.githubProject=true;
     else if (x==="--ruleset") a.ruleset=true;
@@ -424,7 +419,6 @@ function main() {
     }
     const name=String(nested(data,["project","name"]));
     const slugRaw=nested(data,["project","slug"],"AUTO");
-    const lsRaw=nested(data,["langsmith","project"],"AUTO");
     const delivery=data.delivery||{};
     const a={
       name,
@@ -433,7 +427,6 @@ function main() {
       owner:String(delivery.github_owner||"toss-software"),
       visibility:String(delivery.visibility||"private"),
       directory:null,
-      langsmithProject:String(lsRaw).toUpperCase()==="AUTO"?null:String(lsRaw),
       github:Boolean(delivery.create_github_repository),
       githubProject:Boolean(delivery.create_github_project),
       ruleset:Boolean(delivery.apply_main_ruleset),

@@ -83,18 +83,47 @@ result=runCli(["create",brief],{cwd:tmp});
 assertSuccess(result,"toss create with design");
 
 const project=path.join(tmp,"design-smoke-project");
-for (const rel of [
-  "CLAUDE.md",
+const coreFiles=[
   "AGENTS.md",
+  "CLAUDE.md",
   "SUPERPOWERS.md",
+  "project-management/GOVERNANCE.md",
+  "project-management/WORK.md",
+  "project-management/QUALITY.md",
+  "project-management/PROJECT_STATE.md",
+  "project-management/AGENT_REGISTRY.md",
+  "project-management/templates/OBJECTIVE.md",
+  "project-management/templates/TASK.md",
+  "project-management/templates/DECISION.md",
+  "project-management/templates/RISK.md",
+  "project-management/templates/WAIVER.md",
+];
+for (const rel of coreFiles) {
+  assert.ok(fs.existsSync(path.join(project,rel)),`Missing ${rel}`);
+}
+
+for (const rel of [
   "project.json",
-  "project-management/PM_AGENT.md",
   "project-management/bootstrap/PROJECT_BRIEF.json",
+  "project-management/bootstrap/PROJECT_BRIEF_GUIDE.md",
   "project-management/GLOBAL_AGENT_CATALOG.json",
+  "project-management/GLOBAL_AGENT_CATALOG.md",
   "project-management/design/DESIGN_BRIEF.md",
   "project-management/design/DESIGN_SYSTEM.md",
 ]) {
-  assert.ok(fs.existsSync(path.join(project,rel)),`Missing ${rel}`);
+  assert.ok(fs.existsSync(path.join(project,rel)),`Missing retained bootstrap asset ${rel}`);
+}
+
+for (const rel of [
+  "project-management/PM_AGENT.md",
+  "project-management/policies/LANGSMITH.md",
+  "project-management/bootstrap/PM_BOOTSTRAP_STATE.md",
+  ".github/workflows/pm-governance-certification.yml",
+  ".env.example",
+  "project-management/bootstrap/AGENT_CAPABILITY_PLAN.md",
+  "project-management/templates/AGENT_PROPOSAL.md",
+]) {
+  assert.ok(!fs.existsSync(path.join(project,rel)),`Unexpected legacy asset ${rel}`);
 }
 
 const claudeBridge=fs.readFileSync(path.join(project,"CLAUDE.md"),"utf8");
@@ -102,7 +131,8 @@ assert.equal(claudeBridge,"@AGENTS.md\n");
 
 const agentsBootstrap=fs.readFileSync(path.join(project,"AGENTS.md"),"utf8");
 assert.match(agentsBootstrap,/SUPERPOWERS\.md/);
-assert.match(agentsBootstrap,/project-management\/PM_AGENT\.md/);
+assert.match(agentsBootstrap,/project-management\/WORK\.md/);
+assert.match(agentsBootstrap,/project-management\/QUALITY\.md/);
 assert.match(agentsBootstrap,/BLOCKED_SUPERPOWERS_MISSING/);
 
 const superpowersContract=fs.readFileSync(path.join(project,"SUPERPOWERS.md"),"utf8");
@@ -137,6 +167,11 @@ assert.ok(packageMetadata.keywords.includes("superpowers"));
 assert.ok(packageMetadata.keywords.includes("agent-governance"));
 
 const projectState=JSON.parse(fs.readFileSync(path.join(project,"project.json"),"utf8"));
+assert.equal(projectState.governance.version,"2.0.0");
+assert.equal(projectState.governance.profiles.core,true);
+assert.equal(projectState.governance.profiles.delivery,false);
+assert.ok(!Object.hasOwn(projectState,"langsmith"));
+assert.ok(!Object.hasOwn(projectState.bootstrap_state,"langsmith"));
 assert.equal(projectState.bootstrap_state.design_system,"DISCOVERY_REQUIRED");
 assert.deepEqual(projectState.superpowers,{
   requirement:"REQUIRED",
@@ -159,56 +194,7 @@ const canonicalState=fs.readFileSync(
   "utf8",
 );
 assert.match(canonicalState,/## Superpowers State/);
-assert.match(canonicalState,/Availability: PENDING_VERIFICATION/);
-assert.match(canonicalState,/Execution State: READY/);
-
-const pmConstitution=fs.readFileSync(
-  path.join(project,"project-management/PM_AGENT.md"),
-  "utf8",
-);
-for (const phrase of [
-  "Superpowers Execution Boundary",
-  "ROUTE SUPERPOWERS",
-  "verification-before-completion",
-  "BLOCKED_SUPERPOWERS_MISSING",
-]) {
-  assert.match(pmConstitution,new RegExp(phrase));
-}
-
-const agentPolicy=fs.readFileSync(
-  path.join(project,"project-management/policies/AGENTS.md"),
-  "utf8",
-);
-assert.match(agentPolicy,/AGENT-018 — Superpowers Contract/);
-assert.match(agentPolicy,/AGENT-019 — Missing Superpowers Capability/);
-assert.match(agentPolicy,/AGENT-020 — Evidence Handoff/);
-
-const taskPolicy=fs.readFileSync(
-  path.join(project,"project-management/policies/TASKS.md"),"utf8",
-);
-assert.match(taskPolicy,/TASK-021 — Superpowers Execution/);
-assert.match(taskPolicy,/TASK-022 — Missing Superpowers Block/);
-
-const qualityPolicy=fs.readFileSync(
-  path.join(project,"project-management/policies/QUALITY.md"),"utf8",
-);
-assert.match(qualityPolicy,/QUAL-021 — Test-Driven Implementation/);
-assert.match(qualityPolicy,/QUAL-022 — Systematic Debugging/);
-assert.match(qualityPolicy,/QUAL-023 — Completion Verification/);
-assert.match(qualityPolicy,/QUAL-024 — Code Review Workflow/);
-
-const releasePolicy=fs.readFileSync(
-  path.join(project,"project-management/policies/RELEASES.md"),"utf8",
-);
-assert.match(releasePolicy,/REL-051 — Development Branch Completion/);
-assert.match(releasePolicy,/finishing-a-development-branch/);
-assert.match(releasePolicy,/MUST NOT grant merge, release, deployment, rollout, or production authority/);
-
-const assignmentTemplate=fs.readFileSync(
-  path.join(project,"project-management/templates/ASSIGNMENT.md"),
-  "utf8",
-);
-assert.match(assignmentTemplate,/Canonical Superpowers Capability:/);
+assert.match(canonicalState,/## Superpowers State\n\nStatus: UNKNOWN/);
 
 const context=JSON.parse(fs.readFileSync(
   path.join(project,"project-management/bootstrap/PROJECT_BRIEF.json"),
@@ -219,6 +205,8 @@ assert.equal(context.design.source,"company_system");
 assert.equal(context.design.production_tool,"pencil");
 assert.equal(context.design.company_design_system.name,"TOSS Brand System");
 assert.deepEqual(context.design.company_design_system.references,["docs/brand.md"]);
+assert.deepEqual(context.governance,{delivery:false});
+assert.ok(!Object.hasOwn(context,"langsmith"));
 
 const invalidBrief=path.join(tmp,"invalid-design-brief.yaml");
 const invalid=structuredClone(explicit);

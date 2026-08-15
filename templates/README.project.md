@@ -4,13 +4,11 @@
 
 ## Governance
 
-This repository uses TOSS PM Governance v1.6.0.
+This repository uses TOSS PM Governance v2.0.0.
 
 - Governance root: `/project-management/`
 - Execution SSOT: GitHub Projects
 - Verified CEO GitHub identity: `@toss-software`
-- Trusted governance check: `governance-certification`
-- LangSmith benchmark: `pm-governance-benchmark-v1`
 
 ## Agent Startup
 
@@ -22,8 +20,9 @@ Start a supported agent host in the repository root. The shared bootstrap is
 
 The agent hydrates:
 
-1. `project-management/PM_AGENT.md`
-2. `project-management/GOVERNANCE.md`
-3. `project-management/PROJECT_STATE.md`
-4. `SUPERPOWERS.md` when technical work is requested
-5. relevant GitHub Project state
+1. `project-management/GOVERNANCE.md`
+2. `project-management/WORK.md`
+3. `project-management/QUALITY.md`
+4. `project-management/PROJECT_STATE.md`
+5. `SUPERPOWERS.md` before technical work
+6. relevant GitHub Project state

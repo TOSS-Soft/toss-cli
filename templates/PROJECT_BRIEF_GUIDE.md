@@ -28,6 +28,15 @@ discovery.
 `AUTO` does not authorize arbitrary scope. If resolving an AUTO field creates
 a genuine A3/product/authority ambiguity, PM escalates it.
 
+## Governance Profiles
+
+`governance.delivery` is Boolean. It defaults to `false`, which installs only
+Core governance. Set it to `true` only when the project needs the Delivery
+profile's release, operations, incident, and production controls.
+
+Profile selection is deterministic at creation time. Delivery intent elsewhere
+in the brief does not implicitly enable the Delivery governance profile.
+
 ## Design
 
 The `design` section supports a hybrid workflow: record known decisions before
