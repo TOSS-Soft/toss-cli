@@ -355,6 +355,10 @@ export function writeContainedFiles(destination,assets) {
       assets[index].contents,
     );
   }
+  inspectDestinationTargets(
+    prepared.destinationRoot,
+    prepared.normalizedPaths,
+  );
 }
 
 export function loadProfileManifest(profileRoot) {
