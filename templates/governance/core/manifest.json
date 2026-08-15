@@ -1,0 +1,16 @@
+{
+  "profile": "core",
+  "version": "2.0.0",
+  "files": [
+    "project-management/GOVERNANCE.md",
+    "project-management/WORK.md",
+    "project-management/QUALITY.md",
+    "project-management/PROJECT_STATE.md",
+    "project-management/AGENT_REGISTRY.md",
+    "project-management/templates/OBJECTIVE.md",
+    "project-management/templates/TASK.md",
+    "project-management/templates/DECISION.md",
+    "project-management/templates/RISK.md",
+    "project-management/templates/WAIVER.md"
+  ]
+}
