@@ -1,20 +1,21 @@
-name: Publish npm package
+name: Publish npm packages and GitHub Release
 
 on:
   push:
-    tags:
-      - 'v*.*.*'
+    tags: ['v*.*.*']
 
-permissions:
-  contents: read
-  id-token: write
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  publish:
-    name: npm-publish
+  validate:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-
+    permissions: { contents: read }
+    outputs:
+      version: ${{ steps.metadata.outputs.version }}
+      artifact_name: ${{ steps.metadata.outputs.artifact_name }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -23,30 +24,153 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: '24'
-          registry-url: 'https://registry.npmjs.org'
           package-manager-cache: false
 
-      - name: Validate tag matches package version
+      - name: Read release metadata
+        id: metadata
         shell: bash
         run: |
           set -euo pipefail
-          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
-          echo "package.json: $PACKAGE_VERSION"
-          echo "tag:          $TAG_VERSION"
-          [[ "$PACKAGE_VERSION" == "$TAG_VERSION" ]] || {
-            echo "::error::Tag v$TAG_VERSION does not match package.json version $PACKAGE_VERSION"
-            exit 1
-          }
+          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          node ./scripts/release-metadata.mjs "$GITHUB_REF_NAME" refs/remotes/origin/main
 
       - name: Install dependencies
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
 
       - name: Test
         run: npm test
 
-      - name: Inspect publish payload
-        run: npm pack --dry-run
+      - name: Build and verify release tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          npm pack --json --ignore-scripts --pack-destination dist
+          TARBALL="$(find dist -maxdepth 1 -name '*.tgz' -type f -print -quit)"
+          test -n "$TARBALL"
+          SHA256="$(sha256sum "$TARBALL" | awk '{print $1}')"
+          [[ "$SHA256" =~ ^[0-9a-f]{64}$ ]]
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.metadata.outputs.artifact_name }}
+          path: dist/*.tgz
+          if-no-files-found: error
+          compression-level: 0
+
+  publish_npm:
+    needs: [validate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.validate.outputs.artifact_name }}
+          path: dist
 
       - name: Publish to npm with Trusted Publishing
-        run: npm publish --access public
+        shell: bash
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          PUBLISHED="$(npm view "@toss-software/cli@$VERSION" version --registry=https://registry.npmjs.org 2>/dev/null || true)"
+          if [[ "$PUBLISHED" == "$VERSION" ]]; then
+            echo "@toss-software/cli@$VERSION already exists; verified."
+            exit 0
+          fi
+          TARBALL="$(find dist -maxdepth 1 -name '*.tgz' -type f -print -quit)"
+          test -n "$TARBALL"
+          npm publish "$TARBALL" --access public --provenance
+          test "$(npm view "@toss-software/cli@$VERSION" version --registry=https://registry.npmjs.org)" = "$VERSION"
+
+  publish_github_packages:
+    needs: [validate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@toss-soft'
+          package-manager-cache: false
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.validate.outputs.artifact_name }}
+          path: dist
+
+      - name: Publish to GitHub Packages
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          PUBLISHED="$(npm view "@toss-soft/cli@$VERSION" version --registry=https://npm.pkg.github.com 2>/dev/null || true)"
+          if [[ "$PUBLISHED" == "$VERSION" ]]; then
+            echo "@toss-soft/cli@$VERSION already exists; verified."
+            exit 0
+          fi
+          SOURCE_TARBALL="$(find dist -maxdepth 1 -name '*.tgz' -type f -print -quit)"
+          mkdir -p github-package github-dist
+          tar -xzf "$SOURCE_TARBALL" -C github-package
+          node ./scripts/prepare-github-package.mjs github-package/package github-package/prepared
+          npm pack ./github-package/prepared --ignore-scripts --pack-destination github-dist
+          GITHUB_TARBALL="$(find github-dist -maxdepth 1 -name '*.tgz' -type f -print -quit)"
+          npm publish "$GITHUB_TARBALL" --registry=https://npm.pkg.github.com --ignore-scripts
+          test "$(npm view "@toss-soft/cli@$VERSION" version --registry=https://npm.pkg.github.com)" = "$VERSION"
+
+  release:
+    needs: [validate, publish_npm, publish_github_packages]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions: { contents: write }
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: ${{ needs.validate.outputs.artifact_name }}
+          path: dist
+
+      - name: Create or update GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TARBALL="$(find dist -maxdepth 1 -name '*.tgz' -type f -print -quit)"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release edit "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --draft=false --prerelease=false --latest
+            gh release upload "$GITHUB_REF_NAME" "$TARBALL" --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" "$TARBALL" --verify-tag --generate-notes --latest --title "$GITHUB_REF_NAME"
+          fi
+          gh release view "$GITHUB_REF_NAME" --json tagName,isDraft,isPrerelease,url,assets > release.json
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+
+          const release = JSON.parse(readFileSync('release.json', 'utf8'));
+          if (
+            release.tagName !== process.env.GITHUB_REF_NAME ||
+            release.isDraft ||
+            release.isPrerelease ||
+            !release.assets.some((asset) => asset.name.endsWith('.tgz'))
+          ) {
+            throw new Error('GitHub Release verification failed');
+          }
+          NODE

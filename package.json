@@ -21,7 +21,7 @@
     "yaml": "^2.8.1"
   },
   "scripts": {
-    "test": "node ./scripts/governance-config-test.js && node ./scripts/profile-assets-test.js && node ./scripts/smoke-test.js && node ./scripts/reference-integrity-test.js && node --test ./scripts/create-atomicity-test.js && node ./scripts/overlay-safety-test.js && node ./scripts/project-state-hydration-test.js && node --test ./scripts/governance-contract-test.js && node ./scripts/package-artifact-test.js",
+    "test": "node ./scripts/governance-config-test.js && node ./scripts/profile-assets-test.js && node ./scripts/smoke-test.js && node ./scripts/reference-integrity-test.js && node --test ./scripts/create-atomicity-test.js && node ./scripts/overlay-safety-test.js && node ./scripts/project-state-hydration-test.js && node --test ./scripts/governance-contract-test.js && node ./scripts/package-artifact-test.js && node ./scripts/release-workflow-test.js",
     "prepack": "npm test",
     "release:version": "node ./scripts/release-version.mjs"
   },
