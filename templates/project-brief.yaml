@@ -41,6 +41,9 @@ security:
   personal_data: AUTO
   financial_data: AUTO
 
+governance:
+  delivery: false
+
 design:
   required: AUTO
   source: AUTO
@@ -75,14 +78,12 @@ design:
     owner: CEO
 
 delivery:
+  required_status_checks: []
   github_owner: toss-software
   visibility: private
   create_github_repository: false
   create_github_project: false
   apply_main_ruleset: false
-
-langsmith:
-  project: AUTO
 
 constraints: []
 

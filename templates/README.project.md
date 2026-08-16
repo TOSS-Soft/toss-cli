@@ -4,13 +4,19 @@
 
 ## Governance
 
-This repository uses TOSS PM Governance v1.6.0.
+This repository uses TOSS PM Governance v2.0.0.
 
 - Governance root: `/project-management/`
+- Core profile: installed by default and always enabled
 - Execution SSOT: GitHub Projects
 - Verified CEO GitHub identity: `@toss-software`
-- Trusted governance check: `governance-certification`
-- LangSmith benchmark: `pm-governance-benchmark-v1`
+- Delivery profile: {{DELIVERY_PROFILE_STATUS}} through explicit
+  `governance.delivery: true` opt-in. It adds Delivery and Operations policies
+  plus Release, Incident, and Datafix records; it does not confer production
+  authority.
+- Main-branch merge, production deployment, and production data mutation each
+  require explicit, action-specific verified CEO authorization. A narrower
+  pre-authorized recovery authority applies only to its exact recorded scope.
 
 ## Agent Startup
 
@@ -22,8 +28,16 @@ Start a supported agent host in the repository root. The shared bootstrap is
 
 The agent hydrates:
 
-1. `project-management/PM_AGENT.md`
-2. `project-management/GOVERNANCE.md`
-3. `project-management/PROJECT_STATE.md`
-4. `SUPERPOWERS.md` when technical work is requested
-5. relevant GitHub Project state
+1. `project-management/GOVERNANCE.md`
+2. `project-management/WORK.md`
+3. `project-management/QUALITY.md`
+4. `project-management/PROJECT_STATE.md`
+5. `SUPERPOWERS.md` before technical work
+6. relevant GitHub Project state
+
+Core owns intent, authority, work, state, quality outcomes, and evidence
+acceptance. Superpowers supplies the required technical method.
+
+Required status checks come only from the exact contexts configured in
+`delivery.required_status_checks`, independently of whether the optional
+Delivery governance profile is installed.

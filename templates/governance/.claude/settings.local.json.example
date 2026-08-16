@@ -1,8 +1,0 @@
-{
-  "env": {
-    "TRACE_TO_LANGSMITH": "true",
-    "CC_LANGSMITH_API_KEY": "${LANGSMITH_API_KEY_FROM_SECRET_STORE}",
-    "CC_LANGSMITH_PROJECT": "Klinik360",
-    "CC_LANGSMITH_METADATA": "{\"governance_version\":\"1.1.0\",\"project\":\"Klinik360\",\"environment\":\"development\"}"
-  }
-}

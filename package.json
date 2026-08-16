@@ -1,6 +1,6 @@
 {
   "name": "@toss-software/cli",
-  "version": "1.2.1",
+  "version": "2.0.0",
   "description": "TOSS PM Governance project bootstrap CLI",
   "type": "module",
   "bin": {
@@ -10,6 +10,7 @@
     "bin",
     "src",
     "templates",
+    "docs/migrations/governance-v2.md",
     "README.md",
     "LICENSE"
   ],
@@ -20,7 +21,7 @@
     "yaml": "^2.8.1"
   },
   "scripts": {
-    "test": "node ./scripts/smoke-test.js",
+    "test": "node ./scripts/governance-config-test.js && node ./scripts/profile-assets-test.js && node ./scripts/smoke-test.js && node ./scripts/reference-integrity-test.js && node --test ./scripts/create-atomicity-test.js && node ./scripts/overlay-safety-test.js && node ./scripts/project-state-hydration-test.js && node --test ./scripts/governance-contract-test.js && node ./scripts/package-artifact-test.js && node ./scripts/release-workflow-test.js",
     "prepack": "npm test",
     "release:version": "node ./scripts/release-version.mjs"
   },
@@ -42,6 +43,6 @@
     "governance",
     "agent-governance",
     "superpowers",
-    "langsmith"
+    "modular-governance"
   ]
 }

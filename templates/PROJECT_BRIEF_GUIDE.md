@@ -28,6 +28,27 @@ discovery.
 `AUTO` does not authorize arbitrary scope. If resolving an AUTO field creates
 a genuine A3/product/authority ambiguity, PM escalates it.
 
+## Governance Profiles
+
+`governance.delivery` is Boolean. It defaults to `false`, which installs only
+the mandatory Core profile. Core uses `project-management/GOVERNANCE.md`,
+`project-management/WORK.md`, `project-management/QUALITY.md`,
+`project-management/PROJECT_STATE.md`, and
+`project-management/AGENT_REGISTRY.md`. Superpowers is the required technical
+method through root `SUPERPOWERS.md`.
+
+Set `governance.delivery` to `true` only when the project needs the Delivery
+profile's release, operations, incident, and production controls. Delivery adds
+Delivery and Operations policies plus Release, Incident, and Datafix records.
+Those records do not confer production authority.
+
+Profile selection is deterministic at creation time. Delivery intent elsewhere
+in the brief does not implicitly enable the Delivery governance profile.
+
+`delivery.required_status_checks` is an explicit list of exact check contexts.
+Leave it empty to omit required-status-check rules. A check is never inferred
+from profile selection or from an unavailable integration.
+
 ## Design
 
 The `design` section supports a hybrid workflow: record known decisions before
