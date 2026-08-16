@@ -133,7 +133,7 @@ jobs:
           node ./scripts/prepare-github-package.mjs github-package/package github-package/prepared
           npm pack ./github-package/prepared --ignore-scripts --pack-destination github-dist
           GITHUB_TARBALL="$(find github-dist -maxdepth 1 -name '*.tgz' -type f -print -quit)"
-          npm publish "$GITHUB_TARBALL" --registry=https://npm.pkg.github.com --ignore-scripts
+          npm publish "./$GITHUB_TARBALL" --registry=https://npm.pkg.github.com --ignore-scripts
           test "$(npm view "@toss-soft/cli@$VERSION" version --registry=https://npm.pkg.github.com)" = "$VERSION"
 
   release:
