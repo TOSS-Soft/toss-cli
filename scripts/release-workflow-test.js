@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import {
-  mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
+  chmodSync, copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -33,6 +33,104 @@ assert.match(JSON.stringify(jobs.publish_github_packages), /prepare-github-packa
 
 const fixture = mkdtempSync(join(tmpdir(), 'toss-release-test-'));
 try {
+  const publishFixture = join(fixture, 'publish-shell');
+  const fakeBin = join(publishFixture, 'bin');
+  const publishArgument = join(publishFixture, 'publish-argument.txt');
+  const publishedMarker = join(publishFixture, 'published');
+  mkdirSync(join(publishFixture, 'dist'), { recursive: true });
+  mkdirSync(fakeBin, { recursive: true });
+  writeFileSync(join(publishFixture, 'dist', 'fixture.tgz'), 'fixture');
+  const fakeNpm = join(fakeBin, 'npm');
+  writeFileSync(fakeNpm, `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$1" == "view" ]]; then
+  if [[ -f "$NPM_FAKE_PUBLISHED" ]]; then printf '%s\\n' "$VERSION"; fi
+  exit 0
+fi
+if [[ "$1" == "publish" ]]; then
+  printf '%s\\n' "$2" > "$NPM_FAKE_ARGUMENT"
+  : > "$NPM_FAKE_PUBLISHED"
+  exit 0
+fi
+if [[ "$1" == "pack" ]]; then
+  destination=""
+  for ((index = 1; index <= $#; index++)); do
+    if [[ "\${!index}" == "--pack-destination" ]]; then
+      next=$((index + 1))
+      destination="\${!next}"
+      break
+    fi
+  done
+  test -n "$destination"
+  mkdir -p "$destination"
+  tar -czf "$destination/toss-soft-cli-$VERSION.tgz" -C "$2" .
+  printf '%s\\n' "toss-soft-cli-$VERSION.tgz"
+  exit 0
+fi
+exit 1
+`);
+  chmodSync(fakeNpm, 0o755);
+  const publishStep = jobs.publish_npm.steps.find((step) => step.name === 'Publish to npm with Trusted Publishing');
+  execFileSync('bash', ['-c', publishStep.run], {
+    cwd: publishFixture,
+    env: {
+      ...process.env,
+      PATH: `${fakeBin}:${process.env.PATH}`,
+      VERSION: '2.0.0',
+      NPM_FAKE_ARGUMENT: publishArgument,
+      NPM_FAKE_PUBLISHED: publishedMarker
+    },
+    stdio: 'pipe'
+  });
+  assert.equal(
+    readFileSync(publishArgument, 'utf8').trim(),
+    join(publishFixture, 'dist', 'fixture.tgz'),
+    'npm publish must receive an absolute tarball path'
+  );
+
+  const githubPublishFixture = join(fixture, 'github-publish-shell');
+  const githubPublishArgument = join(githubPublishFixture, 'publish-argument.txt');
+  const githubPublishedMarker = join(githubPublishFixture, 'published');
+  const sourceRoot = join(githubPublishFixture, 'source-root');
+  mkdirSync(join(githubPublishFixture, 'dist'), { recursive: true });
+  mkdirSync(join(githubPublishFixture, 'scripts'), { recursive: true });
+  mkdirSync(join(sourceRoot, 'package', 'bin'), { recursive: true });
+  copyFileSync(
+    new URL('./prepare-github-package.mjs', import.meta.url),
+    join(githubPublishFixture, 'scripts', 'prepare-github-package.mjs')
+  );
+  writeFileSync(join(sourceRoot, 'package', 'package.json'), JSON.stringify({
+    name: '@toss-software/cli',
+    version: '2.0.0',
+    bin: { toss: 'bin/toss.js' },
+    publishConfig: { access: 'public' }
+  }, null, 2));
+  writeFileSync(join(sourceRoot, 'package', 'bin', 'toss.js'), 'console.log("toss");\n');
+  execFileSync('tar', [
+    '-czf', join(githubPublishFixture, 'dist', 'source.tgz'),
+    '-C', sourceRoot,
+    'package'
+  ]);
+  const githubPublishStep = jobs.publish_github_packages.steps.find(
+    (step) => step.name === 'Publish to GitHub Packages'
+  );
+  execFileSync('bash', ['-c', githubPublishStep.run], {
+    cwd: githubPublishFixture,
+    env: {
+      ...process.env,
+      PATH: `${fakeBin}:${process.env.PATH}`,
+      VERSION: '2.0.0',
+      NPM_FAKE_ARGUMENT: githubPublishArgument,
+      NPM_FAKE_PUBLISHED: githubPublishedMarker
+    },
+    stdio: 'pipe'
+  });
+  assert.equal(
+    readFileSync(githubPublishArgument, 'utf8').trim(),
+    join(githubPublishFixture, 'github-dist', 'toss-soft-cli-2.0.0.tgz'),
+    'GitHub Packages publish must receive an absolute tarball path'
+  );
+
   const runGit = (...args) => execFileSync('git', args, { cwd: fixture, stdio: 'pipe' });
   runGit('init', '-b', 'main');
   runGit('config', 'user.name', 'Release Test');
