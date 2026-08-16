@@ -131,6 +131,57 @@ exit 1
     'GitHub Packages publish must receive an absolute tarball path'
   );
 
+  const releaseFixture = join(fixture, 'release-shell');
+  const releaseArgument = join(releaseFixture, 'release-argument.txt');
+  const releaseMarker = join(releaseFixture, 'released');
+  mkdirSync(join(releaseFixture, 'dist'), { recursive: true });
+  writeFileSync(join(releaseFixture, 'dist', 'fixture.tgz'), 'fixture');
+  const fakeGh = join(fakeBin, 'gh');
+  writeFileSync(fakeGh, `#!/usr/bin/env bash
+set -euo pipefail
+if [[ -z "\${GH_REPO:-}" ]]; then
+  git rev-parse --show-toplevel >/dev/null
+fi
+test "\${GH_REPO:-}" = "TOSS-Soft/toss-cli"
+if [[ "$1 $2" == "release view" ]]; then
+  if [[ " $* " == *" --json "* ]]; then
+    printf '%s\\n' '{"tagName":"v2.0.0","isDraft":false,"isPrerelease":false,"url":"https://example.invalid/v2.0.0","assets":[{"name":"fixture.tgz"}]}'
+    exit 0
+  fi
+  test -f "$RELEASE_FAKE_PUBLISHED"
+  exit 0
+fi
+if [[ "$1 $2" == "release create" ]]; then
+  test -f "$4"
+  printf '%s\\n' "$4" > "$RELEASE_FAKE_ARGUMENT"
+  : > "$RELEASE_FAKE_PUBLISHED"
+  exit 0
+fi
+exit 1
+`);
+  chmodSync(fakeGh, 0o755);
+  const releaseStep = jobs.release.steps.find((step) => step.name === 'Create or update GitHub Release');
+  execFileSync('bash', ['-c', releaseStep.run], {
+    cwd: releaseFixture,
+    env: {
+      ...process.env,
+      PATH: `${fakeBin}:${process.env.PATH}`,
+      GITHUB_REF_NAME: 'v2.0.0',
+      GH_TOKEN: 'fixture-token',
+      GH_REPO: releaseStep.env?.GH_REPO === '${{ github.repository }}'
+        ? 'TOSS-Soft/toss-cli'
+        : '',
+      RELEASE_FAKE_ARGUMENT: releaseArgument,
+      RELEASE_FAKE_PUBLISHED: releaseMarker
+    },
+    stdio: 'pipe'
+  });
+  assert.equal(
+    readFileSync(releaseArgument, 'utf8').trim(),
+    join(releaseFixture, 'dist', 'fixture.tgz'),
+    'GitHub Release must be created outside a git checkout using explicit repository context'
+  );
+
   const runGit = (...args) => execFileSync('git', args, { cwd: fixture, stdio: 'pipe' });
   runGit('init', '-b', 'main');
   runGit('config', 'user.name', 'Release Test');
