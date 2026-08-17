@@ -1,9 +1,11 @@
-import {canonicalJson} from "../contracts/acp.js";
+import {canonicalJson,sha256Canonical} from "../contracts/acp.js";
 import {validateDocument} from "../contracts/validator.js";
 import {buildTraceGraph,traceEntity} from "../pipeline/traceability.js";
 
 const TRACE_ENTITY_PATTERN=/^(?:REQ|NFR|BR|ARCHQ|ADR|EPIC|ISSUE|AC)-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$/;
+const ARTIFACT_ID_PATTERN=/^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const CONTENT_SHA256_PATTERN=/^[a-f0-9]{64}$/;
+const MAX_REVISION=999999;
 const CONTEXT_KEYS=new Set(["artifactStore","artifacts"]);
 const STORE_METHOD_NAMES=Object.freeze(["list","get","verify"]);
 
@@ -144,8 +146,10 @@ function assertArtifactReference(reference,label,{documentType}={}) {
       Object.keys(reference).sort(compareText).join(",")!==
         "artifact_id,content_sha256,document_type,revision" ||
       typeof reference.document_type!=="string" ||
-      typeof reference.artifact_id!=="string" || !reference.artifact_id ||
-      !Number.isInteger(reference.revision) || reference.revision<1 ||
+      typeof reference.artifact_id!=="string" ||
+      !ARTIFACT_ID_PATTERN.test(reference.artifact_id) ||
+      !Number.isSafeInteger(reference.revision) || reference.revision<1 ||
+      reference.revision>MAX_REVISION ||
       typeof reference.content_sha256!=="string" ||
       !CONTENT_SHA256_PATTERN.test(reference.content_sha256) ||
       (documentType!==undefined && reference.document_type!==documentType)) {
@@ -166,6 +170,22 @@ function assertArtifactEnvelope(value,label,code) {
     throw new TraceCommandError(`${label} is not a valid artifact envelope`,{code});
   }
   return value;
+}
+
+function assertIssuePlanIntegrity(issuePlan) {
+  const validation=validateDocument(issuePlan,"issue-plan.v1");
+  if (!validation.valid) {
+    throw new TraceCommandError(
+      "Selected issue-plan does not satisfy the full issue-plan.v1 contract",
+      {code:"TRACE_INPUT_INVALID"},
+    );
+  }
+  if (sha256Canonical(issuePlan.content)!==issuePlan.content_sha256) {
+    throw new TraceCommandError(
+      "Selected issue-plan content_sha256 does not match its canonical content",
+      {code:"TRACE_INPUT_INVALID"},
+    );
+  }
 }
 
 function assertExactArtifact(artifact,reference,label) {
@@ -190,21 +210,31 @@ async function callStore(store,method,name,args,code) {
 }
 
 async function readVerifiedArtifact(store,methods,reference,label) {
+  const expected=deepFreeze(canonicalStoreValue(
+    reference,`${label} expected reference`,"TRACE_INPUT_INVALID",
+  ));
+  assertArtifactReference(expected,`${label} expected reference`);
+  const verifyReference=deepFreeze(canonicalStoreValue(
+    expected,`${label} verify reference`,"TRACE_INPUT_INVALID",
+  ));
   const verifiedRaw=await callStore(
-    store,methods.verify,"verify",[reference],"TRACE_INPUT_INVALID",
+    store,methods.verify,"verify",[verifyReference],"TRACE_INPUT_INVALID",
   );
   const verified=assertArtifactEnvelope(canonicalStoreValue(
     verifiedRaw,`${label} verified artifact`,"TRACE_INPUT_INVALID",
   ),`${label} verified artifact`,"TRACE_INPUT_INVALID");
-  assertExactArtifact(verified,reference,`${label} verified artifact`);
+  assertExactArtifact(verified,expected,`${label} verified artifact`);
 
+  const getReference=deepFreeze(canonicalStoreValue(
+    expected,`${label} get reference`,"TRACE_INPUT_INVALID",
+  ));
   const fetchedRaw=await callStore(
-    store,methods.get,"get",[reference],"TRACE_INPUT_INVALID",
+    store,methods.get,"get",[getReference],"TRACE_INPUT_INVALID",
   );
   const fetched=assertArtifactEnvelope(canonicalStoreValue(
     fetchedRaw,`${label} fetched artifact`,"TRACE_INPUT_INVALID",
   ),`${label} fetched artifact`,"TRACE_INPUT_INVALID");
-  assertExactArtifact(fetched,reference,`${label} fetched artifact`);
+  assertExactArtifact(fetched,expected,`${label} fetched artifact`);
   if (canonicalJson(verified)!==canonicalJson(fetched)) {
     throw new TraceCommandError(
       `${label} get and verify results do not canonically match`,
@@ -237,6 +267,21 @@ async function loadFromStore(store) {
       );
     }
   }
+  const discoveryIdentities=new Set();
+  for (const plan of plans) {
+    const identity=canonicalJson({
+      document_type:plan.document_type,
+      artifact_id:plan.artifact_id,
+      revision:plan.revision,
+    });
+    if (discoveryIdentities.has(identity)) {
+      throw new TraceCommandError(
+        `Duplicate immutable discovery record ${plan.artifact_id}@${plan.revision}`,
+        {code:"TRACE_STORE_INVALID"},
+      );
+    }
+    discoveryIdentities.add(identity);
+  }
   if (plans.length===0) {
     throw new TraceCommandError(
       "No issue-plan artifact is available for tracing",
@@ -260,6 +305,7 @@ async function loadFromStore(store) {
   const issuePlan=await readVerifiedArtifact(
     store,methods,issuePlanReference,"Selected issue-plan",
   );
+  assertIssuePlanIntegrity(issuePlan);
   const snapshots=issuePlan.content?.input_snapshots;
   if (!isPlainObject(snapshots) || !Array.isArray(snapshots.adrs)) {
     throw new TraceCommandError(

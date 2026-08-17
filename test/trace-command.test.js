@@ -47,8 +47,9 @@ function referenceKey(reference) {
   ].join("|");
 }
 
-function fakeTraceStore({listResult,getResult,verifyResult}={}) {
+function fakeTraceStore({listResult,getResult,mutateArtifacts,verifyResult}={}) {
   const artifacts=completeArtifacts();
+  mutateArtifacts?.(artifacts);
   const all=[
     artifacts.pmAnalysis,
     artifacts.architecture.artifact,
@@ -56,7 +57,7 @@ function fakeTraceStore({listResult,getResult,verifyResult}={}) {
     artifacts.issuePlan,
   ];
   const byReference=new Map(all.map(artifact => [referenceKey(artifact),artifact]));
-  const calls={get:[],verify:[]};
+  const calls={get:[],getObjects:[],verify:[],verifyObjects:[]};
   const resolve=(reference,override) => {
     const artifact=byReference.get(referenceKey(reference));
     if (!artifact) throw new Error(`Missing fake artifact ${referenceKey(reference)}`);
@@ -69,10 +70,12 @@ function fakeTraceStore({listResult,getResult,verifyResult}={}) {
       return typeof listResult==="function" ? listResult(artifacts) : listResult;
     },
     async get(reference) {
+      calls.getObjects.push(reference);
       calls.get.push(clone(reference));
       return resolve(reference,getResult);
     },
     async verify(reference) {
+      calls.verifyObjects.push(reference);
       calls.verify.push(clone(reference));
       return resolve(reference,verifyResult);
     },
@@ -118,6 +121,32 @@ test("store tracing verifies and gets the issue plan and every exact snapshot",a
   assert.deepEqual(calls.verify,calls.get);
   assert.deepEqual(calls.verify.map(reference => reference.document_type).sort(),
     ["adr","architecture","issue-plan","pm-analysis"]);
+  for (const [index,reference] of calls.verifyObjects.entries()) {
+    assert.equal(Object.isFrozen(reference),true);
+    assert.equal(Object.isFrozen(calls.getObjects[index]),true);
+    assert.notStrictEqual(reference,calls.getObjects[index]);
+  }
+});
+
+test("a store cannot retarget a mutable expected reference to an unlisted plan",async () => {
+  const {artifacts,store}=fakeTraceStore();
+  const baseGet=store.get;
+  const baseVerify=store.verify;
+  const hijack={...clone(artifacts.issuePlan),artifact_id:"HIJACK"};
+  let receivedReference;
+  store.verify=async reference => {
+    if (reference.document_type!=="issue-plan") return baseVerify(reference);
+    receivedReference=reference;
+    reference.artifact_id="HIJACK";
+    return clone(hijack);
+  };
+  store.get=async reference =>
+    reference.artifact_id==="HIJACK" ? clone(hijack) : baseGet(reference);
+
+  await assert.rejects(runTraceCommand(["REQ-001"],{artifactStore:store}),error =>
+    error instanceof TraceCommandError && error.code==="TRACE_INPUT_INVALID",
+  );
+  assert.equal(receivedReference.artifact_id,"ISSUE-PLAN-001");
 });
 
 test("a store verification failure is a stable trace command failure",async () => {
@@ -201,6 +230,98 @@ test("verified and fetched artifacts must be canonical, exact, and identical",as
     await assert.rejects(runTraceCommand(["REQ-001"],{artifactStore:store}),error =>
       error instanceof TraceCommandError && error.code==="TRACE_INPUT_INVALID",
     );
+  }
+});
+
+test("selected issue plans are fully valid and hash-authentic before nested reads",async t => {
+  const cases={
+    "schema-invalid content":issuePlan => {
+      issuePlan.content.status="FORGED";
+      rehash(issuePlan);
+    },
+    "content hash mismatch":issuePlan => {
+      issuePlan.content.issues[0].meaning="Tampered after hashing.";
+    },
+  };
+
+  for (const [name,mutate] of Object.entries(cases)) {
+    await t.test(name,async () => {
+      const {calls,store}=fakeTraceStore({
+        mutateArtifacts:artifacts => mutate(artifacts.issuePlan),
+      });
+      await assert.rejects(runTraceCommand(["REQ-001"],{artifactStore:store}),error =>
+        error instanceof TraceCommandError && error.code==="TRACE_INPUT_INVALID",
+      );
+      assert.equal(calls.verify.length,1);
+      assert.equal(calls.get.length,1);
+    });
+  }
+});
+
+test("nested artifact references satisfy store-safe constraints before store calls",async t => {
+  const cases={
+    "path traversal artifact id":snapshot => {
+      snapshot.artifact_id="../escape";
+    },
+    "contract-only colon artifact id":snapshot => {
+      snapshot.artifact_id="urn:escape";
+    },
+    "unsupported revision width":snapshot => {
+      snapshot.revision=1000000;
+    },
+    "non-lowercase hash":snapshot => {
+      snapshot.content_sha256="A".repeat(64);
+    },
+    "wrong document type":snapshot => {
+      snapshot.document_type="adr";
+    },
+  };
+
+  for (const [name,mutate] of Object.entries(cases)) {
+    await t.test(name,async () => {
+      const {calls,store}=fakeTraceStore({
+        mutateArtifacts:artifacts => {
+          mutate(artifacts.issuePlan.content.input_snapshots.pm_analysis);
+          rehash(artifacts.issuePlan);
+        },
+      });
+      await assert.rejects(runTraceCommand(["REQ-001"],{artifactStore:store}),error =>
+        error instanceof TraceCommandError && error.code==="TRACE_INPUT_INVALID",
+      );
+      assert.equal(calls.verify.length,1);
+      assert.equal(calls.get.length,1);
+    });
+  }
+});
+
+test("duplicate immutable discovery identities fail independent of hash and order",async t => {
+  const cases=[
+    {name:"different hash forward",differentHash:true,reverse:false},
+    {name:"different hash reversed",differentHash:true,reverse:true},
+    {name:"exact duplicate",differentHash:false,reverse:false},
+  ];
+
+  for (const {name,differentHash,reverse} of cases) {
+    await t.test(name,async () => {
+      const {calls,store}=fakeTraceStore({
+        listResult:artifacts => {
+          const original=clone(artifacts.issuePlan);
+          const duplicate=clone(original);
+          if (differentHash) {
+            duplicate.content.issues[0].meaning="Conflicting immutable revision.";
+            rehash(duplicate);
+          }
+          return reverse ? [duplicate,original] : [original,duplicate];
+        },
+      });
+      await assert.rejects(runTraceCommand(["REQ-001"],{artifactStore:store}),error =>
+        error instanceof TraceCommandError &&
+        error.code==="TRACE_STORE_INVALID" &&
+        /duplicate.*discovery/i.test(error.message),
+      );
+      assert.equal(calls.verify.length,0);
+      assert.equal(calls.get.length,0);
+    });
   }
 });
 

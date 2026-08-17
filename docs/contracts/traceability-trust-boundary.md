@@ -38,3 +38,18 @@ identical, and only the verified result is supplied to graph construction.
 Malformed store values and verification failures remain controlled
 `TraceCommandError` results; no raw property traversal or filesystem bypass is
 used.
+
+The expected reference is first copied canonically and frozen. `verify` and
+`get` receive distinct frozen copies, so a store implementation cannot retarget
+one mutable reference and thereby change what later comparisons consider
+expected. Both results are compared independently with the original expected
+reference and then with each other.
+
+Discovery records are unique by document type, artifact ID, and revision before
+latest-revision selection; duplicate immutable identities fail closed even when
+their hashes or bytes match. The verified selected issue plan must satisfy the
+full `issue-plan.v1` schema and its `content_sha256` must match canonical content
+before any nested input snapshot is read or sent to the store. Nested references
+also use the artifact store's safe ID alphabet, revisions `1..999999`, declared
+document types, and lowercase SHA-256 values. Full graph construction and
+Specification Auditor validation still run after the verified bundle resolves.
