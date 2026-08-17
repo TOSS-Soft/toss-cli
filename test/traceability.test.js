@@ -22,6 +22,7 @@ const buildTraceGraph=traceabilityModule.buildTraceGraph ??
 const traceEntity=traceabilityModule.traceEntity ?? unavailable("traceEntity");
 const calculateRequirementCoverage=traceabilityModule.calculateRequirementCoverage ??
   unavailable("calculateRequirementCoverage");
+const TraceabilityInputError=traceabilityModule.TraceabilityInputError ?? TypeError;
 
 function assertDeepFrozen(value) {
   if (!value || typeof value!=="object") return;
@@ -91,26 +92,17 @@ test("requirement coverage is issue-owned and excludes BR until upstream refs su
 
   assert.equal(calculateRequirementCoverage(graph),expected.coverage);
 
-  const crossIssue=clone(graph);
-  const issue=crossIssue.nodes.find(node => node.id==="ISSUE-001");
-  const criterion=crossIssue.nodes.find(node => node.id==="AC-001");
-  crossIssue.nodes.push({...issue,id:"ISSUE-002",meaning:"Unrelated issue."});
-  crossIssue.nodes.push({...criterion,id:"AC-002",meaning:"Unrelated criterion."});
-  crossIssue.edges.push({
-    ...crossIssue.edges.find(edge => edge.type==="CONTAINS"),
-    to:"ISSUE-002",
-  });
-  crossIssue.edges.push({
-    ...crossIssue.edges.find(edge => edge.type==="OWNS"),
-    from:"ISSUE-002",
-    to:"AC-002",
-  });
-  const verifies=crossIssue.edges.find(edge =>
-    edge.from==="REQ-001" && edge.type==="VERIFIED_BY",
-  );
-  verifies.to="AC-002";
+  const uncovered=completeArtifacts();
+  for (const collection of [
+    uncovered.issuePlan.content.epics[0].source_requirements,
+    uncovered.issuePlan.content.issues[0].source_requirements,
+    uncovered.issuePlan.content.acceptance_criteria[0].verifies,
+  ]) {
+    collection.splice(collection.findIndex(reference => reference.id==="NFR-001"),1);
+  }
+  rehash(uncovered.issuePlan);
 
-  assert.equal(calculateRequirementCoverage(crossIssue),2/3);
+  assert.equal(calculateRequirementCoverage(buildTraceGraph(uncovered)),2/3);
 });
 
 test("dangling, cycle, orphan, stale, and extra inputs fail closed",() => {
@@ -151,21 +143,107 @@ test("unknown current graph types and missing entities are controlled failures",
   const unknown=clone(graph);
   unknown.nodes[0].type="FLOW";
 
-  assert.throws(() => traceEntity(unknown,unknown.nodes[0].id),/type|schema/i);
+  assert.throws(() => traceEntity(unknown,unknown.nodes[0].id),
+    /rebuild.*authoritative artifacts/i);
   assert.throws(() => traceEntity(graph,"REQ-MISSING"),/not found/i);
 });
 
-test("raw graph sources remain bound to exact typed input snapshots",() => {
+test("raw graph source mutations cannot cross the authoritative trust boundary",() => {
   const graph=buildTraceGraph(completeArtifacts());
   const foreignSource=clone(graph);
   foreignSource.nodes[0].source.artifact.artifact_id="FOREIGN-ARTIFACT";
   assert.throws(() => traceEntity(foreignSource,foreignSource.nodes[0].id),
-    /source.*snapshot|stale|exact input/i);
+    /rebuild.*authoritative artifacts/i);
 
   const wrongSlot=clone(graph);
   wrongSlot.input_snapshots.pm_analysis.document_type="adr";
   assert.throws(() => calculateRequirementCoverage(wrongSlot),
-    /pm_analysis|document type|source.*snapshot/i);
+    /rebuild.*authoritative artifacts/i);
+});
+
+test("deserialized trace graphs must be rebuilt from authoritative artifacts",() => {
+  const serialized=clone(buildTraceGraph(completeArtifacts()));
+
+  for (const operation of [
+    () => traceEntity(serialized,"REQ-001"),
+    () => calculateRequirementCoverage(serialized),
+  ]) {
+    assert.throws(operation,error =>
+      error instanceof TraceabilityInputError &&
+      error.code==="TRACE_INPUT_INVALID" &&
+      /rebuild.*authoritative artifacts/i.test(error.message),
+    );
+  }
+});
+
+test("schema-valid graph mutations cannot impersonate an authoritative build",() => {
+  const graph=buildTraceGraph(completeArtifacts());
+  const mutations={
+    "changed architecture hash":value => {
+      value.input_snapshots.architecture.content_sha256="a".repeat(64);
+    },
+    "forged source pointer":value => {
+      value.nodes.find(node => node.id==="REQ-001").source.path=
+        "/content/functional_requirements/999";
+    },
+    "retargeted endpoint":value => {
+      value.edges.find(edge =>
+        edge.type==="ADDRESSES" && edge.from==="REQ-001"
+      ).from="NFR-001";
+    },
+    "omitted edge":value => {
+      value.edges.splice(value.edges.findIndex(edge =>
+        edge.type==="AFFECTS" && edge.from==="REQ-001"
+      ),1);
+    },
+    "extra ADR node":value => {
+      const adr=value.nodes.find(node => node.id==="ADR-001");
+      value.nodes.push({...adr,id:"ADR-002",meaning:"Forged decision."});
+    },
+    "extra ADR snapshot":value => {
+      value.input_snapshots.adrs.push({
+        ...value.input_snapshots.adrs[0],
+        artifact_id:"ADR-EXTRA",
+        content_sha256:"b".repeat(64),
+      });
+    },
+    "same snapshot identity with another hash":value => {
+      value.input_snapshots.adrs.push({
+        ...value.input_snapshots.adrs[0],
+        content_sha256:"c".repeat(64),
+      });
+    },
+  };
+
+  for (const [name,mutate] of Object.entries(mutations)) {
+    const forged=clone(graph);
+    mutate(forged);
+    assert.throws(() => traceEntity(forged,"REQ-001"),error =>
+      error instanceof TraceabilityInputError &&
+      /rebuild.*authoritative artifacts/i.test(error.message),name);
+  }
+});
+
+test("ADR input snapshot identities are unique independent of content hash",() => {
+  const artifacts=completeArtifacts();
+  artifacts.architecture.adrs.push({
+    ...clone(artifacts.architecture.adrs[0]),
+    content_sha256:"d".repeat(64),
+  });
+
+  assert.throws(() => buildTraceGraph(artifacts),
+    /duplicate.*snapshot identity/i);
+});
+
+test("malformed snapshot identities retain the typed trace input boundary",() => {
+  const artifacts=completeArtifacts();
+  delete artifacts.architecture.adrs[0].revision;
+
+  assert.throws(() => buildTraceGraph(artifacts),error =>
+    error instanceof TraceabilityInputError &&
+    error.code==="TRACE_INPUT_INVALID" &&
+    /snapshot identity/i.test(error.message),
+  );
 });
 
 test("programmatic non-JSON values fail before graph construction",() => {

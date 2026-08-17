@@ -8,6 +8,7 @@ import test from "node:test";
 import {createArtifactStore} from "../src/artifacts/store.js";
 import {
   appendArtifacts,
+  clone,
   completeArtifacts,
   rehash,
 } from "./support/trace-fixture.js";
@@ -21,6 +22,7 @@ const unavailable=async () => {
   throw new Error("runTraceCommand is unavailable");
 };
 const runTraceCommand=traceCommandModule.runTraceCommand ?? unavailable;
+const TraceCommandError=traceCommandModule.TraceCommandError ?? Error;
 
 const root=path.resolve(new URL("..",import.meta.url).pathname);
 const cli=path.join(root,"bin","toss.js");
@@ -34,6 +36,48 @@ async function cliStore(t,artifacts=completeArtifacts()) {
   t.after(() => rm(directory,{recursive:true,force:true}));
   await appendArtifacts(createArtifactStore({root:directory}),artifacts);
   return directory;
+}
+
+function referenceKey(reference) {
+  return [
+    reference.document_type,
+    reference.artifact_id,
+    reference.revision,
+    reference.content_sha256,
+  ].join("|");
+}
+
+function fakeTraceStore({listResult,getResult,verifyResult}={}) {
+  const artifacts=completeArtifacts();
+  const all=[
+    artifacts.pmAnalysis,
+    artifacts.architecture.artifact,
+    ...artifacts.architecture.adrs,
+    artifacts.issuePlan,
+  ];
+  const byReference=new Map(all.map(artifact => [referenceKey(artifact),artifact]));
+  const calls={get:[],verify:[]};
+  const resolve=(reference,override) => {
+    const artifact=byReference.get(referenceKey(reference));
+    if (!artifact) throw new Error(`Missing fake artifact ${referenceKey(reference)}`);
+    if (override===undefined) return clone(artifact);
+    return typeof override==="function" ? override(clone(artifact),reference) : override;
+  };
+  const store={
+    async list() {
+      if (listResult===undefined) return clone([artifacts.issuePlan]);
+      return typeof listResult==="function" ? listResult(artifacts) : listResult;
+    },
+    async get(reference) {
+      calls.get.push(clone(reference));
+      return resolve(reference,getResult);
+    },
+    async verify(reference) {
+      calls.verify.push(clone(reference));
+      return resolve(reference,verifyResult);
+    },
+  };
+  return {artifacts,calls,store};
 }
 
 test("trace command exposes the minimal trace command boundary",() => {
@@ -61,6 +105,103 @@ test("trace command rejects missing IDs, unknown options, and accessor contexts"
   const context={};
   Object.defineProperty(context,"artifacts",{get() { return completeArtifacts(); }});
   await assert.rejects(runTraceCommand(["REQ-001"],context),/accessor|JSON/i);
+});
+
+test("store tracing verifies and gets the issue plan and every exact snapshot",async () => {
+  const {calls,store}=fakeTraceStore();
+
+  const command=await runTraceCommand(["REQ-001","--json"],{artifactStore:store});
+
+  assert.equal(command.result.schema_version,"trace-result.v1");
+  assert.equal(calls.verify.length,4);
+  assert.equal(calls.get.length,4);
+  assert.deepEqual(calls.verify,calls.get);
+  assert.deepEqual(calls.verify.map(reference => reference.document_type).sort(),
+    ["adr","architecture","issue-plan","pm-analysis"]);
+});
+
+test("a store verification failure is a stable trace command failure",async () => {
+  const {store}=fakeTraceStore();
+  store.verify=async () => {
+    throw new Error("verification refused");
+  };
+
+  await assert.rejects(runTraceCommand(["REQ-001"],{artifactStore:store}),error =>
+    error instanceof TraceCommandError &&
+    error.code==="TRACE_INPUT_INVALID" &&
+    /verify|verification/i.test(error.message),
+  );
+});
+
+test("store methods must be own enumerable data functions without getter reads",async () => {
+  const base=fakeTraceStore().store;
+  let getterReads=0;
+  const accessorStore={get:base.get,verify:base.verify};
+  Object.defineProperty(accessorStore,"list",{
+    enumerable:true,
+    get() {
+      getterReads+=1;
+      return base.list;
+    },
+  });
+  const inheritedStore=Object.create(base);
+  const hiddenStore={get:base.get,verify:base.verify};
+  Object.defineProperty(hiddenStore,"list",{value:base.list,enumerable:false});
+  const nonfunctionStore={...base,list:true};
+
+  for (const store of [accessorStore,inheritedStore,hiddenStore,nonfunctionStore]) {
+    await assert.rejects(runTraceCommand(["REQ-001"],{artifactStore:store}),error =>
+      error instanceof TraceCommandError && error.code==="TRACE_STORE_INVALID",
+    );
+  }
+  assert.equal(getterReads,0);
+});
+
+test("malformed store discovery values fail closed without accessor reads",async () => {
+  let getterReads=0;
+  const accessorArtifact={};
+  Object.defineProperty(accessorArtifact,"artifact_id",{
+    enumerable:true,
+    get() {
+      getterReads+=1;
+      return "ISSUE-PLAN-001";
+    },
+  });
+  const symbolic=[completeArtifacts().issuePlan];
+  symbolic[0][Symbol("invalid")]=true;
+  const sparse=[];
+  sparse.length=1;
+  const malformed=[{},sparse,[accessorArtifact],symbolic,new Date(),() => undefined];
+
+  for (const listResult of malformed) {
+    const {store}=fakeTraceStore({listResult});
+    await assert.rejects(runTraceCommand(["REQ-001"],{artifactStore:store}),error =>
+      error instanceof TraceCommandError && error.code==="TRACE_STORE_INVALID",
+    );
+  }
+  assert.equal(getterReads,0);
+});
+
+test("verified and fetched artifacts must be canonical, exact, and identical",async () => {
+  const malformed=[];
+  const accessor={};
+  Object.defineProperty(accessor,"content",{enumerable:true,get() {
+    throw new Error("artifact getter must not run");
+  }});
+  malformed.push(
+    {verifyResult:{}},
+    {verifyResult:accessor},
+    {verifyResult:artifact => ({...artifact,artifact_id:"FORGED"})},
+    {getResult:artifact => ({...artifact,run_id:`${artifact.run_id}-different`})},
+    {getResult:artifact => ({...artifact,invalid:Symbol("invalid")})},
+  );
+
+  for (const overrides of malformed) {
+    const {store}=fakeTraceStore(overrides);
+    await assert.rejects(runTraceCommand(["REQ-001"],{artifactStore:store}),error =>
+      error instanceof TraceCommandError && error.code==="TRACE_INPUT_INVALID",
+    );
+  }
 });
 
 test("real CLI emits raw trace-result JSON and stable readable human output",async t => {

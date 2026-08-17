@@ -46,6 +46,7 @@ const EDGE_SOURCE_DOCUMENT_TYPE=Object.freeze({
   OWNS:"issue-plan",
   VERIFIED_BY:"issue-plan",
 });
+const authoritativeGraphs=new WeakSet();
 
 export class TraceabilityInputError extends TypeError {
   constructor(message,{cause}={}) {
@@ -115,6 +116,21 @@ function artifactReference(artifact) {
     revision:artifact.revision,
     content_sha256:artifact.content_sha256,
   };
+}
+
+function artifactIdentity(reference) {
+  try {
+    return canonicalJson({
+      document_type:reference.document_type,
+      artifact_id:reference.artifact_id,
+      revision:reference.revision,
+    });
+  } catch (error) {
+    throw new TraceabilityInputError(
+      "Trace input snapshot identity must declare document_type, artifact_id, and revision",
+      {cause:error},
+    );
+  }
 }
 
 function sourceFor(artifact,path) {
@@ -225,14 +241,22 @@ function assertExactSourceBindings(graph) {
     snapshots.issue_plan,
   ];
   const referenceKeys=new Set();
+  const identityKeys=new Set();
   for (const reference of references) {
     const key=canonicalJson(reference);
     if (referenceKeys.has(key)) {
       throw new TraceabilityInputError("Duplicate exact trace input snapshot");
     }
     referenceKeys.add(key);
+    const identityKey=artifactIdentity(reference);
+    if (identityKeys.has(identityKey)) {
+      throw new TraceabilityInputError(
+        "Duplicate trace input snapshot identity independent of content hash",
+      );
+    }
+    identityKeys.add(identityKey);
   }
-  const usedAdrKeys=new Set();
+  const adrNodeCounts=new Map(snapshots.adrs.map(adr => [canonicalJson(adr),0]));
   for (const [kind,items] of [["node",graph.nodes],["edge",graph.edges]]) {
     for (const item of items) {
       const source=item.source.artifact;
@@ -249,14 +273,16 @@ function assertExactSourceBindings(graph) {
         );
       }
       if (kind==="node" && item.type==="ADR") {
-        usedAdrKeys.add(canonicalJson(source));
+        const key=canonicalJson(source);
+        adrNodeCounts.set(key,(adrNodeCounts.get(key) ?? 0)+1);
       }
     }
   }
   for (const adr of snapshots.adrs) {
-    if (!usedAdrKeys.has(canonicalJson(adr))) {
+    const count=adrNodeCounts.get(canonicalJson(adr));
+    if (count!==1) {
       throw new TraceabilityInputError(
-        `Extra or stale ADR input snapshot ${adr.artifact_id}@${adr.revision}`,
+        `ADR input snapshot ${adr.artifact_id}@${adr.revision} must back exactly one ADR node`,
       );
     }
   }
@@ -325,6 +351,25 @@ function normalizedInputs(artifacts) {
   return normalized;
 }
 
+function assertUniqueInputSnapshotIdentities(artifacts) {
+  const references=[
+    artifacts.pmAnalysis,
+    artifacts.architecture.artifact,
+    ...artifacts.architecture.adrs,
+    artifacts.issuePlan,
+  ];
+  const identities=new Set();
+  for (const reference of references) {
+    const identity=artifactIdentity(reference);
+    if (identities.has(identity)) {
+      throw new TraceabilityInputError(
+        "Duplicate trace input snapshot identity independent of content hash",
+      );
+    }
+    identities.add(identity);
+  }
+}
+
 function assertUpstream(artifacts) {
   let audit;
   try {
@@ -364,6 +409,7 @@ function assertStableInputs(artifacts) {
 
 export function buildTraceGraph(artifacts) {
   const input=normalizedInputs(artifacts);
+  assertUniqueInputSnapshotIdentities(input);
   assertUpstream(input);
   try {
     assertStableInputs(input);
@@ -492,17 +538,22 @@ export function buildTraceGraph(artifacts) {
     edges,
   };
   assertGraph(graph);
-  return deepFreeze(graph);
+  const frozen=deepFreeze(graph);
+  authoritativeGraphs.add(frozen);
+  return frozen;
 }
 
-function normalizedGraph(graph) {
-  const normalized=canonicalCopy(graph,"trace graph");
-  assertGraph(normalized);
-  return normalized;
+function authoritativeGraph(graph) {
+  if (!graph || typeof graph!=="object" || !authoritativeGraphs.has(graph)) {
+    throw new TraceabilityInputError(
+      "Trace graph is not an authoritative build; rebuild it from authoritative artifacts",
+    );
+  }
+  return graph;
 }
 
 export function calculateRequirementCoverage(graph) {
-  const normalized=normalizedGraph(graph);
+  const normalized=authoritativeGraph(graph);
   const requirements=normalized.nodes.filter(node => REQUIREMENT_TYPES.has(node.type));
   if (requirements.length===0) return 1;
   const sourceIssues=new Map(requirements.map(node => [node.id,new Set()]));
@@ -542,7 +593,7 @@ function reachable(start,adjacency) {
 }
 
 export function traceEntity(graph,entityId) {
-  const normalized=normalizedGraph(graph);
+  const normalized=authoritativeGraph(graph);
   if (typeof entityId!=="string") {
     throw new TraceEntityNotFoundError(entityId);
   }
