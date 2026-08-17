@@ -1,0 +1,22 @@
+[
+  {
+    "id": "Q-P3-MISSING",
+    "meaning": "Use the existing logging default",
+    "question": "Which logging default should the implementation use?",
+    "severity": "P3",
+    "context": "The project has no special logging requirement.",
+    "impact": "The default affects diagnostic information.",
+    "options": [{"id": "DEFAULT", "label": "Existing default"}],
+    "recommendation": "Use the documented operational default.",
+    "rationale": "This is a reversible implementation detail.",
+    "affected_entities": ["NFR-001"],
+    "provenance": {
+      "source": {"file": "OPERATIONS.md", "section": "Logging", "location": "line 8"},
+      "source_revision": "ops-r1",
+      "source_sha256": "9999999999999999999999999999999999999999999999999999999999999999",
+      "agent": {"identity": "pm-agent", "model": "deterministic", "run_id": "run-decisions-009"},
+      "timestamp": "2026-08-17T12:40:00.000Z",
+      "confidence": 0.8
+    }
+  }
+]

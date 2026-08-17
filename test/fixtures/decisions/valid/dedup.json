@@ -1,0 +1,70 @@
+[
+  {
+    "id": "Q-DUP-B",
+    "meaning": "  Select durable storage strategy  ",
+    "question": "Which durable storage strategy should the service use?",
+    "severity": "P2",
+    "context": "The service retains customer requests across restarts.",
+    "impact": "A wrong choice can prevent durable request handling.",
+    "options": [
+      {"id": "RELATIONAL", "label": "Relational store"}
+    ],
+    "recommendation": "Choose the strategy that meets the documented durability target.",
+    "rationale": "Durable storage must satisfy the customer request lifecycle.",
+    "affected_entities": ["REQ-001", "NFR-001"],
+    "dependencies": ["Q-BASE"],
+    "provenance": {
+      "source": {"file": "PROJECT_BRIEF.md", "section": "Storage", "location": "line 20"},
+      "source_revision": "brief-r1",
+      "source_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "agent": {"identity": "pm-agent", "model": "deterministic", "run_id": "run-decisions-004"},
+      "timestamp": "2026-08-17T12:15:00.000Z",
+      "confidence": 0.8
+    }
+  },
+  {
+    "id": "Q-BASE",
+    "meaning": "Establish durability requirement",
+    "question": "What durability expectation is required for customer requests?",
+    "severity": "P1",
+    "context": "Storage decisions need an explicit durability target.",
+    "impact": "The target governs recovery and data-loss tolerance.",
+    "options": [
+      {"id": "DURABLE", "label": "Durable before acknowledgement"}
+    ],
+    "recommendation": "Confirm durable acknowledgement for customer requests.",
+    "rationale": "The service must not silently lose submitted requests.",
+    "affected_entities": ["REQ-001"],
+    "provenance": {
+      "source": {"file": "PROJECT_BRIEF.md", "section": "Reliability", "location": "line 14"},
+      "source_revision": "brief-r1",
+      "source_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "agent": {"identity": "architect-agent", "model": "deterministic", "run_id": "run-decisions-004"},
+      "timestamp": "2026-08-17T12:14:00.000Z",
+      "confidence": 0.95
+    }
+  },
+  {
+    "id": "Q-DUP-A",
+    "meaning": "select durable storage strategy",
+    "question": "Which storage strategy preserves durable requests?",
+    "severity": "P1",
+    "context": "The service retains customer requests across restarts.",
+    "impact": "A wrong choice can prevent durable request handling.",
+    "options": [
+      {"id": "RELATIONAL", "label": "Relational store"}
+    ],
+    "recommendation": "Choose the strategy that meets the documented durability target.",
+    "rationale": "Durable storage must satisfy the customer request lifecycle.",
+    "affected_entities": ["NFR-001", "REQ-001"],
+    "dependencies": ["Q-BASE"],
+    "provenance": {
+      "source": {"file": "ARCHITECTURE.md", "section": "Storage", "location": "line 8"},
+      "source_revision": "architecture-r1",
+      "source_sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "agent": {"identity": "architect-agent", "model": "deterministic", "run_id": "run-decisions-004"},
+      "timestamp": "2026-08-17T12:16:00.000Z",
+      "confidence": 0.95
+    }
+  }
+]

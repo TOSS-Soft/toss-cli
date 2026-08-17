@@ -1,0 +1,220 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://toss.software/schemas/pipeline/decision-package.v1.schema.json",
+  "title": "TOSS Decision Package v1",
+  "description": "A closed, deterministic pipeline result for actionable questions and their recomputed continuation gate. It is not an ACP revision envelope.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "document_type", "questions", "gate"],
+  "properties": {
+    "schema_version": {"const": "decision-package.v1"},
+    "document_type": {"const": "decision-package"},
+    "questions": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/question"}
+    },
+    "gate": {"$ref": "#/$defs/gate"}
+  },
+  "$defs": {
+    "question_id": {
+      "type": "string",
+      "pattern": "^Q-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"
+    },
+    "affected_entity_id": {
+      "type": "string",
+      "pattern": "^(?:REQ|NFR|BR|FLOW|ARCHQ|ADR|EPIC|ISSUE|AC|RISK|ASM|Q)-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"
+    },
+    "option": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label"],
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "label": {"type": "string", "minLength": 1}
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_id",
+        "meaning",
+        "question",
+        "severity",
+        "status",
+        "context",
+        "impact",
+        "options",
+        "recommendation",
+        "rationale",
+        "affected_entities",
+        "provenance",
+        "dependencies"
+      ],
+      "properties": {
+        "source_id": {"$ref": "#/$defs/question_id"},
+        "meaning": {"type": "string", "minLength": 1},
+        "question": {"type": "string", "minLength": 1},
+        "severity": {"enum": ["P0", "P1", "P2", "P3", "P4"]},
+        "status": {"enum": ["unresolved", "resolved"]},
+        "owner": {"type": "string", "minLength": 1},
+        "context": {"type": "string", "minLength": 1},
+        "impact": {"type": "string", "minLength": 1},
+        "options": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/option"}
+        },
+        "recommendation": {"type": "string", "minLength": 1},
+        "rationale": {"type": "string", "minLength": 1},
+        "affected_entities": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/affected_entity_id"}
+        },
+        "provenance": {
+          "$ref": "https://toss.software/schemas/common/provenance.v1.schema.json"
+        },
+        "dependencies": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/question_id"}
+        },
+        "reversibility": {
+          "enum": ["reversible", "partially-reversible", "irreversible"]
+        },
+        "business_input_missing": {"type": "boolean"},
+        "technical_preference": {"type": "boolean"},
+        "resolution": {"type": "string", "minLength": 1}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"severity": {"enum": ["P3", "P4"]}},
+            "required": ["severity"]
+          },
+          "then": {
+            "required": ["reversibility"],
+            "properties": {
+              "reversibility": {
+                "enum": ["reversible", "partially-reversible", "irreversible"]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "question": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "meaning",
+        "question",
+        "severity",
+        "authority",
+        "owner",
+        "status",
+        "context",
+        "impact",
+        "options",
+        "recommendation",
+        "rationale",
+        "affected_entities",
+        "provenance",
+        "dependencies",
+        "source_ids",
+        "evidence"
+      ],
+      "properties": {
+        "id": {"$ref": "#/$defs/question_id"},
+        "meaning": {"type": "string", "minLength": 1},
+        "question": {"type": "string", "minLength": 1},
+        "severity": {"enum": ["P0", "P1", "P2", "P3", "P4"]},
+        "authority": {"enum": ["A1", "A2", "A3"]},
+        "owner": {"enum": ["PM", "ARCHITECT", "USER"]},
+        "status": {"enum": ["unresolved", "resolved"]},
+        "context": {"type": "string", "minLength": 1},
+        "impact": {"type": "string", "minLength": 1},
+        "options": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/option"}
+        },
+        "recommendation": {"type": "string", "minLength": 1},
+        "rationale": {"type": "string", "minLength": 1},
+        "affected_entities": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/affected_entity_id"}
+        },
+        "provenance": {
+          "$ref": "https://toss.software/schemas/common/provenance.v1.schema.json"
+        },
+        "dependencies": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/question_id"}
+        },
+        "source_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/question_id"}
+        },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/evidence"}
+        },
+        "reversibility": {
+          "enum": ["reversible", "partially-reversible", "irreversible"]
+        },
+        "business_input_missing": {"type": "boolean"},
+        "technical_preference": {"type": "boolean"}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"severity": {"enum": ["P3", "P4"]}},
+            "required": ["severity"]
+          },
+          "then": {
+            "required": ["reversibility"],
+            "properties": {
+              "reversibility": {
+                "enum": ["reversible", "partially-reversible", "irreversible"]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "can_continue",
+        "status",
+        "unresolved_blocking_question_ids",
+        "unresolved_assumption_question_ids"
+      ],
+      "properties": {
+        "can_continue": {"type": "boolean"},
+        "status": {"enum": ["CLEAR", "BLOCKED"]},
+        "unresolved_blocking_question_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/question_id"}
+        },
+        "unresolved_assumption_question_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/question_id"}
+        }
+      }
+    }
+  }
+}

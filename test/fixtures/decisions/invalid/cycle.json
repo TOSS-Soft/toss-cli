@@ -1,0 +1,44 @@
+[
+  {
+    "id": "Q-CYCLE-A",
+    "meaning": "First circular choice",
+    "question": "Can the first circular choice be resolved?",
+    "severity": "P1",
+    "context": "The first choice depends on the second choice.",
+    "impact": "The cycle prevents a deterministic decision order.",
+    "options": [{"id": "A", "label": "First choice"}],
+    "recommendation": "Break the cycle before proceeding.",
+    "rationale": "Dependencies must form an acyclic graph.",
+    "affected_entities": ["REQ-001"],
+    "dependencies": ["Q-CYCLE-B"],
+    "provenance": {
+      "source": {"file": "PLAN.md", "section": "Cycle", "location": "line 1"},
+      "source_revision": "plan-r1",
+      "source_sha256": "6666666666666666666666666666666666666666666666666666666666666666",
+      "agent": {"identity": "pm-agent", "model": "deterministic", "run_id": "run-decisions-007"},
+      "timestamp": "2026-08-17T12:30:00.000Z",
+      "confidence": 1
+    }
+  },
+  {
+    "id": "Q-CYCLE-B",
+    "meaning": "Second circular choice",
+    "question": "Can the second circular choice be resolved?",
+    "severity": "P1",
+    "context": "The second choice depends on the first choice.",
+    "impact": "The cycle prevents a deterministic decision order.",
+    "options": [{"id": "B", "label": "Second choice"}],
+    "recommendation": "Break the cycle before proceeding.",
+    "rationale": "Dependencies must form an acyclic graph.",
+    "affected_entities": ["REQ-001"],
+    "dependencies": ["Q-CYCLE-A"],
+    "provenance": {
+      "source": {"file": "PLAN.md", "section": "Cycle", "location": "line 2"},
+      "source_revision": "plan-r1",
+      "source_sha256": "7777777777777777777777777777777777777777777777777777777777777777",
+      "agent": {"identity": "pm-agent", "model": "deterministic", "run_id": "run-decisions-007"},
+      "timestamp": "2026-08-17T12:31:00.000Z",
+      "confidence": 1
+    }
+  }
+]

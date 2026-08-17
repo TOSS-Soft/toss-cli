@@ -1,0 +1,44 @@
+[
+  {
+    "id": "Q-P3",
+    "meaning": "Use the existing log retention default",
+    "question": "Which log retention default should the implementation use?",
+    "severity": "P3",
+    "context": "The project has no special retention requirement.",
+    "impact": "The default affects diagnostic data availability.",
+    "reversibility": "reversible",
+    "options": [{"id": "DEFAULT", "label": "Existing operational default"}],
+    "recommendation": "Document the established operational default.",
+    "rationale": "This is a reversible implementation detail.",
+    "affected_entities": ["NFR-001"],
+    "provenance": {
+      "source": {"file": "OPERATIONS.md", "section": "Logging", "location": "line 6"},
+      "source_revision": "ops-r1",
+      "source_sha256": "4444444444444444444444444444444444444444444444444444444444444444",
+      "agent": {"identity": "pm-agent", "model": "deterministic", "run_id": "run-decisions-006"},
+      "timestamp": "2026-08-17T12:25:00.000Z",
+      "confidence": 0.8
+    }
+  },
+  {
+    "id": "Q-P4",
+    "meaning": "Use the established display label default",
+    "question": "Which neutral display label should the interface use?",
+    "severity": "P4",
+    "context": "No product copy preference is recorded for this neutral label.",
+    "impact": "The label affects cosmetic consistency only.",
+    "reversibility": "reversible",
+    "options": [{"id": "STANDARD", "label": "Established standard label"}],
+    "recommendation": "Document the established standard label.",
+    "rationale": "This is a cosmetic default with a reversible effect.",
+    "affected_entities": ["FLOW-001"],
+    "provenance": {
+      "source": {"file": "STYLE.md", "section": "Labels", "location": "line 3"},
+      "source_revision": "style-r1",
+      "source_sha256": "5555555555555555555555555555555555555555555555555555555555555555",
+      "agent": {"identity": "pm-agent", "model": "deterministic", "run_id": "run-decisions-006"},
+      "timestamp": "2026-08-17T12:26:00.000Z",
+      "confidence": 0.75
+    }
+  }
+]

@@ -1,0 +1,25 @@
+[
+  {
+    "id": "Q-RESOLVED",
+    "meaning": "Choose release approval authority",
+    "question": "Which verified authority approves the release?",
+    "severity": "P0",
+    "status": "resolved",
+    "context": "The release process needs a named approval authority before publication.",
+    "impact": "Publication must stop until an accountable authority is verified.",
+    "options": [
+      {"id": "CEO", "label": "Verified CEO approval"}
+    ],
+    "recommendation": "Record the verified authority decision.",
+    "rationale": "The named authority already approved this release decision.",
+    "affected_entities": ["REQ-001"],
+    "provenance": {
+      "source": {"file": "DECISIONS.md", "section": "Release", "location": "line 4"},
+      "source_revision": "decision-r1",
+      "source_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "agent": {"identity": "pm-agent", "model": "deterministic", "run_id": "run-decisions-002"},
+      "timestamp": "2026-08-17T12:05:00.000Z",
+      "confidence": 1
+    }
+  }
+]

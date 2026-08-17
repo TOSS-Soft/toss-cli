@@ -1,0 +1,23 @@
+[
+  {
+    "id": "Q-DANGLING",
+    "meaning": "Choose a dependent policy",
+    "question": "Which policy follows the missing prerequisite?",
+    "severity": "P1",
+    "context": "The policy names a prerequisite that is not part of the package.",
+    "impact": "The package cannot establish a valid decision order.",
+    "options": [{"id": "WAIT", "label": "Wait for prerequisite"}],
+    "recommendation": "Add the prerequisite or remove the dependency.",
+    "rationale": "Dependencies must resolve to a package question.",
+    "affected_entities": ["REQ-001"],
+    "dependencies": ["Q-MISSING"],
+    "provenance": {
+      "source": {"file": "PLAN.md", "section": "Dependencies", "location": "line 9"},
+      "source_revision": "plan-r1",
+      "source_sha256": "8888888888888888888888888888888888888888888888888888888888888888",
+      "agent": {"identity": "pm-agent", "model": "deterministic", "run_id": "run-decisions-008"},
+      "timestamp": "2026-08-17T12:35:00.000Z",
+      "confidence": 1
+    }
+  }
+]
