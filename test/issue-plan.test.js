@@ -74,6 +74,34 @@ if (typeof issuePlanModule.buildIssuePlan==="function" &&
     });
   }
 
+  function additionalAdrFor(analysis,architecture,{
+    artifactId,
+    id,
+    meaning,
+    affectedRequirements,
+  }) {
+    const adr=adrFor(analysis,architecture);
+    adr.artifact_id=artifactId;
+    adr.content.id=id;
+    adr.content.meaning=meaning;
+    adr.content.affected_requirements=affectedRequirements;
+    return rehash(adr);
+  }
+
+  function synchronizeIssuePlanInputs(graph) {
+    graph.issuePlan.inputs=[
+      reference(graph.pmAnalysis),
+      reference(graph.architecture),
+      ...graph.adrs.map(reference),
+    ];
+    graph.issuePlan.content.input_snapshots={
+      pm_analysis:reference(graph.pmAnalysis),
+      architecture:reference(graph.architecture),
+      adrs:graph.adrs.map(reference),
+    };
+    return rehash(graph.issuePlan);
+  }
+
   function upstream() {
     const analysis=pmAnalysis();
     const architecture=architectureFor(analysis);
@@ -215,6 +243,49 @@ if (typeof issuePlanModule.buildIssuePlan==="function" &&
     assert.deepEqual(result.coverage.uncovered_must_requirement_ids,["REQ-001"]);
     assert.ok(result.findings.some(finding => finding.type==="MUST_REQUIREMENT_UNCOVERED"));
     assert.ok(result.findings.some(finding => finding.type==="COVERAGE_SUMMARY_MISMATCH"));
+    assert.ok(result.findings.some(finding => finding.type==="STATUS_READINESS_MISMATCH"));
+  });
+
+  test("a forged coverage summary invalidates an otherwise-ready status",() => {
+    const forgedSummaries=[
+      {
+        name:"understated",
+        coverage:{
+          must_requirement_policy:MUST_REQUIREMENT_POLICY,
+          must_requirements:1,
+          covered_must_requirements:0,
+          uncovered_must_requirement_ids:["REQ-001"],
+          ready:false,
+        },
+      },
+      {
+        name:"inverse",
+        coverage:{
+          must_requirement_policy:MUST_REQUIREMENT_POLICY,
+          must_requirements:0,
+          covered_must_requirements:0,
+          uncovered_must_requirement_ids:[],
+          ready:true,
+        },
+      },
+    ];
+    for (const forged of forgedSummaries) {
+      const graph=completeGraph();
+      graph.issuePlan.content.coverage=forged.coverage;
+      graph.issuePlan.content.status="ready-for-issues";
+      rehash(graph.issuePlan);
+
+      const result=validateIssuePlan(graph);
+
+      assert.equal(result.valid,false,forged.name);
+      assert.equal(result.ready_for_issues,false,forged.name);
+      assert.ok(result.findings.some(finding =>
+        finding.type==="COVERAGE_SUMMARY_MISMATCH" && finding.path==="/content/coverage",
+      ),forged.name);
+      assert.ok(result.findings.some(finding =>
+        finding.type==="STATUS_READINESS_MISMATCH" && finding.path==="/content/status",
+      ),forged.name);
+    }
   });
 
   test("PM finalization rejects an immutable architecture input whose content no longer matches the plan snapshot",() => {
@@ -228,6 +299,96 @@ if (typeof issuePlanModule.buildIssuePlan==="function" &&
       () => validateIssuePlan(graph),
       /immutable architecture input/i,
     );
+  });
+
+  test("an issue cannot bypass a relevant approved ADR with requires_adr false",() => {
+    const graph=completeGraph();
+    graph.issuePlan.content.issues[0].requires_adr=false;
+    graph.issuePlan.content.issues[0].adr_refs=[];
+    rehash(graph.issuePlan);
+
+    const result=validateIssuePlan(graph);
+
+    assert.equal(result.valid,false);
+    assert.ok(result.findings.some(finding =>
+      finding.type==="ISSUE_ADR_REQUIRED" &&
+      finding.path==="/content/issues/0/requires_adr",
+    ));
+    assert.ok(result.findings.some(finding =>
+      finding.type==="ISSUE_ADR_MISSING_RELEVANT" &&
+      finding.path==="/content/issues/0/adr_refs",
+    ));
+
+  });
+
+  test("an issue cannot replace a relevant approved ADR with an unrelated one",() => {
+    const graph=completeGraph();
+    graph.adrs.push(additionalAdrFor(graph.pmAnalysis,graph.architecture,{
+      artifactId:"ADR-ARTIFACT-002",
+      id:"ADR-002",
+      meaning:"Keep support-request read telemetry separate from the request record.",
+      affectedRequirements:["NFR-001"],
+    }));
+    synchronizeIssuePlanInputs(graph);
+    graph.issuePlan.content.issues[0].adr_refs=[{kind:"adr",id:"ADR-002"}];
+    rehash(graph.issuePlan);
+
+    const result=validateIssuePlan(graph);
+
+    assert.equal(result.valid,false);
+    assert.ok(result.findings.some(finding =>
+      finding.type==="ISSUE_ADR_MISSING_RELEVANT" &&
+      finding.path==="/content/issues/0/adr_refs",
+    ));
+    assert.ok(result.findings.some(finding =>
+      finding.type==="ISSUE_ADR_UNRELATED" &&
+      finding.path==="/content/issues/0/adr_refs/0",
+    ));
+  });
+
+  test("an issue with no approved ADR intersection cannot claim an ADR",() => {
+    const graph=completeGraph();
+    graph.issuePlan.content.issues[0].source_requirements=[
+      {kind:"requirement",id:"NFR-001"},
+    ];
+    rehash(graph.issuePlan);
+
+    const result=validateIssuePlan(graph);
+
+    assert.equal(result.valid,false);
+    assert.ok(result.findings.some(finding =>
+      finding.type==="ISSUE_ADR_NOT_REQUIRED" &&
+      finding.path==="/content/issues/0/requires_adr",
+    ));
+    assert.ok(result.findings.some(finding =>
+      finding.type==="ISSUE_ADR_UNRELATED" &&
+      finding.path==="/content/issues/0/adr_refs/0",
+    ));
+  });
+
+  test("every approved ADR relevant to an issue source requirement must be linked",() => {
+    const graph=completeGraph();
+    graph.adrs.push(additionalAdrFor(graph.pmAnalysis,graph.architecture,{
+      artifactId:"ADR-ARTIFACT-002",
+      id:"ADR-002",
+      meaning:"Store customer support request updates as append-only revisions.",
+      affectedRequirements:["REQ-001"],
+    }));
+    synchronizeIssuePlanInputs(graph);
+
+    const result=validateIssuePlan(graph);
+
+    assert.equal(result.valid,false);
+    assert.ok(result.findings.some(finding =>
+      finding.type==="ISSUE_ADR_MISSING_RELEVANT" &&
+      finding.path==="/content/issues/0/adr_refs",
+    ));
+
+    graph.issuePlan.content.issues[0].adr_refs.push({kind:"adr",id:"ADR-002"});
+    rehash(graph.issuePlan);
+    const completeResult=validateIssuePlan(graph);
+    assert.equal(completeResult.valid,true);
+    assert.equal(completeResult.ready_for_issues,true);
   });
 
   test("issue-plan inputs accept only the exact PM, architecture, and ADR revisions",() => {

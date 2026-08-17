@@ -270,6 +270,68 @@ function assertEntityReference(reference,entities,kind,path) {
   }
 }
 
+function requiredApprovedAdrs(issue,adrs) {
+  const sourceRequirementIds=new Set((issue.source_requirements ?? []).map(
+    reference => reference.id,
+  ));
+  const required=new Map();
+  for (const adr of adrs) {
+    const content=adr?.content;
+    if (!isPlainObject(content) || content.status!=="accepted" ||
+        content.approval?.state!=="approved" ||
+        !Array.isArray(content.affected_requirements)) {
+      continue;
+    }
+    if (content.affected_requirements.some(id => sourceRequirementIds.has(id))) {
+      required.set(content.id,content);
+    }
+  }
+  return required;
+}
+
+function issueAdrTraceabilityFindings(issue,issueIndex,adrs) {
+  const findings=[];
+  const required=requiredApprovedAdrs(issue,adrs);
+  const declaredIds=new Set(issue.adr_refs.map(reference => reference.id));
+  const basePath=`/content/issues/${issueIndex}`;
+
+  if (required.size>0 && !issue.requires_adr) {
+    findings.push(freezeFinding({
+      type:"ISSUE_ADR_REQUIRED",
+      path:`${basePath}/requires_adr`,
+      message:`Issue ${issue.id} has source requirements affected by accepted and approved ADRs`,
+      affected_entities:[issue.id,...required.keys()],
+    }));
+  }
+  if (required.size===0 && issue.requires_adr) {
+    findings.push(freezeFinding({
+      type:"ISSUE_ADR_NOT_REQUIRED",
+      path:`${basePath}/requires_adr`,
+      message:`Issue ${issue.id} has no source requirement affected by an accepted and approved ADR`,
+      affected_entities:[issue.id],
+    }));
+  }
+  for (const [adrId] of required) {
+    if (declaredIds.has(adrId)) continue;
+    findings.push(freezeFinding({
+      type:"ISSUE_ADR_MISSING_RELEVANT",
+      path:`${basePath}/adr_refs`,
+      message:`Issue ${issue.id} must reference relevant accepted and approved ADR ${adrId}`,
+      affected_entities:[issue.id,adrId],
+    }));
+  }
+  for (const [referenceIndex,reference] of issue.adr_refs.entries()) {
+    if (required.has(reference.id)) continue;
+    findings.push(freezeFinding({
+      type:"ISSUE_ADR_UNRELATED",
+      path:`${basePath}/adr_refs/${referenceIndex}`,
+      message:`Issue ${issue.id} may reference only accepted and approved ADRs relevant to its source requirements`,
+      affected_entities:[issue.id,reference.id],
+    }));
+  }
+  return findings;
+}
+
 function dependencyCycle(issues) {
   const visiting=new Set();
   const visited=new Set();
@@ -346,7 +408,6 @@ function semanticFindings({pmAnalysis,adrs,issuePlan}) {
     for (const [referenceIndex,reference] of issue.adr_refs.entries()) {
       assertEntityReference(reference,adrById,"adr",`/content/issues/${index}/adr_refs/${referenceIndex}`);
       const adr=adrById.get(reference.id);
-      if (!issue.requires_adr) continue;
       if (adr.status!=="accepted" || adr.approval.state!=="approved") {
         findings.push(freezeFinding({
           type:"ISSUE_ADR_NOT_APPROVED",
@@ -356,6 +417,7 @@ function semanticFindings({pmAnalysis,adrs,issuePlan}) {
         }));
       }
     }
+    findings.push(...issueAdrTraceabilityFindings(issue,index,adrs));
     for (const [referenceIndex,reference] of issue.dependencies.entries()) {
       assertEntityReference(reference,issues,"issue",`/content/issues/${index}/dependencies/${referenceIndex}`);
     }
@@ -416,14 +478,16 @@ function coverageFindings(issuePlan,coverage,hasIntegrity) {
       affected_entities:[id],
     }));
   }
-  if (canonicalJson(issuePlan.content.coverage)!==canonicalJson(coverage)) {
+  const summaryMatches=canonicalJson(issuePlan.content.coverage)===canonicalJson(coverage);
+  if (!summaryMatches) {
     findings.push(freezeFinding({
       type:"COVERAGE_SUMMARY_MISMATCH",
       path:"/content/coverage",
       message:"Issue-plan coverage is computed from acceptance criteria and cannot be trusted from input",
     }));
   }
-  const expectedStatus=hasIntegrity && coverage.ready ? "ready-for-issues" : "blocked";
+  const expectedStatus=hasIntegrity && summaryMatches && coverage.ready ?
+    "ready-for-issues" : "blocked";
   if (issuePlan.content.status!==expectedStatus) {
     findings.push(freezeFinding({
       type:"STATUS_READINESS_MISMATCH",
