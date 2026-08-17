@@ -1,16 +1,21 @@
 import {randomUUID} from "node:crypto";
+import {constants,readFileSync} from "node:fs";
 import {
+  lstat,
   mkdir,
   open,
   readdir,
-  readFile,
+  realpath,
   rename,
-  rm,
   unlink,
 } from "node:fs/promises";
-import {basename, dirname, join, relative} from "node:path";
+import {basename,dirname,isAbsolute,join,relative,resolve,sep} from "node:path";
 
-import {assertKnownDocumentType,sha256Canonical} from "../contracts/acp.js";
+import {
+  assertKnownDocumentType,
+  canonicalJson,
+  sha256Canonical,
+} from "../contracts/acp.js";
 import {
   ArtifactIntegrityError,
   ArtifactNotFoundError,
@@ -23,10 +28,26 @@ import {
 const ARTIFACT_ROOT_PARTS=["project-management","artifacts"];
 const ARTIFACT_ID_PATTERN=/^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const SHA256_PATTERN=/^[a-f0-9]{64}$/;
+const MAX_REVISION=999999;
 const REVISION_FILE_PATTERN=/^r(\d{6})-([a-f0-9]{64})\.json$/;
+const REVISION_LIKE_FILE_PATTERN=/^r(\d+)-([a-f0-9]{64})\.json$/;
+const TEMPORARY_FILE_PATTERN=/^\.r\d{6}-[a-f0-9]{64}\.json\.tmp-([1-9]\d*)-([A-Za-z0-9_-]+)-(\d+)$/;
 const LOCK_FILE_NAME=".append.lock";
+const LOCK_OWNER_TOKEN_PATTERN=/^[A-Za-z0-9_-]+$/;
 const LOCK_RETRY_LIMIT=200;
 const LOCK_RETRY_DELAY_MS=5;
+const LOCK_INITIALIZING_GRACE_MS=1000;
+const NO_FOLLOW=constants.O_NOFOLLOW ?? 0;
+
+const registry=JSON.parse(readFileSync(
+  new URL("../../contracts/registry.json",import.meta.url),
+  "utf8",
+));
+const documentDefinitions=new Map(registry.documents.map(document => [
+  `${document.document_type}\u0000${document.schema_version}`,
+  document,
+]));
+const documentTypes=new Set(registry.documents.map(document => document.document_type));
 
 function isPlainObject(value) {
   if (!value || typeof value!=="object" || Array.isArray(value)) return false;
@@ -51,7 +72,7 @@ function pathForDisplay(root,path) {
 }
 
 function sleep(milliseconds) {
-  return new Promise(resolve => setTimeout(resolve,milliseconds));
+  return new Promise(resolveSleep => setTimeout(resolveSleep,milliseconds));
 }
 
 function requireNonEmptyString(value,field) {
@@ -73,6 +94,11 @@ function requireArtifactId(value) {
 function requireRevision(value,field="revision") {
   if (!Number.isSafeInteger(value) || value<1) {
     throw new ArtifactValidationError(`${field} must be a positive integer`);
+  }
+  if (value>MAX_REVISION) {
+    throw new ArtifactValidationError(
+      `${field} exceeds maximum revision ${MAX_REVISION}`,
+    );
   }
   return value;
 }
@@ -128,17 +154,30 @@ function calculateContentHash(content) {
   }
 }
 
+function findDocumentDefinition(documentType,schemaVersion) {
+  try {
+    assertKnownDocumentType(documentType,schemaVersion);
+  } catch (error) {
+    throw new ArtifactValidationError(error.message,{cause:error});
+  }
+  return documentDefinitions.get(`${documentType}\u0000${schemaVersion}`);
+}
+
+function assertCanonicalArtifact(record) {
+  try {
+    canonicalJson(record);
+  } catch (error) {
+    throw new ArtifactValidationError("artifact must be canonical JSON",{cause:error});
+  }
+}
+
 function assertCoreArtifact(record,{requireRevision:mustHaveRevision,now}={}) {
   if (!isPlainObject(record)) {
     throw new ArtifactValidationError("artifact must be an object");
   }
   requireNonEmptyString(record.schema_version,"schema_version");
   requireNonEmptyString(record.document_type,"document_type");
-  try {
-    assertKnownDocumentType(record.document_type,record.schema_version);
-  } catch (error) {
-    throw new ArtifactValidationError(error.message,{cause:error});
-  }
+  const definition=findDocumentDefinition(record.document_type,record.schema_version);
   requireArtifactId(record.artifact_id);
   if (mustHaveRevision || record.revision!==undefined) {
     requireRevision(record.revision);
@@ -147,92 +186,381 @@ function assertCoreArtifact(record,{requireRevision:mustHaveRevision,now}={}) {
   if (!isPlainObject(record.producer)) {
     throw new ArtifactValidationError("producer must be an object");
   }
+  const producerRole=requireNonEmptyString(record.producer.role,"producer.role");
+  requireNonEmptyString(record.producer.identity,"producer.identity");
+  if (producerRole!==definition.producer) {
+    throw new ArtifactValidationError(
+      `producer role ${producerRole} is not authorized for ${record.document_type}`,
+    );
+  }
   if (!isPlainObject(record.provenance)) {
     throw new ArtifactValidationError("provenance must be an object");
   }
-  if (record.provenance.source_revision===undefined ||
-      record.provenance.source_revision===null ||
-      String(record.provenance.source_revision).length===0) {
-    throw new ArtifactValidationError("provenance.source_revision is required");
-  }
+  requireNonEmptyString(record.provenance.source_revision,"provenance.source_revision");
   requireHash(record.provenance.source_sha256,"provenance.source_sha256");
+  if (!Array.isArray(record.provenance.locations) ||
+      record.provenance.locations.length===0 ||
+      record.provenance.locations.some(location =>
+        typeof location!=="string" || location.length===0)) {
+    throw new ArtifactValidationError(
+      "provenance.locations must be a non-empty array of strings",
+    );
+  }
   if (record.created_at===undefined && now) {
     record.created_at=isoTimestamp(now());
   }
   requireNonEmptyString(record.created_at,"created_at");
-  record.parents=normalizeReferenceList(record.parents ?? [],"parents");
-  record.inputs=normalizeReferenceList(record.inputs ?? [],"inputs");
+  record.parents=normalizeReferenceList(record.parents,"parents");
+  record.inputs=normalizeReferenceList(record.inputs,"inputs");
   const contentHash=calculateContentHash(record.content);
   if (record.content_sha256!==undefined && record.content_sha256!==contentHash) {
     throw new ArtifactIntegrityError("Content hash mismatch for artifact content");
   }
   record.content_sha256=contentHash;
+  assertCanonicalArtifact(record);
   return record;
 }
 
 function artifactFileName(revision,contentSha256) {
+  requireRevision(revision);
   return `r${String(revision).padStart(6,"0")}-${contentSha256}.json`;
 }
 
-function isFinalArtifactFile(name) {
-  return REVISION_FILE_PATTERN.test(name);
+function isWithin(root,path) {
+  const pathRelative=relative(root,path);
+  return pathRelative==="" || (!isAbsolute(pathRelative) &&
+    pathRelative!==".." && !pathRelative.startsWith(`..${sep}`));
 }
 
-function isTransientFile(name) {
-  return name===LOCK_FILE_NAME || name.includes(".tmp-") || name.endsWith(".tmp");
+function sameFile(left,right) {
+  return left.dev===right.dev && left.ino===right.ino;
 }
 
-async function pathExists(path) {
+async function lstatOptional(path) {
   try {
-    await readFile(path);
+    return await lstat(path);
+  } catch (error) {
+    if (error.code==="ENOENT") return undefined;
+    throw error;
+  }
+}
+
+function unexpectedEntry(path,detail) {
+  return new ArtifactIntegrityError(`Unexpected artifact entry ${path}: ${detail}`);
+}
+
+async function prepareRoot(root) {
+  const lexicalRoot=resolve(root);
+  let rootEntry=await lstatOptional(lexicalRoot);
+  if (!rootEntry) {
+    await mkdir(lexicalRoot,{recursive:true});
+    rootEntry=await lstat(lexicalRoot);
+  }
+  if (rootEntry.isSymbolicLink()) {
+    throw new ArtifactIntegrityError("Artifact store root must not be a symbolic link");
+  }
+  if (!rootEntry.isDirectory()) {
+    throw new ArtifactIntegrityError("Artifact store root must be a directory");
+  }
+  return {lexicalRoot,canonicalRoot:await realpath(lexicalRoot)};
+}
+
+async function assertSafeExistingPath(rootInfo,path,{kind,label}={}) {
+  const absolute=resolve(path);
+  const pathRelative=relative(rootInfo.lexicalRoot,absolute);
+  if (!isWithin(rootInfo.lexicalRoot,absolute)) {
+    throw new ArtifactIntegrityError(`Artifact path escapes store root: ${path}`);
+  }
+  let current=rootInfo.lexicalRoot;
+  const components=pathRelative==="" ? [] : pathRelative.split(sep);
+  const allComponents=[undefined,...components];
+  for (let index=0;index<allComponents.length;index+=1) {
+    if (index>0) current=join(current,allComponents[index]);
+    const entry=await lstat(current);
+    if (entry.isSymbolicLink()) {
+      throw new ArtifactIntegrityError(
+        `Artifact path contains a symbolic link: ${pathForDisplay(rootInfo.lexicalRoot,current)}`,
+      );
+    }
+    const last=index===allComponents.length-1;
+    if (!last && !entry.isDirectory()) {
+      throw new ArtifactIntegrityError(
+        `Artifact path component is not a directory: ${pathForDisplay(rootInfo.lexicalRoot,current)}`,
+      );
+    }
+    if (last && kind==="directory" && !entry.isDirectory()) {
+      throw new ArtifactIntegrityError(
+        `${label ?? "Artifact path"} must be a directory: ${pathForDisplay(rootInfo.lexicalRoot,current)}`,
+      );
+    }
+    if (last && kind==="file" && !entry.isFile()) {
+      throw new ArtifactIntegrityError(
+        `${label ?? "Artifact path"} must be a regular file: ${pathForDisplay(rootInfo.lexicalRoot,current)}`,
+      );
+    }
+    const canonical=await realpath(current);
+    if (!isWithin(rootInfo.canonicalRoot,canonical)) {
+      throw new ArtifactIntegrityError(
+        `Artifact path escapes store root: ${pathForDisplay(rootInfo.lexicalRoot,current)}`,
+      );
+    }
+  }
+  return lstat(path);
+}
+
+async function ensureContainedDirectory(rootInfo,parts) {
+  let current=rootInfo.lexicalRoot;
+  await assertSafeExistingPath(rootInfo,current,{kind:"directory",label:"Artifact store root"});
+  for (const part of parts) {
+    current=join(current,part);
+    let entry=await lstatOptional(current);
+    if (!entry) {
+      try {
+        await mkdir(current);
+      } catch (error) {
+        if (error.code!=="EEXIST") throw error;
+      }
+      entry=await lstat(current);
+    }
+    if (entry.isSymbolicLink()) {
+      throw new ArtifactIntegrityError(
+        `Artifact path contains a symbolic link: ${pathForDisplay(rootInfo.lexicalRoot,current)}`,
+      );
+    }
+    if (!entry.isDirectory()) {
+      throw new ArtifactIntegrityError(
+        `Artifact path component is not a directory: ${pathForDisplay(rootInfo.lexicalRoot,current)}`,
+      );
+    }
+    const canonical=await realpath(current);
+    if (!isWithin(rootInfo.canonicalRoot,canonical)) {
+      throw new ArtifactIntegrityError(
+        `Artifact path escapes store root: ${pathForDisplay(rootInfo.lexicalRoot,current)}`,
+      );
+    }
+  }
+  return current;
+}
+
+async function artifactRootIfExists(rootInfo) {
+  let current=rootInfo.lexicalRoot;
+  await assertSafeExistingPath(rootInfo,current,{kind:"directory",label:"Artifact store root"});
+  for (const part of ARTIFACT_ROOT_PARTS) {
+    current=join(current,part);
+    const entry=await lstatOptional(current);
+    if (!entry) return undefined;
+    if (entry.isSymbolicLink()) {
+      throw new ArtifactIntegrityError(
+        `Artifact path contains a symbolic link: ${pathForDisplay(rootInfo.lexicalRoot,current)}`,
+      );
+    }
+    if (!entry.isDirectory()) {
+      throw new ArtifactIntegrityError(
+        `Artifact path component is not a directory: ${pathForDisplay(rootInfo.lexicalRoot,current)}`,
+      );
+    }
+    const canonical=await realpath(current);
+    if (!isWithin(rootInfo.canonicalRoot,canonical)) {
+      throw new ArtifactIntegrityError(
+        `Artifact path escapes store root: ${pathForDisplay(rootInfo.lexicalRoot,current)}`,
+      );
+    }
+  }
+  return current;
+}
+
+async function readRegularFileNoFollow(rootInfo,path,label) {
+  const expected=await assertSafeExistingPath(rootInfo,path,{kind:"file",label});
+  let handle;
+  try {
+    handle=await open(path,constants.O_RDONLY|NO_FOLLOW);
+    const actual=await handle.stat();
+    if (!actual.isFile() || !sameFile(expected,actual)) {
+      throw new ArtifactIntegrityError(`${label ?? "Artifact path"} changed while opening`);
+    }
+    return {text:await handle.readFile({encoding:"utf8"}),stat:actual};
+  } finally {
+    if (handle) await handle.close();
+  }
+}
+
+async function openNewRegularFile(rootInfo,path,label) {
+  await assertSafeExistingPath(rootInfo,dirname(path),{
+    kind:"directory",
+    label:dirname(path),
+  });
+  const handle=await open(
+    path,
+    constants.O_WRONLY|constants.O_CREAT|constants.O_EXCL|NO_FOLLOW,
+    0o600,
+  );
+  try {
+    const expected=await lstat(path);
+    const actual=await handle.stat();
+    if (expected.isSymbolicLink() || !expected.isFile() || !sameFile(expected,actual)) {
+      throw new ArtifactIntegrityError(`${label ?? "Artifact path"} changed while opening`);
+    }
+    return {handle,stat:actual};
+  } catch (error) {
+    await handle.close();
+    throw error;
+  }
+}
+
+async function safeReadDirectory(rootInfo,path,label) {
+  const before=await assertSafeExistingPath(rootInfo,path,{kind:"directory",label});
+  const entries=await readdir(path,{withFileTypes:true});
+  const after=await assertSafeExistingPath(rootInfo,path,{kind:"directory",label});
+  if (!sameFile(before,after)) {
+    throw new ArtifactIntegrityError(`${label ?? "Artifact directory"} changed while reading`);
+  }
+  return entries.sort((left,right) => left.name.localeCompare(right.name));
+}
+
+async function secureFileExists(rootInfo,path) {
+  await assertSafeExistingPath(rootInfo,dirname(path),{kind:"directory"});
+  const entry=await lstatOptional(path);
+  if (!entry) return false;
+  await assertSafeExistingPath(rootInfo,path,{kind:"file"});
+  return true;
+}
+
+async function unlinkIfSame(rootInfo,path,expected,label) {
+  await assertSafeExistingPath(rootInfo,dirname(path),{kind:"directory",label});
+  const actual=await lstatOptional(path);
+  if (!actual) return false;
+  if (actual.isSymbolicLink() || !actual.isFile()) {
+    throw new ArtifactIntegrityError(`${label ?? "Artifact path"} is not a regular file`);
+  }
+  if (expected && !sameFile(actual,expected)) return false;
+  await unlink(path);
+  return true;
+}
+
+function temporaryOwnerFromName(name) {
+  const match=TEMPORARY_FILE_PATTERN.exec(name);
+  if (!match) return undefined;
+  return {pid:Number(match[1])};
+}
+
+function isLiveProcess(pid) {
+  try {
+    process.kill(pid,0);
     return true;
   } catch (error) {
-    if (error.code==="ENOENT") return false;
-    throw error;
+    if (error.code==="ESRCH") return false;
+    return true;
   }
 }
 
-async function filesRecursively(directory) {
-  let entries;
+function isDirectorySyncUnsupported(error) {
+  return process.platform==="win32" &&
+    ["EINVAL","EISDIR","ENOTSUP","EPERM"].includes(error.code);
+}
+
+async function syncContainingDirectory(rootInfo,directory) {
+  let handle;
   try {
-    entries=await readdir(directory,{withFileTypes:true});
+    await assertSafeExistingPath(rootInfo,directory,{kind:"directory"});
+    handle=await open(directory,constants.O_RDONLY|NO_FOLLOW);
+    const directoryStat=await handle.stat();
+    if (!directoryStat.isDirectory()) {
+      throw new ArtifactIntegrityError("Artifact containing path is not a directory");
+    }
+    await handle.sync();
   } catch (error) {
-    if (error.code==="ENOENT") return [];
-    throw error;
-  }
-  const files=[];
-  for (const entry of entries) {
-    const path=join(directory,entry.name);
-    if (entry.isDirectory()) {
-      files.push(...await filesRecursively(path));
-    } else if (entry.isFile()) {
-      files.push(path);
-    }
-  }
-  return files.sort();
-}
-
-async function acquireArtifactLock(directory) {
-  const path=join(directory,LOCK_FILE_NAME);
-  for (let attempt=0;attempt<LOCK_RETRY_LIMIT;attempt+=1) {
-    try {
-      return {path,handle:await open(path,"wx")};
-    } catch (error) {
-      if (error.code!=="EEXIST") throw error;
-      await sleep(LOCK_RETRY_DELAY_MS);
-    }
-  }
-  throw new ArtifactStoreError(`Timed out waiting for artifact append lock: ${path}`);
-}
-
-async function withArtifactLock(directory,operation) {
-  const lock=await acquireArtifactLock(directory);
-  try {
-    return await operation();
+    if (isDirectorySyncUnsupported(error)) return;
+    if (error instanceof ArtifactStoreError) throw error;
+    throw new ArtifactStoreError(
+      `Could not sync artifact directory ${pathForDisplay(rootInfo.lexicalRoot,directory)}`,
+      {cause:error},
+    );
   } finally {
-    await lock.handle.close();
-    await rm(lock.path,{force:true});
+    if (handle) await handle.close();
   }
+}
+
+async function scanArtifactTree(rootInfo) {
+  const artifactRoot=await artifactRootIfExists(rootInfo);
+  if (!artifactRoot) return {artifactRoot:undefined,finalPaths:[],temporaryPaths:[]};
+
+  const finalPaths=[];
+  const temporaryPaths=[];
+  for (const documentEntry of await safeReadDirectory(
+    rootInfo,
+    artifactRoot,
+    "Artifact root",
+  )) {
+    const documentPath=join(artifactRoot,documentEntry.name);
+    if (documentEntry.isSymbolicLink()) {
+      throw unexpectedEntry(documentEntry.name,"symbolic links are forbidden");
+    }
+    if (documentEntry.name===LOCK_FILE_NAME) {
+      if (!documentEntry.isFile()) {
+        throw unexpectedEntry(documentEntry.name,"append lock must be a regular file");
+      }
+      await assertSafeExistingPath(rootInfo,documentPath,{kind:"file",label:"Append lock"});
+      continue;
+    }
+    if (!documentEntry.isDirectory() || !documentTypes.has(documentEntry.name)) {
+      throw unexpectedEntry(documentEntry.name,"expected a registered document type directory");
+    }
+    for (const artifactEntry of await safeReadDirectory(
+      rootInfo,
+      documentPath,
+      `Document type ${documentEntry.name}`,
+    )) {
+      const artifactPath=join(documentPath,artifactEntry.name);
+      if (artifactEntry.isSymbolicLink()) {
+        throw unexpectedEntry(
+          pathForDisplay(artifactRoot,artifactPath),
+          "symbolic links are forbidden",
+        );
+      }
+      if (!artifactEntry.isDirectory() || !ARTIFACT_ID_PATTERN.test(artifactEntry.name)) {
+        throw unexpectedEntry(
+          pathForDisplay(artifactRoot,artifactPath),
+          "expected an artifact identity directory",
+        );
+      }
+      for (const fileEntry of await safeReadDirectory(
+        rootInfo,
+        artifactPath,
+        `Artifact ${artifactEntry.name}`,
+      )) {
+        const filePath=join(artifactPath,fileEntry.name);
+        if (fileEntry.isSymbolicLink() || !fileEntry.isFile()) {
+          throw unexpectedEntry(
+            pathForDisplay(artifactRoot,filePath),
+            "expected a regular artifact file",
+          );
+        }
+        const revisionLikeMatch=REVISION_LIKE_FILE_PATTERN.exec(fileEntry.name);
+        if (revisionLikeMatch && Number(revisionLikeMatch[1])>MAX_REVISION) {
+          throw new ArtifactIntegrityError(
+            `Artifact revision ${revisionLikeMatch[1]} exceeds maximum revision ${MAX_REVISION}`,
+          );
+        }
+        if (REVISION_FILE_PATTERN.test(fileEntry.name)) {
+          await assertSafeExistingPath(rootInfo,filePath,{kind:"file",label:"Artifact file"});
+          finalPaths.push(filePath);
+        } else if (TEMPORARY_FILE_PATTERN.test(fileEntry.name)) {
+          await assertSafeExistingPath(rootInfo,filePath,{kind:"file",label:"Temporary artifact file"});
+          temporaryPaths.push(filePath);
+        } else {
+          throw unexpectedEntry(
+            pathForDisplay(artifactRoot,filePath),
+            "unrecognized regular file",
+          );
+        }
+      }
+    }
+  }
+  return {
+    artifactRoot,
+    finalPaths:finalPaths.sort(),
+    temporaryPaths:temporaryPaths.sort(),
+  };
 }
 
 export function createArtifactStore({root,now=() => new Date(),randomId=randomUUID}={}) {
@@ -243,19 +571,34 @@ export function createArtifactStore({root,now=() => new Date(),randomId=randomUU
     throw new TypeError("createArtifactStore now and randomId must be functions");
   }
 
-  const artifactRoot=join(root,...ARTIFACT_ROOT_PARTS);
+  let lockSequence=0;
 
-  function artifactDirectory(documentType,artifactId) {
-    return join(artifactRoot,documentType,artifactId);
+  function nextLockOwner() {
+    const token=String(randomId());
+    if (!LOCK_OWNER_TOKEN_PATTERN.test(token)) {
+      throw new ArtifactStoreError("randomId must produce a filesystem-safe temporary owner");
+    }
+    lockSequence+=1;
+    return `${process.pid}-${lockSequence}-${token}`;
   }
 
-  async function readArtifact(path) {
+  async function readArtifact(rootInfo,path) {
+    let text;
+    try {
+      ({text}=await readRegularFileNoFollow(rootInfo,path,"Artifact file"));
+    } catch (error) {
+      if (error instanceof ArtifactIntegrityError) throw error;
+      throw new ArtifactIntegrityError(
+        `Corrupted artifact at ${pathForDisplay(rootInfo.lexicalRoot,path)}`,
+        {cause:error},
+      );
+    }
     let value;
     try {
-      value=JSON.parse(await readFile(path,"utf8"));
+      value=JSON.parse(text);
     } catch (error) {
       throw new ArtifactIntegrityError(
-        `Corrupted artifact at ${pathForDisplay(root,path)}`,
+        `Corrupted artifact at ${pathForDisplay(rootInfo.lexicalRoot,path)}`,
         {cause:error},
       );
     }
@@ -264,62 +607,62 @@ export function createArtifactStore({root,now=() => new Date(),randomId=randomUU
     } catch (error) {
       if (error instanceof ArtifactIntegrityError) throw error;
       throw new ArtifactIntegrityError(
-        `Invalid artifact at ${pathForDisplay(root,path)}: ${error.message}`,
+        `Invalid artifact at ${pathForDisplay(rootInfo.lexicalRoot,path)}: ${error.message}`,
         {cause:error},
       );
     }
     const fileMatch=REVISION_FILE_PATTERN.exec(basename(path));
     if (!fileMatch) {
       throw new ArtifactIntegrityError(
-        `Artifact filename is invalid: ${pathForDisplay(root,path)}`,
+        `Artifact filename is invalid: ${pathForDisplay(rootInfo.lexicalRoot,path)}`,
       );
     }
     const [,revisionText,hashFromName]=fileMatch;
     if (Number(revisionText)!==value.revision || hashFromName!==value.content_sha256) {
       throw new ArtifactIntegrityError(
-        `Artifact filename does not match content at ${pathForDisplay(root,path)}`,
+        `Artifact filename does not match content at ${pathForDisplay(rootInfo.lexicalRoot,path)}`,
       );
     }
-    const expectedRelative=join(
+    const expectedPath=join(
+      rootInfo.lexicalRoot,
       ...ARTIFACT_ROOT_PARTS,
       value.document_type,
       value.artifact_id,
+      artifactFileName(value.revision,value.content_sha256),
     );
-    const actualRelative=relative(root,dirname(path));
-    if (actualRelative!==expectedRelative) {
+    if (resolve(path)!==resolve(expectedPath)) {
       throw new ArtifactIntegrityError(
-        `Artifact path does not match its identity: ${pathForDisplay(root,path)}`,
+        `Artifact path does not match its identity: ${pathForDisplay(rootInfo.lexicalRoot,path)}`,
       );
     }
     return value;
   }
 
-  async function artifactPaths() {
-    const all=await filesRecursively(artifactRoot);
-    return all.filter(path => isFinalArtifactFile(basename(path)));
-  }
-
-  async function findArtifact(reference) {
-    const normalized=normalizeReference(reference);
+  async function findArtifactByIdentity(rootInfo,reference) {
     const matches=[];
-    for (const path of await artifactPaths()) {
-      const artifact=await readArtifact(path);
-      if (artifact.artifact_id===normalized.artifact_id &&
-          artifact.revision===normalized.revision &&
-          (normalized.document_type===undefined ||
-            artifact.document_type===normalized.document_type)) {
+    for (const path of (await scanArtifactTree(rootInfo)).finalPaths) {
+      const artifact=await readArtifact(rootInfo,path);
+      if (artifact.artifact_id===reference.artifact_id &&
+          artifact.revision===reference.revision &&
+          (reference.document_type===undefined ||
+            artifact.document_type===reference.document_type)) {
         matches.push({artifact,path});
       }
     }
     if (matches.length===0) {
-      throw new ArtifactNotFoundError(`Artifact not found: ${describeReference(normalized)}`);
+      throw new ArtifactNotFoundError(`Artifact not found: ${describeReference(reference)}`);
     }
     if (matches.length>1) {
       throw new ArtifactIntegrityError(
-        `Multiple artifacts share identity ${describeReference(normalized)}`,
+        `Multiple artifacts share identity ${describeReference(reference)}`,
       );
     }
-    const match=matches[0];
+    return matches[0];
+  }
+
+  async function findArtifact(rootInfo,reference) {
+    const normalized=normalizeReference(reference);
+    const match=await findArtifactByIdentity(rootInfo,normalized);
     if (match.artifact.content_sha256!==normalized.content_sha256) {
       throw new ArtifactIntegrityError(
         `Content hash mismatch for ${describeReference(normalized)}`,
@@ -328,18 +671,49 @@ export function createArtifactStore({root,now=() => new Date(),randomId=randomUU
     return match;
   }
 
-  async function verifyReferences(artifact,visited) {
-    const key=`${artifact.artifact_id}\u0000${artifact.revision}`;
+  async function assertPersistedLineage(rootInfo,artifact) {
+    if (artifact.revision===1) {
+      if (artifact.parents.length!==0) {
+        throw new ArtifactIntegrityError("Revision 1 must have empty parents");
+      }
+      return;
+    }
+    let predecessor;
+    try {
+      predecessor=await findArtifactByIdentity(rootInfo,{
+        artifact_id:artifact.artifact_id,
+        revision:artifact.revision-1,
+        document_type:artifact.document_type,
+      });
+    } catch (error) {
+      if (error instanceof ArtifactNotFoundError) {
+        throw new ArtifactIntegrityError(
+          `Revision ${artifact.revision} is missing the previous revision`,
+          {cause:error},
+        );
+      }
+      throw error;
+    }
+    if (!artifact.parents.some(parent => isExactReference(parent,predecessor.artifact))) {
+      throw new ArtifactIntegrityError(
+        `Revision ${artifact.revision} requires a parent reference to the previous revision`,
+      );
+    }
+  }
+
+  async function verifyArtifact(rootInfo,artifact,visited) {
+    const key=`${artifact.document_type}\u0000${artifact.artifact_id}\u0000${artifact.revision}`;
     if (visited.has(key)) {
       throw new ArtifactIntegrityError(`Cyclic artifact reference at ${key}`);
     }
     visited.add(key);
     try {
+      await assertPersistedLineage(rootInfo,artifact);
       for (const [kind,references] of [["parent",artifact.parents],["input",artifact.inputs]]) {
         for (const reference of references) {
           try {
-            const target=await findArtifact(reference);
-            await verifyReferences(target.artifact,visited);
+            const target=await findArtifact(rootInfo,reference);
+            await verifyArtifact(rootInfo,target.artifact,visited);
           } catch (error) {
             if (error instanceof ArtifactNotFoundError) {
               throw new ArtifactReferenceError(
@@ -357,8 +731,9 @@ export function createArtifactStore({root,now=() => new Date(),randomId=randomUU
   }
 
   async function verify(reference) {
-    const match=await findArtifact(reference);
-    await verifyReferences(match.artifact,new Set());
+    const rootInfo=await prepareRoot(root);
+    const match=await findArtifact(rootInfo,reference);
+    await verifyArtifact(rootInfo,match.artifact,new Set());
     return match.artifact;
   }
 
@@ -366,35 +741,22 @@ export function createArtifactStore({root,now=() => new Date(),randomId=randomUU
     return verify(reference);
   }
 
-  async function artifactsForIdentity(documentType,artifactId) {
-    const directory=artifactDirectory(documentType,artifactId);
-    let entries;
-    try {
-      entries=await readdir(directory,{withFileTypes:true});
-    } catch (error) {
-      if (error.code==="ENOENT") return [];
-      throw error;
-    }
+  async function artifactsForIdentity(rootInfo,documentType,artifactId) {
     const artifacts=[];
-    for (const entry of entries.filter(entry => entry.isFile() && isFinalArtifactFile(entry.name))) {
-      const path=join(directory,entry.name);
-      const artifact=await readArtifact(path);
-      if (artifact.document_type!==documentType || artifact.artifact_id!==artifactId) {
-        throw new ArtifactIntegrityError(
-          `Artifact path does not match its identity: ${pathForDisplay(root,path)}`,
-        );
+    for (const path of (await scanArtifactTree(rootInfo)).finalPaths) {
+      const artifact=await readArtifact(rootInfo,path);
+      if (artifact.document_type===documentType && artifact.artifact_id===artifactId) {
+        await verifyArtifact(rootInfo,artifact,new Set());
+        artifacts.push(artifact);
       }
-      await verifyReferences(artifact,new Set());
-      artifacts.push(artifact);
     }
     return artifacts.sort((left,right) => left.revision-right.revision);
   }
 
-  async function assertArtifactIdDocumentType(documentType,artifactId) {
-    for (const path of await artifactPaths()) {
-      const artifact=await readArtifact(path);
-      if (artifact.artifact_id===artifactId &&
-          artifact.document_type!==documentType) {
+  async function assertArtifactIdDocumentType(rootInfo,documentType,artifactId) {
+    for (const path of (await scanArtifactTree(rootInfo)).finalPaths) {
+      const artifact=await readArtifact(rootInfo,path);
+      if (artifact.artifact_id===artifactId && artifact.document_type!==documentType) {
         throw new ArtifactValidationError(
           `artifact_id ${artifactId} is already bound to document type ${artifact.document_type}`,
         );
@@ -402,47 +764,206 @@ export function createArtifactStore({root,now=() => new Date(),randomId=randomUU
     }
   }
 
-  async function writeAtomically(path,artifact) {
+  async function verifyDraftReferences(artifact) {
+    for (const [kind,references] of [["parent",artifact.parents],["input",artifact.inputs]]) {
+      for (const reference of references) {
+        try {
+          await verify(reference);
+        } catch (error) {
+          if (error instanceof ArtifactNotFoundError) {
+            throw new ArtifactReferenceError(
+              `Missing ${kind} artifact ${describeReference(reference)}`,
+              {cause:error},
+            );
+          }
+          throw error;
+        }
+      }
+    }
+  }
+
+  function assertDraftLineage(artifact,predecessor) {
+    if (!predecessor) {
+      if (artifact.parents.length!==0) {
+        throw new ArtifactReferenceError("Revision 1 must have empty parents");
+      }
+      return;
+    }
+    if (!artifact.parents.some(parent => isExactReference(parent,predecessor))) {
+      throw new ArtifactReferenceError(
+        `Revision ${artifact.revision} requires a parent reference to the previous revision`,
+      );
+    }
+  }
+
+  function immutableEnvelopeEquivalent(existing,candidate,createdAtSupplied) {
+    const comparable={
+      ...candidate,
+      revision:existing.revision,
+      created_at:createdAtSupplied ? candidate.created_at : existing.created_at,
+      content_sha256:existing.content_sha256,
+    };
+    return canonicalJson(comparable)===canonicalJson(existing);
+  }
+
+  async function readLockState(rootInfo,path) {
+    let lock;
+    try {
+      lock=await readRegularFileNoFollow(rootInfo,path,"Append lock");
+    } catch (error) {
+      if (error.code==="ENOENT") return {state:"gone"};
+      throw error;
+    }
+    let value;
+    try {
+      value=JSON.parse(lock.text);
+    } catch (error) {
+      if (Date.now()-lock.stat.mtimeMs<LOCK_INITIALIZING_GRACE_MS) {
+        return {state:"initializing",stat:lock.stat};
+      }
+      throw new ArtifactIntegrityError("Append lock has invalid ownership metadata",{cause:error});
+    }
+    if (!isPlainObject(value) ||
+        typeof value.owner!=="string" || !LOCK_OWNER_TOKEN_PATTERN.test(value.owner) ||
+        !Number.isSafeInteger(value.pid) || value.pid<1 ||
+        typeof value.created_at!=="string" || value.created_at.length===0) {
+      throw new ArtifactIntegrityError("Append lock has invalid ownership metadata");
+    }
+    return {
+      state:isLiveProcess(value.pid) ? "live" : "stale",
+      stat:lock.stat,
+      owner:value.owner,
+      pid:value.pid,
+    };
+  }
+
+  async function createStoreLock(rootInfo,owner) {
+    const artifactRoot=await ensureContainedDirectory(rootInfo,ARTIFACT_ROOT_PARTS);
+    const path=join(artifactRoot,LOCK_FILE_NAME);
+    let created;
+    try {
+      created=await openNewRegularFile(rootInfo,path,"Append lock");
+    } catch (error) {
+      if (error.code==="EEXIST") return undefined;
+      throw error;
+    }
+    const value={owner,pid:process.pid,created_at:isoTimestamp(now())};
+    try {
+      await created.handle.writeFile(JSON.stringify(value),"utf8");
+      await created.handle.sync();
+      return {path,handle:created.handle,stat:created.stat,owner};
+    } catch (error) {
+      await created.handle.close();
+      await unlinkIfSame(rootInfo,path,created.stat,"Append lock");
+      throw error;
+    }
+  }
+
+  async function releaseStoreLock(rootInfo,lock) {
+    await lock.handle.close();
+    const removed=await unlinkIfSame(rootInfo,lock.path,lock.stat,"Append lock");
+    if (!removed) {
+      throw new ArtifactIntegrityError("Append lock ownership changed before release");
+    }
+  }
+
+  async function acquireStoreLock(rootInfo,{wait=true}={}) {
+    const owner=nextLockOwner();
+    const lockPath=join(
+      rootInfo.lexicalRoot,
+      ...ARTIFACT_ROOT_PARTS,
+      LOCK_FILE_NAME,
+    );
+    for (let attempt=0;attempt<LOCK_RETRY_LIMIT;attempt+=1) {
+      const created=await createStoreLock(rootInfo,owner);
+      if (created) return created;
+      const state=await readLockState(rootInfo,lockPath);
+      if (state.state==="gone") continue;
+      if (state.state==="stale") {
+        await unlinkIfSame(rootInfo,lockPath,state.stat,"Append lock");
+        continue;
+      }
+      if (!wait) return undefined;
+      await sleep(LOCK_RETRY_DELAY_MS);
+    }
+    if (!wait) return undefined;
+    throw new ArtifactStoreError(`Timed out waiting for artifact append lock: ${lockPath}`);
+  }
+
+  async function withStoreLock(rootInfo,operation) {
+    const lock=await acquireStoreLock(rootInfo);
+    try {
+      return await operation(lock);
+    } finally {
+      await releaseStoreLock(rootInfo,lock);
+    }
+  }
+
+  async function writeAtomically(rootInfo,path,artifact,lock) {
     const directory=dirname(path);
     const serialized=`${JSON.stringify(artifact,null,2)}\n`;
     let temporaryPath;
-    let handle;
+    let temporaryStat;
+    let temporaryHandle;
     for (let attempt=0;attempt<10;attempt+=1) {
       temporaryPath=join(
         directory,
-        `.${basename(path)}.tmp-${String(randomId())}-${attempt}`,
+        `.${basename(path)}.tmp-${lock.owner}-${attempt}`,
       );
       try {
-        handle=await open(temporaryPath,"wx");
+        const created=await openNewRegularFile(
+          rootInfo,
+          temporaryPath,
+          "Temporary artifact file",
+        );
+        temporaryHandle=created.handle;
+        temporaryStat=created.stat;
         break;
       } catch (error) {
         if (error.code!=="EEXIST") throw error;
       }
     }
-    if (!handle) {
+    if (!temporaryHandle) {
       throw new ArtifactStoreError(`Could not allocate temporary artifact file for ${path}`);
     }
     try {
-      await handle.writeFile(serialized,"utf8");
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-    try {
-      const temporary=JSON.parse(await readFile(temporaryPath,"utf8"));
+      try {
+        await temporaryHandle.writeFile(serialized,"utf8");
+        await temporaryHandle.sync();
+      } finally {
+        await temporaryHandle.close();
+        temporaryHandle=undefined;
+      }
+      const temporary=JSON.parse((await readRegularFileNoFollow(
+        rootInfo,
+        temporaryPath,
+        "Temporary artifact file",
+      )).text);
       assertCoreArtifact(temporary,{requireRevision:true});
-      if (temporary.content_sha256!==artifact.content_sha256 ||
-          temporary.revision!==artifact.revision) {
+      if (canonicalJson(temporary)!==canonicalJson(artifact)) {
         throw new ArtifactIntegrityError("Temporary artifact verification failed");
       }
-      await verifyReferences(temporary,new Set());
-      if (await pathExists(path)) {
-        throw new ArtifactOverwriteError(`Refusing to overwrite artifact revision ${artifact.revision}`);
+      if (await secureFileExists(rootInfo,path)) {
+        throw new ArtifactOverwriteError(
+          `Refusing to overwrite artifact revision ${artifact.revision}`,
+        );
       }
       await rename(temporaryPath,path);
+      temporaryPath=undefined;
+      await assertSafeExistingPath(rootInfo,path,{kind:"file",label:"Artifact file"});
+      await syncContainingDirectory(rootInfo,directory);
     } catch (error) {
-      await rm(temporaryPath,{force:true});
+      if (temporaryPath) {
+        await unlinkIfSame(
+          rootInfo,
+          temporaryPath,
+          temporaryStat,
+          "Temporary artifact file",
+        );
+      }
       throw error;
+    } finally {
+      if (temporaryHandle) await temporaryHandle.close();
     }
   }
 
@@ -450,66 +971,75 @@ export function createArtifactStore({root,now=() => new Date(),randomId=randomUU
     if (!isPlainObject(draft)) {
       throw new ArtifactValidationError("draft must be an object");
     }
+    const createdAtSupplied=draft.created_at!==undefined;
     const artifact={...draft};
     assertCoreArtifact(artifact,{now});
     const requestedRevision=artifact.revision;
-    const directory=artifactDirectory(artifact.document_type,artifact.artifact_id);
-    await mkdir(directory,{recursive:true});
+    const rootInfo=await prepareRoot(root);
 
-    return withArtifactLock(artifactRoot,async () => {
-      await assertArtifactIdDocumentType(artifact.document_type,artifact.artifact_id);
-      const existing=await artifactsForIdentity(
+    return withStoreLock(rootInfo,async lock => {
+      const directory=await ensureContainedDirectory(rootInfo,[
+        ...ARTIFACT_ROOT_PARTS,
+        artifact.document_type,
+        artifact.artifact_id,
+      ]);
+      await assertArtifactIdDocumentType(
+        rootInfo,
         artifact.document_type,
         artifact.artifact_id,
       );
+      const existing=await artifactsForIdentity(
+        rootInfo,
+        artifact.document_type,
+        artifact.artifact_id,
+      );
+
+      // References are intentionally verified before any content-hash reuse.
+      await verifyDraftReferences(artifact);
+
       const atRequestedRevision=requestedRevision===undefined ? undefined :
         existing.find(candidate => candidate.revision===requestedRevision);
       if (atRequestedRevision) {
-        if (atRequestedRevision.content_sha256===artifact.content_sha256) {
+        if (atRequestedRevision.content_sha256!==artifact.content_sha256) {
+          throw new ArtifactOverwriteError(
+            `Refusing to overwrite artifact revision ${requestedRevision}`,
+          );
+        }
+        if (immutableEnvelopeEquivalent(
+          atRequestedRevision,
+          artifact,
+          createdAtSupplied,
+        )) {
           return atRequestedRevision;
         }
         throw new ArtifactOverwriteError(
-          `Refusing to overwrite artifact revision ${requestedRevision}`,
+          `Refusing to reinterpret immutable artifact revision ${requestedRevision}`,
         );
       }
-      const sameContent=existing.find(candidate =>
-        candidate.content_sha256===artifact.content_sha256,
-      );
-      if (sameContent) return sameContent;
 
-      const highestRevision=existing.at(-1)?.revision ?? 0;
-      const nextRevision=highestRevision+1;
+      if (requestedRevision===undefined) {
+        const sameContent=existing.find(candidate =>
+          candidate.content_sha256===artifact.content_sha256 &&
+          immutableEnvelopeEquivalent(candidate,artifact,createdAtSupplied),
+        );
+        if (sameContent) return sameContent;
+      }
+
+      const predecessor=existing.at(-1);
+      const nextRevision=(predecessor?.revision ?? 0)+1;
+      requireRevision(nextRevision);
       if (requestedRevision!==undefined && requestedRevision!==nextRevision) {
         throw new ArtifactValidationError(
           `Revision ${requestedRevision} is not the next monotonic revision ${nextRevision}`,
         );
       }
-      const predecessor=existing.at(-1);
-      if (predecessor && !artifact.parents.some(parent =>
-        isExactReference(parent,predecessor),
-      )) {
-        throw new ArtifactReferenceError(
-          `Revision ${nextRevision} requires a parent reference to the previous revision`,
-        );
-      }
       artifact.revision=requestedRevision ?? nextRevision;
-      for (const [kind,references] of [["parent",artifact.parents],["input",artifact.inputs]]) {
-        for (const reference of references) {
-          try {
-            await verify(reference);
-          } catch (error) {
-            if (error instanceof ArtifactNotFoundError) {
-              throw new ArtifactReferenceError(
-                `Missing ${kind} artifact ${describeReference(reference)}`,
-                {cause:error},
-              );
-            }
-            throw error;
-          }
-        }
-      }
-      const path=join(directory,artifactFileName(artifact.revision,artifact.content_sha256));
-      await writeAtomically(path,artifact);
+      assertDraftLineage(artifact,predecessor);
+      const path=join(
+        directory,
+        artifactFileName(artifact.revision,artifact.content_sha256),
+      );
+      await writeAtomically(rootInfo,path,artifact,lock);
       return verify({
         artifact_id:artifact.artifact_id,
         revision:artifact.revision,
@@ -523,10 +1053,11 @@ export function createArtifactStore({root,now=() => new Date(),randomId=randomUU
     if (!isPlainObject(filter)) {
       throw new ArtifactValidationError("list filter must be an object");
     }
+    const rootInfo=await prepareRoot(root);
     const artifacts=[];
-    for (const path of await artifactPaths()) {
-      const artifact=await readArtifact(path);
-      await verifyReferences(artifact,new Set());
+    for (const path of (await scanArtifactTree(rootInfo)).finalPaths) {
+      const artifact=await readArtifact(rootInfo,path);
+      await verifyArtifact(rootInfo,artifact,new Set());
       const matches=Object.entries(filter).every(([field,value]) =>
         artifact[field]===value,
       );
@@ -540,13 +1071,27 @@ export function createArtifactStore({root,now=() => new Date(),randomId=randomUU
   }
 
   async function recover() {
-    const removed=[];
-    for (const path of await filesRecursively(artifactRoot)) {
-      if (!isTransientFile(basename(path))) continue;
-      await unlink(path);
-      removed.push(path);
+    const rootInfo=await prepareRoot(root);
+    await ensureContainedDirectory(rootInfo,ARTIFACT_ROOT_PARTS);
+    const lock=await acquireStoreLock(rootInfo,{wait:false});
+    if (!lock) return {removed:[]};
+    try {
+      const removed=[];
+      for (const path of (await scanArtifactTree(rootInfo)).temporaryPaths) {
+        const owner=temporaryOwnerFromName(basename(path));
+        if (!owner || isLiveProcess(owner.pid)) continue;
+        const expected=await assertSafeExistingPath(rootInfo,path,{
+          kind:"file",
+          label:"Temporary artifact file",
+        });
+        if (await unlinkIfSame(rootInfo,path,expected,"Temporary artifact file")) {
+          removed.push(path);
+        }
+      }
+      return {removed:removed.sort()};
+    } finally {
+      await releaseStoreLock(rootInfo,lock);
     }
-    return {removed:removed.sort()};
   }
 
   return {append,get,list,verify,recover};

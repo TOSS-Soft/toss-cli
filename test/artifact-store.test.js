@@ -1,14 +1,16 @@
 import assert from "node:assert/strict";
 import {
+  mkdir,
   mkdtemp,
   readFile,
   readdir,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import {tmpdir} from "node:os";
-import {dirname, join} from "node:path";
+import {basename, dirname, join} from "node:path";
 import test from "node:test";
 
 import {createArtifactStore} from "../src/artifacts/store.js";
@@ -70,6 +72,10 @@ function artifactPath(root,artifact) {
     artifact.artifact_id,
     `r${String(artifact.revision).padStart(6,"0")}-${artifact.content_sha256}.json`,
   );
+}
+
+function artifactRoot(root) {
+  return join(root,"project-management","artifacts");
 }
 
 test("append persists a content-addressed revision and is idempotent",async (t) => {
@@ -194,7 +200,10 @@ test("recovery removes interrupted same-directory temporary files from discovery
   const {root,store}=await createTestStore(t);
   const first=await store.append(draft());
   const finalPath=artifactPath(root,first);
-  const temporaryPath=`${finalPath}.tmp-interrupted`;
+  const temporaryPath=join(
+    dirname(finalPath),
+    `.${basename(finalPath)}.tmp-2147483647-stale-owner-0`,
+  );
   await writeFile(temporaryPath,"half-written","utf8");
 
   assert.deepEqual(await store.list({artifact_id:first.artifact_id}),[first]);
@@ -202,4 +211,142 @@ test("recovery removes interrupted same-directory temporary files from discovery
   assert.deepEqual(recovery.removed,[temporaryPath]);
   await assert.rejects(stat(temporaryPath));
   assert.deepEqual(await store.list({artifact_id:first.artifact_id}),[first]);
+});
+
+test("recovery does not remove temporary files owned by a live append lock",async (t) => {
+  const {root,store}=await createTestStore(t);
+  const first=await store.append(draft());
+  const rootPath=artifactRoot(root);
+  const lockPath=join(rootPath,".append.lock");
+  const finalPath=artifactPath(root,first);
+  const temporaryPath=join(
+    dirname(finalPath),
+    `.${basename(finalPath)}.tmp-${process.pid}-live-owner-0`,
+  );
+  await writeFile(lockPath,JSON.stringify({
+    owner:"live-owner",
+    pid:process.pid,
+    created_at:"2026-08-17T12:00:00.000Z",
+  }),"utf8");
+  await writeFile(temporaryPath,"in-progress","utf8");
+
+  await store.recover();
+
+  assert.equal((await stat(lockPath)).isFile(),true);
+  assert.equal((await stat(temporaryPath)).isFile(),true);
+});
+
+test("append rejects a symbolic-link root without modifying the external target",async (t) => {
+  const parent=await mkdtemp(join(tmpdir(),"toss-artifact-root-parent-"));
+  const outside=await mkdtemp(join(tmpdir(),"toss-artifact-root-outside-"));
+  t.after(() => rm(parent,{recursive:true,force:true}));
+  t.after(() => rm(outside,{recursive:true,force:true}));
+  const root=join(parent,"linked-root");
+  await symlink(outside,root);
+  const store=createArtifactStore({root});
+
+  await assert.rejects(store.append(draft()),/root.*symbolic link/i);
+  assert.deepEqual(await readdir(outside),[]);
+});
+
+test("append rejects a symlinked artifact path before it escapes the store root",async (t) => {
+  const {root,store}=await createTestStore(t);
+  const outside=await mkdtemp(join(tmpdir(),"toss-artifact-outside-"));
+  t.after(() => rm(outside,{recursive:true,force:true}));
+  const typePath=join(artifactRoot(root),"pm-analysis");
+  await mkdir(dirname(typePath),{recursive:true});
+  await symlink(outside,typePath);
+
+  await assert.rejects(store.append(draft()),/symbolic link|escape/i);
+  assert.deepEqual(await readdir(outside),[]);
+});
+
+test("idempotent content still validates references and versions changed metadata",async (t) => {
+  const {store}=await createTestStore(t);
+  const first=await store.append(draft());
+  await assert.rejects(store.append(withoutContentHash(draft({
+    inputs:[{
+      artifact_id:"ART-MISSING-IDEMPOTENCY-001",
+      revision:1,
+      content_sha256:"d".repeat(64),
+    }],
+  }))),/missing input/i);
+
+  const second=await store.append(withoutContentHash(draft({
+    run_id:"run-parent-metadata-revision",
+    parents:[reference(first)],
+  })));
+  assert.equal(second.revision,2);
+  assert.equal(second.run_id,"run-parent-metadata-revision");
+  await assert.rejects(store.append(draft({
+    revision:first.revision,
+    run_id:"run-parent-reinterpreted",
+  })),/reinterpret|overwrite/i);
+});
+
+test("first revisions and on-disk later revisions enforce immutable lineage",async (t) => {
+  const {root,store}=await createTestStore(t);
+  const upstream=await store.append(draft({artifact_id:"ART-UPSTREAM-001"}));
+  await assert.rejects(store.append(withoutContentHash(draft({
+    artifact_id:"ART-FIRST-WITH-PARENT-001",
+    parents:[reference(upstream)],
+  }))),/revision 1.*parents/i);
+
+  const first=await store.append(draft({artifact_id:"ART-LINEAGE-001"}));
+  const second=await store.append(withoutContentHash(draft({
+    artifact_id:"ART-LINEAGE-001",
+    run_id:"run-lineage-002",
+    parents:[reference(first)],
+    content:{entities:[{id:"REQ-001",kind:"requirement",meaning:"Lineage revision"}]},
+  })));
+  const stored=JSON.parse(await readFile(artifactPath(root,second),"utf8"));
+  stored.parents=[];
+  await writeFile(artifactPath(root,second),JSON.stringify(stored),"utf8");
+
+  await assert.rejects(store.get(reference(second)),/parent.*previous revision/i);
+  await assert.rejects(store.list({artifact_id:second.artifact_id}),
+    /parent.*previous revision/i);
+});
+
+test("append enforces ACP producer ownership and complete provenance",async (t) => {
+  const {store}=await createTestStore(t);
+  const emptyProducer=draft({artifact_id:"ART-EMPTY-PRODUCER-001"});
+  emptyProducer.producer={};
+  await assert.rejects(store.append(emptyProducer),/producer\.role/i);
+
+  await assert.rejects(store.append(draft({
+    artifact_id:"ART-WRONG-PRODUCER-001",
+    producer:{role:"architect",identity:"toss-test"},
+  })),/producer role/i);
+
+  const missingLocations=draft({artifact_id:"ART-MISSING-LOCATIONS-001"});
+  delete missingLocations.provenance.locations;
+  await assert.rejects(store.append(missingLocations),/provenance\.locations/i);
+});
+
+test("discovery fails closed for unexpected regular artifact files",async (t) => {
+  const {root,store}=await createTestStore(t);
+  const first=await store.append(draft());
+  await writeFile(join(dirname(artifactPath(root,first)),"unexpected.txt"),"unknown","utf8");
+
+  await assert.rejects(store.list(),/unexpected artifact entry/i);
+});
+
+test("append clearly rejects revisions beyond the supported filename width",async (t) => {
+  const {store}=await createTestStore(t);
+  await assert.rejects(store.append(draft({
+    artifact_id:"ART-TOO-WIDE-REVISION-001",
+    revision:1_000_000,
+  })),/maximum revision/i);
+});
+
+test("discovery rejects persisted revisions beyond the supported filename width",async (t) => {
+  const {root,store}=await createTestStore(t);
+  const first=await store.append(draft());
+  await writeFile(join(
+    dirname(artifactPath(root,first)),
+    `r1000000-${first.content_sha256}.json`,
+  ),"{}","utf8");
+
+  await assert.rejects(store.list(),/maximum revision/i);
 });
