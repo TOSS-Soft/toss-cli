@@ -105,12 +105,38 @@ function formatValidationErrors(errors) {
       `${error.instancePath}/${escapePointerSegment(missing)}`;
     const isMissingSection=error.keyword==="required" &&
       error.instancePath==="/content" && REQUIRED_SECTIONS.includes(missing);
+    const isEmptySection=error.keyword==="minItems" &&
+      REQUIRED_SECTIONS.includes(error.instancePath.slice("/content/".length));
+    const isBlankSummary=error.keyword==="pattern" &&
+      error.instancePath==="/content/summary";
     return finding(
-      isMissingSection ? "MISSING_REQUIRED_SECTION" : "SCHEMA_VALIDATION",
+      isMissingSection ? "MISSING_REQUIRED_SECTION" :
+        isEmptySection ? "EMPTY_REQUIRED_SECTION" :
+          isBlankSummary ? "BLANK_REQUIRED_TEXT" : "SCHEMA_VALIDATION",
       path || "/",
       error.message ?? "PM analysis does not satisfy its contract",
     );
   });
+}
+
+function epicCandidateCircularFindings(content) {
+  if (!isPlainObject(content) || !Array.isArray(content.epic_candidates)) return [];
+  const findings=[];
+  for (const [candidateIndex,candidate] of content.epic_candidates.entries()) {
+    if (!isPlainObject(candidate) || typeof candidate.id!=="string" ||
+        !Array.isArray(candidate.source_entities)) continue;
+    for (const [referenceIndex,reference] of candidate.source_entities.entries()) {
+      if (isPlainObject(reference) && reference.reference_type==="internal" &&
+          reference.entity_id===candidate.id) {
+        findings.push(finding(
+          "SEMANTIC_CIRCULAR_REFERENCE",
+          `/content/epic_candidates/${candidateIndex}/source_entities/${referenceIndex}/entity_id`,
+          `Epic candidate ${candidate.id} cannot use itself as source evidence`,
+        ));
+      }
+    }
+  }
+  return findings;
 }
 
 function roleBoundaryFindings(analysis) {
@@ -321,6 +347,7 @@ export function validatePmAnalysis(analysis) {
   const findings=[
     ...roleBoundaryFindings(canonical),
     ...integrityFindings(canonical),
+    ...epicCandidateCircularFindings(canonical.content),
   ];
   const shape=validateDocument(canonical,"pm-analysis.v1");
   if (!shape.valid) findings.push(...formatValidationErrors(shape.errors));

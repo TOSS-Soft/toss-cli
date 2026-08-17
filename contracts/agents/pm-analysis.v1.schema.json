@@ -321,65 +321,84 @@
         "epic_candidates"
       ],
       "properties": {
-        "summary": {"type": "string", "minLength": 1},
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": ".*\\S.*"
+        },
         "goals": {
           "type": "array",
+          "minItems": 1,
           "items": {"$ref": "#/$defs/sourced_statement"}
         },
         "non_goals": {
           "type": "array",
+          "minItems": 1,
           "items": {"$ref": "#/$defs/sourced_statement"}
         },
         "actors": {
           "type": "array",
+          "minItems": 1,
           "items": {"$ref": "#/$defs/actor"}
         },
         "functional_requirements": {
           "type": "array",
+          "minItems": 1,
           "items": {"$ref": "#/$defs/functional_requirement"}
         },
         "non_functional_requirements": {
           "type": "array",
+          "minItems": 1,
           "items": {"$ref": "#/$defs/non_functional_requirement"}
         },
         "business_rules": {
           "type": "array",
+          "minItems": 1,
           "items": {"$ref": "#/$defs/business_rule"}
         },
         "domains_modules": {
           "type": "array",
+          "minItems": 1,
           "items": {"$ref": "#/$defs/named_scope"}
         },
         "user_flows": {
           "type": "array",
+          "minItems": 1,
           "items": {"$ref": "#/$defs/flow"}
         },
         "integrations": {
           "type": "array",
+          "minItems": 1,
           "items": {"$ref": "#/$defs/named_scope"}
         },
         "constraints": {
           "type": "array",
+          "minItems": 1,
           "items": {"$ref": "#/$defs/constraint"}
         },
         "assumptions": {
           "type": "array",
+          "minItems": 1,
           "items": {"$ref": "#/$defs/assumption"}
         },
         "open_questions": {
           "type": "array",
+          "minItems": 1,
           "items": {"$ref": "#/$defs/open_question"}
         },
         "risks": {
           "type": "array",
+          "minItems": 1,
           "items": {"$ref": "#/$defs/risk"}
         },
         "architecture_questions": {
           "type": "array",
+          "minItems": 1,
           "items": {"$ref": "#/$defs/architecture_question"}
         },
         "epic_candidates": {
           "type": "array",
+          "minItems": 1,
           "items": {"$ref": "#/$defs/epic_candidate"}
         }
       }

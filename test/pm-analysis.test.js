@@ -49,6 +49,27 @@ const danglingArchitectureQuestion=fixture(
 const missingAssumptionEvidence=fixture(
   "./fixtures/pm-analysis/invalid/missing-provenance.json",
 );
+const selfReferentialEpicCandidate=fixture(
+  "./fixtures/pm-analysis/invalid/self-referential-epic-candidate.json",
+);
+
+const REQUIRED_COLLECTIONS=[
+  "goals",
+  "non_goals",
+  "actors",
+  "functional_requirements",
+  "non_functional_requirements",
+  "business_rules",
+  "domains_modules",
+  "user_flows",
+  "integrations",
+  "constraints",
+  "assumptions",
+  "open_questions",
+  "risks",
+  "architecture_questions",
+  "epic_candidates",
+];
 
 test("a complete pm-analysis artifact validates with provenance for every extracted entity",() => {
   const result=validatePmAnalysis(valid);
@@ -101,6 +122,37 @@ test("a missing mandatory PM section blocks completion with a useful finding",()
   ));
 });
 
+test("every mandatory PM collection requires material evidence",() => {
+  for (const section of REQUIRED_COLLECTIONS) {
+    const incomplete=clone(valid);
+    incomplete.content[section]=[];
+    incomplete.content_sha256=sha256Canonical(incomplete.content);
+
+    const result=validatePmAnalysis(incomplete);
+
+    assert.equal(result.valid,false,section);
+    assert.equal(result.complete,false,section);
+    assert.ok(result.findings.some(finding =>
+      finding.type==="EMPTY_REQUIRED_SECTION" &&
+        finding.path===`/content/${section}`,
+    ),section);
+  }
+});
+
+test("a blank PM summary blocks completion with a useful finding",() => {
+  const incomplete=clone(valid);
+  incomplete.content.summary=" \n\t ";
+  incomplete.content_sha256=sha256Canonical(incomplete.content);
+
+  const result=validatePmAnalysis(incomplete);
+
+  assert.equal(result.valid,false);
+  assert.equal(result.complete,false);
+  assert.ok(result.findings.some(finding =>
+    finding.type==="BLANK_REQUIRED_TEXT" && finding.path==="/content/summary",
+  ));
+});
+
 test("a requirement explicitly typed as a technical solution is outside PM authority",() => {
   const result=validatePmAnalysis(technicalRequirement);
 
@@ -124,7 +176,12 @@ test("a PM-authored ADR field is rejected as a structured role-boundary violatio
 });
 
 test("architecture questions must reference existing PM requirements and constraints",() => {
-  const result=validatePmAnalysis(danglingArchitectureQuestion);
+  const dangling=clone(valid);
+  dangling.content.architecture_questions[0].affected_requirements=
+    danglingArchitectureQuestion.content.architecture_questions[0].affected_requirements;
+  dangling.content_sha256=sha256Canonical(dangling.content);
+
+  const result=validatePmAnalysis(dangling);
 
   assert.equal(result.valid,false);
   assert.equal(result.complete,false);
@@ -159,6 +216,22 @@ test("epic candidate internal references must resolve to a PM entity",() => {
   assert.equal(result.valid,false);
   assert.ok(result.findings.some(finding =>
     finding.type==="SEMANTIC_VALIDATION" && /dangling reference/i.test(finding.message),
+  ));
+});
+
+test("an epic candidate cannot use itself as source evidence",() => {
+  const circular=clone(valid);
+  circular.content.epic_candidates[0].source_entities=
+    selfReferentialEpicCandidate.content.epic_candidates[0].source_entities;
+  circular.content_sha256=sha256Canonical(circular.content);
+
+  const result=validatePmAnalysis(circular);
+
+  assert.equal(result.valid,false);
+  assert.equal(result.complete,false);
+  assert.ok(result.findings.some(finding =>
+    finding.type==="SEMANTIC_CIRCULAR_REFERENCE" &&
+      finding.path==="/content/epic_candidates/0/source_entities/0/entity_id",
   ));
 });
 
