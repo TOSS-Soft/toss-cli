@@ -1,0 +1,14 @@
+{
+  "analysis_id": "project-analysis-001",
+  "source_revision": "source-r1",
+  "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "run_id": "run-analysis-001",
+  "producer": {"role": "orchestrator", "identity": "toss-analysis-orchestrator"},
+  "runtime_identity": {"kind": "deterministic", "name": "toss-cli", "version": "2.1.0"},
+  "created_at": "2026-08-17T14:00:00.000Z",
+  "provenance": {
+    "source_revision": "source-r1",
+    "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "locations": ["PROJECT_BRIEF.md"]
+  }
+}
