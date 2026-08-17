@@ -1,0 +1,5 @@
+{
+  "source_requirement_ids": ["REQ-001", "NFR-001", "NFR-002"],
+  "acceptance_requirement_ids": ["NFR-001", "NFR-002"],
+  "expected_requirement_id": "REQ-001"
+}

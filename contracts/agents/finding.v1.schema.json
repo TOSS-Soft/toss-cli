@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://toss.software/schemas/agents/finding.v1.schema.json",
+  "title": "TOSS Specification Audit Finding v1",
+  "description": "A closed, owner-routed, evidence-bearing finding emitted by the read-only Spec Auditor.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "kind",
+    "meaning",
+    "severity",
+    "type",
+    "owner",
+    "path",
+    "affected_entities",
+    "evidence"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^Q-AUDIT-[A-F0-9]{16}$"
+    },
+    "kind": {"const": "audit-finding"},
+    "meaning": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": ".*\\S.*"
+    },
+    "severity": {"enum": ["P0", "P1", "P2", "P3", "P4"]},
+    "type": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9_]*$"
+    },
+    "owner": {
+      "enum": ["PM", "ARCHITECT", "PM_FINALIZATION", "USER"]
+    },
+    "path": {"type": "string", "pattern": "^/"},
+    "affected_entities": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "evidence": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/evidence"}
+    }
+  },
+  "$defs": {
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "path", "detail"],
+      "properties": {
+        "artifact_id": {"type": "string", "minLength": 1},
+        "path": {"type": "string", "pattern": "^/"},
+        "detail": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": ".*\\S.*"
+        }
+      }
+    }
+  }
+}
