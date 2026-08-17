@@ -36,10 +36,23 @@ function encodeCanonical(value,path,ancestors) {
   ancestors.add(value);
   try {
     if (Array.isArray(value)) {
-      const keys=Object.keys(value);
-      if (keys.length!==value.length ||
+      const symbols=Object.getOwnPropertySymbols(value);
+      if (symbols.length > 0) {
+        nonJson(path,"symbol keys are unsupported");
+      }
+      const names=Object.getOwnPropertyNames(value);
+      const keys=names.filter(key => key!=="length").sort((left,right) =>
+        Number(left)-Number(right));
+      if (names.length!==value.length+1 ||
+          keys.length!==value.length ||
           keys.some((key,index) => key!==String(index))) {
         nonJson(path,"arrays must be dense and have no named properties");
+      }
+      for (const key of keys) {
+        const descriptor=Object.getOwnPropertyDescriptor(value,key);
+        if (!descriptor || !("value" in descriptor)) {
+          nonJson(`${path}[${key}]`,"accessor properties are unsupported");
+        }
       }
       return `[${value.map((item,index) =>
         encodeCanonical(item,`${path}[${index}]`,ancestors)).join(",")}]`;
@@ -53,11 +66,14 @@ function encodeCanonical(value,path,ancestors) {
       nonJson(path,"symbol keys are unsupported");
     }
 
-    const keys=Object.keys(value).sort();
+    const keys=Object.getOwnPropertyNames(value).sort();
     for (const key of keys) {
       const descriptor=Object.getOwnPropertyDescriptor(value,key);
       if (!descriptor || !("value" in descriptor)) {
         nonJson(`${path}.${key}`,"accessor properties are unsupported");
+      }
+      if (!descriptor.enumerable) {
+        nonJson(`${path}.${key}`,"non-enumerable properties are unsupported");
       }
     }
     return `{${keys.map(key =>

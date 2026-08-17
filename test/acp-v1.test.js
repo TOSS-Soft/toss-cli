@@ -25,6 +25,12 @@ test("canonical JSON rejects values outside the JSON data model",() => {
   }
   assert.throws(() => canonicalJson({missing:undefined}),/non-JSON value/i);
   assert.throws(() => canonicalJson([,1]),/non-JSON value/i);
+  const hiddenFunction={};
+  Object.defineProperty(hiddenFunction,"not-json",{value:() => {}});
+  assert.throws(() => canonicalJson(hiddenFunction),/non-JSON value/i);
+  const symbolProperty=[1];
+  symbolProperty[Symbol("not-json")]=2;
+  assert.throws(() => canonicalJson(symbolProperty),/non-JSON value/i);
   const cyclic={};
   cyclic.self=cyclic;
   assert.throws(() => canonicalJson(cyclic),/non-JSON value/i);
@@ -98,12 +104,47 @@ test("the full-pipeline fixture is hash-valid and linked to exact revisions",() 
     fixture.artifacts.map(artifact => [artifact.artifact_id,artifact]),
   );
   assert.equal(artifacts.size,5);
+  const identities=new Set(
+    fixture.artifacts.map(artifact => `${artifact.artifact_id}\u0000${artifact.revision}`),
+  );
+  assert.equal(
+    identities.size,
+    fixture.artifacts.length,
+    "fixture artifact identities must be unique by artifact_id and revision",
+  );
+  const registry=JSON.parse(fs.readFileSync(
+    new URL("../contracts/registry.json",import.meta.url),
+    "utf8",
+  ));
+  const registryByType=new Map(
+    registry.documents.map(row => [row.document_type,row]),
+  );
+  const artifactsByType=new Map(
+    fixture.artifacts.map(artifact => [artifact.document_type,artifact]),
+  );
+  const inputTypes=(artifact) => artifact.inputs.map(reference =>
+    artifacts.get(reference.artifact_id).document_type,
+  );
+  const assertInputs=(artifact,typeNames) => {
+    const actual=new Set(inputTypes(artifact));
+    for (const typeName of typeNames) {
+      assert.ok(
+        actual.has(typeName),
+        `${artifact.document_type} must consume ${typeName}`,
+      );
+    }
+  };
   for (const artifact of fixture.artifacts) {
     assert.doesNotThrow(() => assertKnownDocumentType(
       artifact.document_type,
       artifact.schema_version,
     ));
     assert.equal(artifact.content_sha256,sha256Canonical(artifact.content));
+    assert.equal(
+      artifact.producer.role,
+      registryByType.get(artifact.document_type)?.producer,
+      `${artifact.document_type} producer role must match the registry`,
+    );
     for (const reference of [...artifact.parents,...artifact.inputs]) {
       const target=artifacts.get(reference.artifact_id);
       assert.ok(target,`missing fixture artifact ${reference.artifact_id}`);
@@ -111,6 +152,20 @@ test("the full-pipeline fixture is hash-valid and linked to exact revisions",() 
       assert.equal(reference.content_sha256,target.content_sha256);
     }
   }
+  const pmAnalysis=artifactsByType.get("pm-analysis");
+  const architecture=artifactsByType.get("architecture");
+  const adr=artifactsByType.get("adr");
+  const issuePlan=artifactsByType.get("issue-plan");
+  const specAudit=artifactsByType.get("spec-audit");
+  assertInputs(architecture,["pm-analysis"]);
+  assert.ok(
+    architecture.content.entities.some(entity => entity.id==="ARCHQ-001"),
+    "architecture must provide ARCHQ context for the ADR",
+  );
+  assertInputs(adr,["architecture"]);
+  assertInputs(issuePlan,["pm-analysis","architecture","adr"]);
+  assertInputs(specAudit,["issue-plan"]);
+  assert.ok(pmAnalysis && architecture && adr && issuePlan && specAudit);
   assert.doesNotThrow(() => assertStableEntityMeanings(
     fixture.artifacts.flatMap(artifact => artifact.content.entities ?? []),
   ));
