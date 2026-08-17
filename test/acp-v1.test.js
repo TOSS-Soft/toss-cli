@@ -162,9 +162,9 @@ test("the full-pipeline fixture is hash-valid and linked to exact revisions",() 
     architecture.content.entities.some(entity => entity.id==="ARCHQ-001"),
     "architecture must provide ARCHQ context for the ADR",
   );
-  assertInputs(adr,["architecture"]);
+  assertInputs(adr,["pm-analysis","architecture"]);
   assertInputs(issuePlan,["pm-analysis","architecture","adr"]);
-  assertInputs(specAudit,["issue-plan"]);
+  assertInputs(specAudit,["pm-analysis","architecture","adr","issue-plan"]);
   assert.ok(pmAnalysis && architecture && adr && issuePlan && specAudit);
   assert.doesNotThrow(() => assertStableEntityMeanings(
     fixture.artifacts.flatMap(artifact => artifact.content.entities ?? []),
