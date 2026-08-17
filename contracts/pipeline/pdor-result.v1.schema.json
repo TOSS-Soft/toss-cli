@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://toss.software/schemas/pipeline/pdor-result.v1.schema.json",
+  "title": "TOSS Project Definition of Ready Result v1",
+  "description": "A closed deterministic Project Definition of Ready evaluation derived from authoritative pipeline artifacts.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "document_type",
+    "rules_version",
+    "source_revision",
+    "source_sha256",
+    "ready_for_issue_generation",
+    "coverage",
+    "failures",
+    "warnings"
+  ],
+  "properties": {
+    "schema_version": {"const": "pdor-result.v1"},
+    "document_type": {"const": "pdor-result"},
+    "rules_version": {"const": "pdor-rules.v1"},
+    "source_revision": {
+      "type": ["string", "null"],
+      "minLength": 1
+    },
+    "source_sha256": {
+      "oneOf": [
+        {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        {"type": "null"}
+      ]
+    },
+    "ready_for_issue_generation": {"type": "boolean"},
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requirement_ac"],
+      "properties": {
+        "requirement_ac": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "failures": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/rule_result"}
+    },
+    "warnings": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/rule_result"}
+    }
+  },
+  "$defs": {
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact", "entity_id", "path", "message"],
+      "properties": {
+        "artifact": {"type": "string", "minLength": 1},
+        "entity_id": {"type": ["string", "null"]},
+        "path": {"type": "string", "pattern": "^/"},
+        "message": {"type": "string", "minLength": 1}
+      }
+    },
+    "rule_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rule_id", "message", "evidence"],
+      "properties": {
+        "rule_id": {"type": "string", "pattern": "^PDOR-[0-9]{3}-[A-Z0-9-]+$"},
+        "message": {"type": "string", "minLength": 1},
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/evidence"}
+        }
+      }
+    }
+  }
+}
