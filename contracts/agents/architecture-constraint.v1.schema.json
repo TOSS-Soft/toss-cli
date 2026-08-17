@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://toss.software/schemas/agents/architecture-constraint.v1.schema.json",
+  "title": "TOSS Architecture Constraint v1",
+  "description": "A closed, Architect-owned technical constraint. It is deliberately distinct from PM-owned business requirements and business rules.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "kind",
+    "meaning",
+    "rationale",
+    "affected_requirements",
+    "provenance"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^ARCHC-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"
+    },
+    "kind": {"const": "architecture-constraint"},
+    "meaning": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": ".*\\S.*"
+    },
+    "rationale": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": ".*\\S.*"
+    },
+    "affected_requirements": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^(?:REQ|NFR)-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"
+      }
+    },
+    "provenance": {
+      "$ref": "https://toss.software/schemas/common/provenance.v1.schema.json"
+    }
+  }
+}
