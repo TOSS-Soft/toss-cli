@@ -1,0 +1,42 @@
+{
+  "id": "ADR-001",
+  "kind": "architecture-decision",
+  "meaning": "Store support request state as canonical immutable records.",
+  "context": "The PM analysis requires customer-owned support requests and asks how their state is represented.",
+  "options": [
+    {
+      "id": "CANONICAL_RECORD",
+      "description": "Use a canonical immutable request record with an explicit customer ownership reference.",
+      "tradeoffs": "The record contract needs explicit revision and integrity validation."
+    }
+  ],
+  "decision": "Use canonical immutable support request records keyed to the current customer identity reference.",
+  "rationale": "The approach preserves the PM ownership rule while making the request state deterministic and traceable.",
+  "consequences": [
+    "Request state changes create a new immutable revision.",
+    "Readers verify the exact customer ownership reference before exposing request details."
+  ],
+  "status": "accepted",
+  "approval": {
+    "state": "approved",
+    "authority": "PM",
+    "provenance": {
+      "source": {"file": "PROJECT_BRIEF.md", "section": "Architecture approval", "location": "line 52"},
+      "source_revision": "project-brief-r1",
+      "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "agent": {"identity": "toss-architect", "model": "deterministic", "run_id": "run-architecture-001"},
+      "timestamp": "2026-08-17T13:00:00.000Z",
+      "confidence": 1
+    }
+  },
+  "resolved_architecture_questions": ["ARCHQ-001"],
+  "affected_requirements": ["REQ-001", "NFR-002"],
+  "provenance": {
+    "source": {"file": "PROJECT_BRIEF.md", "section": "Architecture", "location": "line 53"},
+    "source_revision": "project-brief-r1",
+    "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "agent": {"identity": "toss-architect", "model": "deterministic", "run_id": "run-architecture-001"},
+    "timestamp": "2026-08-17T13:00:00.000Z",
+    "confidence": 1
+  }
+}

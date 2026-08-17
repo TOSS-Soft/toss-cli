@@ -1,0 +1,53 @@
+{
+  "summary": "The support-request architecture preserves customer ownership while retaining durable request state.",
+  "components": [
+    {
+      "id": "COMP-001",
+      "kind": "architecture-component",
+      "meaning": "Support request record",
+      "responsibility": "Retain a customer-owned support request and its current status.",
+      "affected_requirements": ["REQ-001", "NFR-001"],
+      "provenance": {
+        "source": {"file": "PROJECT_BRIEF.md", "section": "Architecture", "location": "line 50"},
+        "source_revision": "project-brief-r1",
+        "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "agent": {"identity": "toss-architect", "model": "deterministic", "run_id": "run-architecture-001"},
+        "timestamp": "2026-08-17T12:30:00.000Z",
+        "confidence": 1
+      }
+    }
+  ],
+  "constraints": [
+    {
+      "id": "ARCHC-001",
+      "kind": "architecture-constraint",
+      "meaning": "Technical records retain a stable customer ownership reference.",
+      "rationale": "The PM business rule restricts request details to the customer who opened the request.",
+      "affected_requirements": ["REQ-001", "NFR-002"],
+      "provenance": {
+        "source": {"file": "PROJECT_BRIEF.md", "section": "Architecture", "location": "line 51"},
+        "source_revision": "project-brief-r1",
+        "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "agent": {"identity": "toss-architect", "model": "deterministic", "run_id": "run-architecture-001"},
+        "timestamp": "2026-08-17T12:30:00.000Z",
+        "confidence": 1
+      }
+    }
+  ],
+  "architecture_questions": [
+    {
+      "id": "ARCHQ-001",
+      "status": "resolved",
+      "resolution": "Use a canonical immutable request record keyed to the current customer identity reference.",
+      "provenance": {
+        "source": {"file": "PROJECT_BRIEF.md", "section": "Architecture questions", "location": "line 44"},
+        "source_revision": "project-brief-r1",
+        "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "agent": {"identity": "toss-architect", "model": "deterministic", "run_id": "run-architecture-001"},
+        "timestamp": "2026-08-17T12:30:00.000Z",
+        "confidence": 1
+      }
+    }
+  ],
+  "unresolved_findings": []
+}
