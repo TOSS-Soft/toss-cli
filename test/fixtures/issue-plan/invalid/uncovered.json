@@ -1,0 +1,7 @@
+{
+  "claimed_policy": "pm-analysis.v1-functional-requirements-are-must",
+  "claimed_must_requirements": 1,
+  "claimed_covered_must_requirements": 1,
+  "claimed_uncovered_must_requirement_ids": [],
+  "claimed_ready": true
+}

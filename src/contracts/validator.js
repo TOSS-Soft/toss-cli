@@ -14,6 +14,7 @@ const schemaDefinitions=[
   ["architecture-constraint.v1","../../contracts/agents/architecture-constraint.v1.schema.json"],
   ["architecture.v1","../../contracts/agents/architecture.v1.schema.json"],
   ["adr.v1","../../contracts/agents/adr.v1.schema.json"],
+  ["issue-plan.v1","../../contracts/agents/issue-plan.v1.schema.json"],
 ];
 
 function loadSchema(path) {

@@ -1,0 +1,361 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://toss.software/schemas/agents/issue-plan.v1.schema.json",
+  "title": "TOSS Issue Plan v1",
+  "description": "A closed PM-finalization-owned ACP artifact. Its immutable input snapshots bind the authoritative delivery plan to exact PM, architecture, and ADR revisions.",
+  "allOf": [
+    {
+      "$ref": "https://toss.software/schemas/common/artifact-envelope.v1.schema.json"
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {"const": "acp.v1"},
+        "document_type": {"const": "issue-plan"},
+        "producer": {
+          "type": "object",
+          "properties": {
+            "role": {"const": "pm-finalization"}
+          }
+        },
+        "content": {"$ref": "#/$defs/content"}
+      }
+    }
+  ],
+  "$defs": {
+    "material_string": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": ".*\\S.*"
+    },
+    "entity_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "id"],
+      "properties": {
+        "kind": {"type": "string", "minLength": 1},
+        "id": {
+          "type": "string",
+          "pattern": "^(?:REQ|NFR|BR|FLOW|ARCHQ|ADR|EPIC|ISSUE|AC|RISK|ASM|Q)-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"
+        }
+      }
+    },
+    "requirement_reference": {
+      "allOf": [
+        {"$ref": "#/$defs/entity_reference"},
+        {
+          "type": "object",
+          "properties": {
+            "kind": {"const": "requirement"},
+            "id": {
+              "type": "string",
+              "pattern": "^(?:REQ|NFR)-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"
+            }
+          }
+        }
+      ]
+    },
+    "epic_reference": {
+      "allOf": [
+        {"$ref": "#/$defs/entity_reference"},
+        {
+          "type": "object",
+          "properties": {
+            "kind": {"const": "epic"},
+            "id": {"type": "string", "pattern": "^EPIC-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"}
+          }
+        }
+      ]
+    },
+    "issue_reference": {
+      "allOf": [
+        {"$ref": "#/$defs/entity_reference"},
+        {
+          "type": "object",
+          "properties": {
+            "kind": {"const": "issue"},
+            "id": {"type": "string", "pattern": "^ISSUE-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"}
+          }
+        }
+      ]
+    },
+    "acceptance_criterion_reference": {
+      "allOf": [
+        {"$ref": "#/$defs/entity_reference"},
+        {
+          "type": "object",
+          "properties": {
+            "kind": {"const": "acceptance-criterion"},
+            "id": {"type": "string", "pattern": "^AC-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"}
+          }
+        }
+      ]
+    },
+    "adr_reference": {
+      "allOf": [
+        {"$ref": "#/$defs/entity_reference"},
+        {
+          "type": "object",
+          "properties": {
+            "kind": {"const": "adr"},
+            "id": {"type": "string", "pattern": "^ADR-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"}
+          }
+        }
+      ]
+    },
+    "artifact_snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["document_type", "artifact_id", "revision", "content_sha256"],
+      "properties": {
+        "document_type": {"type": "string", "minLength": 1},
+        "artifact_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9:._-]*$"
+        },
+        "revision": {"type": "integer", "minimum": 1},
+        "content_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      }
+    },
+    "pm_snapshot": {
+      "allOf": [
+        {"$ref": "#/$defs/artifact_snapshot"},
+        {"type": "object", "properties": {"document_type": {"const": "pm-analysis"}}}
+      ]
+    },
+    "architecture_snapshot": {
+      "allOf": [
+        {"$ref": "#/$defs/artifact_snapshot"},
+        {"type": "object", "properties": {"document_type": {"const": "architecture"}}}
+      ]
+    },
+    "adr_snapshot": {
+      "allOf": [
+        {"$ref": "#/$defs/artifact_snapshot"},
+        {"type": "object", "properties": {"document_type": {"const": "adr"}}}
+      ]
+    },
+    "input_snapshots": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pm_analysis", "architecture", "adrs"],
+      "properties": {
+        "pm_analysis": {"$ref": "#/$defs/pm_snapshot"},
+        "architecture": {"$ref": "#/$defs/architecture_snapshot"},
+        "adrs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/adr_snapshot"}
+        }
+      }
+    },
+    "epic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "meaning",
+        "finalization_status",
+        "source_requirements"
+      ],
+      "properties": {
+        "id": {"type": "string", "pattern": "^EPIC-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"},
+        "kind": {"const": "epic"},
+        "meaning": {"$ref": "#/$defs/material_string"},
+        "finalization_status": {"const": "authoritative"},
+        "source_requirements": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/requirement_reference"}
+        }
+      }
+    },
+    "standalone": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "rationale"],
+      "properties": {
+        "status": {"const": "standalone"},
+        "rationale": {"$ref": "#/$defs/material_string"}
+      }
+    },
+    "issue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "meaning",
+        "finalization_status",
+        "atomic_scope",
+        "acceptance_criteria",
+        "definition_of_done",
+        "requires_adr",
+        "adr_refs",
+        "dependencies"
+      ],
+      "properties": {
+        "id": {"type": "string", "pattern": "^ISSUE-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"},
+        "kind": {"const": "issue"},
+        "meaning": {"$ref": "#/$defs/material_string"},
+        "finalization_status": {"const": "authoritative"},
+        "atomic_scope": {"$ref": "#/$defs/material_string"},
+        "epic": {"$ref": "#/$defs/epic_reference"},
+        "standalone": {"$ref": "#/$defs/standalone"},
+        "source_requirements": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/requirement_reference"}
+        },
+        "governance_rationale": {"$ref": "#/$defs/material_string"},
+        "acceptance_criteria": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/acceptance_criterion_reference"}
+        },
+        "definition_of_done": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/material_string"}
+        },
+        "requires_adr": {"type": "boolean"},
+        "adr_refs": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/adr_reference"}
+        },
+        "dependencies": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/issue_reference"}
+        }
+      },
+      "allOf": [
+        {
+          "oneOf": [
+            {
+              "required": ["epic"],
+              "properties": {"epic": {}},
+              "not": {
+                "required": ["standalone"],
+                "properties": {"standalone": {}}
+              }
+            },
+            {
+              "required": ["standalone"],
+              "properties": {"standalone": {}},
+              "not": {
+                "required": ["epic"],
+                "properties": {"epic": {}}
+              }
+            }
+          ]
+        },
+        {
+          "anyOf": [
+            {
+              "required": ["source_requirements"],
+              "properties": {
+                "source_requirements": {"type": "array", "minItems": 1}
+              }
+            },
+            {
+              "required": ["governance_rationale"],
+              "properties": {"governance_rationale": {}}
+            }
+          ]
+        },
+        {
+          "if": {
+            "required": ["requires_adr"],
+            "properties": {"requires_adr": {"const": true}}
+          },
+          "then": {"properties": {"adr_refs": {"type": "array", "minItems": 1}}},
+          "else": {"properties": {"adr_refs": {"type": "array", "maxItems": 0}}}
+        }
+      ]
+    },
+    "acceptance_criterion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "meaning", "finalization_status", "issue", "verifies"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^AC-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"},
+        "kind": {"const": "acceptance-criterion"},
+        "meaning": {"$ref": "#/$defs/material_string"},
+        "finalization_status": {"const": "authoritative"},
+        "issue": {"$ref": "#/$defs/issue_reference"},
+        "verifies": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/requirement_reference"}
+        }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "description": "Computed, not trusted. pm-analysis.v1 does not encode priority, so every functional requirement is the v1 must-requirement set.",
+      "additionalProperties": false,
+      "required": [
+        "must_requirement_policy",
+        "must_requirements",
+        "covered_must_requirements",
+        "uncovered_must_requirement_ids",
+        "ready"
+      ],
+      "properties": {
+        "must_requirement_policy": {
+          "const": "pm-analysis.v1-functional-requirements-are-must"
+        },
+        "must_requirements": {"type": "integer", "minimum": 0},
+        "covered_must_requirements": {"type": "integer", "minimum": 0},
+        "uncovered_must_requirement_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^REQ-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"
+          }
+        },
+        "ready": {"type": "boolean"}
+      }
+    },
+    "content": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "summary",
+        "input_snapshots",
+        "epics",
+        "issues",
+        "acceptance_criteria",
+        "coverage",
+        "status"
+      ],
+      "properties": {
+        "summary": {"$ref": "#/$defs/material_string"},
+        "input_snapshots": {"$ref": "#/$defs/input_snapshots"},
+        "epics": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/epic"}
+        },
+        "issues": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/issue"}
+        },
+        "acceptance_criteria": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/acceptance_criterion"}
+        },
+        "coverage": {"$ref": "#/$defs/coverage"},
+        "status": {"enum": ["ready-for-issues", "blocked"]}
+      }
+    }
+  }
+}
