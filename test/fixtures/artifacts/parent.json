@@ -1,0 +1,31 @@
+{
+  "schema_version": "acp.v1",
+  "document_type": "pm-analysis",
+  "artifact_id": "ART-PARENT-001",
+  "run_id": "run-parent-001",
+  "producer": {
+    "role": "pm",
+    "identity": "toss-test"
+  },
+  "runtime_identity": "node-test",
+  "created_at": "2026-08-17T00:00:00.000Z",
+  "provenance": {
+    "source_revision": "source-r1",
+    "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "locations": [
+      "test/fixtures/artifacts/parent.json"
+    ]
+  },
+  "parents": [],
+  "inputs": [],
+  "content_sha256": "b2a83b35b27af47c303843834ec758c9a8dede233fa0a958a2a8e9afbf6480d6",
+  "content": {
+    "entities": [
+      {
+        "id": "REQ-001",
+        "kind": "requirement",
+        "meaning": "Parent requirement"
+      }
+    ]
+  }
+}
