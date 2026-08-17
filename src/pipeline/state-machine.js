@@ -1,5 +1,9 @@
-import {canonicalJson} from "../contracts/acp.js";
+import {canonicalJson,sha256Canonical} from "../contracts/acp.js";
 import {validateDocument} from "../contracts/validator.js";
+import {validateArchitecture} from "./architecture.js";
+import {validateIssuePlan} from "./issue-plan.js";
+import {validatePmAnalysis} from "./pm-analysis.js";
+import {auditSpecification} from "./spec-auditor.js";
 
 export const ANALYSIS_STATES=Object.freeze([
   "ANALYZING",
@@ -17,7 +21,7 @@ export const ANALYSIS_STATES=Object.freeze([
 
 const STATE_SET=new Set(ANALYSIS_STATES);
 const SHA256_PATTERN=/^[a-f0-9]{64}$/;
-const OWNER_SET=new Set(["PM","ARCHITECT","USER","SPEC_AUDITOR"]);
+const OWNER_SET=new Set(["PM","ARCHITECT","PM_FINALIZATION","USER"]);
 const TERMINAL_STATES=new Set(["READY_FOR_ISSUES","FAILED_TERMINAL"]);
 
 const DECLARED_TRANSITIONS=Object.freeze({
@@ -52,8 +56,8 @@ const DECLARED_TRANSITIONS=Object.freeze({
 const REQUIRED_ARTIFACT_KEYS=Object.freeze({
   "ANALYZING\u0000QUESTIONS_FOUND":Object.freeze(["pm_analysis","decision_package"]),
   "ANALYZING\u0000ANALYSIS_COMPLETED":Object.freeze(["pm_analysis"]),
-  "QUESTIONS_PENDING\u0000DECISION_STARTED":Object.freeze(["decision_package"]),
-  "USER_DECISION\u0000DECISIONS_RESOLVED":Object.freeze(["decision_package"]),
+  "QUESTIONS_PENDING\u0000DECISION_STARTED":Object.freeze(["pm_analysis","decision_package"]),
+  "USER_DECISION\u0000DECISIONS_RESOLVED":Object.freeze(["pm_analysis","decision_package"]),
   "ARCHITECTURE_PENDING\u0000ADR_APPROVAL_REQUIRED":Object.freeze([
     "pm_analysis",
     "architecture",
@@ -70,6 +74,17 @@ const REQUIRED_ARTIFACT_KEYS=Object.freeze({
     "architecture",
     "adrs",
   ]),
+  "ARCHITECTURE_PENDING\u0000BLOCK":Object.freeze([
+    "pm_analysis",
+    "architecture",
+    "adrs",
+  ]),
+  "PM_FINALIZATION\u0000BLOCK":Object.freeze([
+    "pm_analysis",
+    "architecture",
+    "adrs",
+    "issue_plan",
+  ]),
   "PM_FINALIZATION\u0000FINALIZATION_COMPLETED":Object.freeze([
     "pm_analysis",
     "architecture",
@@ -83,6 +98,21 @@ const REQUIRED_ARTIFACT_KEYS=Object.freeze({
     "issue_plan",
     "spec_audit",
   ]),
+  "SPEC_AUDIT\u0000AUDIT_BLOCKED":Object.freeze([
+    "pm_analysis",
+    "architecture",
+    "adrs",
+    "issue_plan",
+    "spec_audit",
+  ]),
+});
+
+const ARTIFACT_CONTRACTS=Object.freeze({
+  pm_analysis:Object.freeze({documentType:"pm-analysis",schemaId:"pm-analysis.v1"}),
+  architecture:Object.freeze({documentType:"architecture",schemaId:"architecture.v1"}),
+  adrs:Object.freeze({documentType:"adr",schemaId:"adr.v1",array:true}),
+  issue_plan:Object.freeze({documentType:"issue-plan",schemaId:"issue-plan.v1"}),
+  spec_audit:Object.freeze({documentType:"spec-audit",schemaId:"spec-audit.v1"}),
 });
 
 function isPlainObject(value) {
@@ -169,6 +199,143 @@ function assertRequiredArtifacts(state,event,artifacts) {
   return keys;
 }
 
+function validationError(label,validation) {
+  const first=validation.errors[0];
+  return new TypeError(
+    `${label} is invalid${first?.instancePath ?? ""}: ${
+      first?.message ?? "schema validation failed"
+    }`,
+  );
+}
+
+function assertArtifact(value,key,source,index) {
+  const contract=ARTIFACT_CONTRACTS[key];
+  const label=index===undefined ? key : `${key}[${index}]`;
+  if (!isPlainObject(value) || value.document_type!==contract.documentType) {
+    throw new TypeError(`${label} must be an exact ${contract.documentType} artifact`);
+  }
+  const validation=validateDocument(value,contract.schemaId);
+  if (!validation.valid) throw validationError(label,validation);
+  if (value.content_sha256!==sha256Canonical(value.content)) {
+    throw new TypeError(`${label} content hash does not match canonical content`);
+  }
+  if (value.provenance?.source_revision!==source.source_revision ||
+      value.provenance?.source_sha256!==source.source_sha256) {
+    throw new TypeError(`${label} must be bound to the exact current source revision`);
+  }
+}
+
+function referenceSet(value) {
+  return [...value].sort((left,right) => canonicalJson(left).localeCompare(canonicalJson(right)));
+}
+
+function assertExactInputs(artifact,expected,label) {
+  const actual=Array.isArray(artifact.inputs) ? artifact.inputs : [];
+  const wanted=referenceSet(expected.map(item => artifactReference(item)));
+  if (canonicalJson(referenceSet(actual))!==canonicalJson(wanted)) {
+    throw new TypeError(`${label} must bind the exact immutable input lineage`);
+  }
+}
+
+function assertDecisionSource(decisionPackage,pmAnalysis,source) {
+  const questions=decisionPackage.questions ?? [];
+  const pmQuestions=new Map((pmAnalysis.content?.open_questions ?? []).map(question => [
+    question.id,
+    question,
+  ]));
+  for (const question of questions) {
+    if (!pmQuestions.has(question.id)) {
+      throw new TypeError(`Decision package question ${String(question.id)} is not in PM evidence`);
+    }
+    if (question.provenance?.source_revision!==source.source_revision ||
+        question.provenance?.source_sha256!==source.source_sha256) {
+      throw new TypeError("Decision package must be bound to the exact current source revision");
+    }
+  }
+}
+
+function assertGraphEvidence(state,event,artifacts,requiredKeys,source) {
+  for (const key of requiredKeys) {
+    const contract=ARTIFACT_CONTRACTS[key];
+    if (!contract) continue;
+    const value=artifacts[key];
+    if (contract.array) {
+      if (!Array.isArray(value) || value.length===0) {
+        throw new TypeError(`${key} must be a non-empty artifact array`);
+      }
+      value.forEach((item,index) => assertArtifact(item,key,source,index));
+    } else {
+      assertArtifact(value,key,source);
+    }
+  }
+
+  if (requiredKeys.includes("pm_analysis")) {
+    const validation=validatePmAnalysis(artifacts.pm_analysis);
+    if (!validation.valid) throw new TypeError("PM analysis evidence is not semantically valid");
+  }
+  if (requiredKeys.includes("architecture")) {
+    assertExactInputs(artifacts.architecture,[artifacts.pm_analysis],"architecture");
+    for (const adr of artifacts.adrs) {
+      assertExactInputs(adr,[artifacts.pm_analysis,artifacts.architecture],"ADR");
+    }
+    if (state!=="SPEC_AUDIT") {
+      const validation=validateArchitecture({
+        pmAnalysis:artifacts.pm_analysis,
+        architecture:artifacts.architecture,
+        adrs:artifacts.adrs,
+      });
+      if (!validation.valid) throw new TypeError("Architecture evidence is not semantically valid");
+      if (["ARCHITECTURE_COMPLETED","ADR_APPROVED"].includes(event) && !validation.complete) {
+        throw new TypeError(`${event} requires complete architecture evidence`);
+      }
+    }
+  }
+  if (requiredKeys.includes("issue_plan")) {
+    assertExactInputs(
+      artifacts.issue_plan,
+      [artifacts.pm_analysis,artifacts.architecture,...artifacts.adrs],
+      "issue plan",
+    );
+    if (state!=="SPEC_AUDIT") {
+      const validation=validateIssuePlan({
+        pmAnalysis:artifacts.pm_analysis,
+        architecture:artifacts.architecture,
+        adrs:artifacts.adrs,
+        issuePlan:artifacts.issue_plan,
+      });
+      if (!validation.valid) throw new TypeError("Issue-plan evidence is not semantically valid");
+      if (event==="FINALIZATION_COMPLETED" && !validation.complete) {
+        throw new TypeError("FINALIZATION_COMPLETED requires complete issue-plan evidence");
+      }
+    }
+  }
+  if (requiredKeys.includes("spec_audit")) {
+    assertExactInputs(
+      artifacts.spec_audit,
+      [artifacts.pm_analysis,artifacts.architecture,...artifacts.adrs,artifacts.issue_plan],
+      "spec audit",
+    );
+    const expected=auditSpecification({
+      pmAnalysis:artifacts.pm_analysis,
+      architecture:{artifact:artifacts.architecture,adrs:artifacts.adrs},
+      issuePlan:artifacts.issue_plan,
+    }).artifact;
+    if (canonicalJson(artifacts.spec_audit)!==canonicalJson(expected)) {
+      throw new TypeError("Spec-audit evidence must equal the deterministic audit result");
+    }
+    const ready=artifacts.spec_audit.content.ready_for_github;
+    if ((event==="AUDIT_PASSED" && ready!==true) ||
+        (event==="AUDIT_BLOCKED" && ready!==false)) {
+      throw new TypeError(`${event} contradicts the verified spec-audit result`);
+    }
+  }
+  if (requiredKeys.includes("decision_package") &&
+      artifacts.decision_package?.document_type==="decision-package") {
+    assertDecisionPackage(artifacts.decision_package);
+    assertDecisionSource(artifacts.decision_package,artifacts.pm_analysis,source);
+  }
+}
+
 function assertDecisionPackage(decisionPackage) {
   if (!isPlainObject(decisionPackage) ||
       decisionPackage.schema_version!=="decision-package.v1" ||
@@ -209,7 +376,9 @@ function questionNextAction(decisionPackage) {
 }
 
 function adrNextAction(decisionPackage,adrs) {
+  const expectedKeys=["adr_references","document_type","owner","schema_version"];
   if (!isPlainObject(decisionPackage) ||
+      canonicalJson(Object.keys(decisionPackage).sort())!==canonicalJson(expectedKeys) ||
       decisionPackage.schema_version!=="adr-approval-package.v1" ||
       decisionPackage.document_type!=="adr-approval-package" ||
       decisionPackage.owner!=="USER" ||
@@ -218,7 +387,7 @@ function adrNextAction(decisionPackage,adrs) {
       decisionPackage.adr_references.some(reference =>
         artifactReference(reference)?.document_type!=="adr")) {
     throw new TypeError(
-      "ADR_PENDING_APPROVAL requires a USER-owned package of exact ADR references",
+      "ADR approval package must be USER-owned and contain exact ADR references",
     );
   }
   const pendingAdrs=adrs.filter(adr => adr.content?.approval?.state!=="approved");
@@ -238,6 +407,15 @@ function canonicalNextAction(value) {
     throw new TypeError("next_action requires an action and a valid owner");
   }
   return nextAction;
+}
+
+function auditBlockedNextAction(specAudit) {
+  const finding=specAudit.content.findings.find(item =>
+    ["P0","P1","P2"].includes(item.severity));
+  if (!finding || !OWNER_SET.has(finding.owner)) {
+    throw new TypeError("AUDIT_BLOCKED requires an owned blocking audit finding");
+  }
+  return {action:"RESOLVE_BLOCKING_FINDINGS",owner:finding.owner};
 }
 
 function canonicalFailure(value) {
@@ -278,6 +456,7 @@ export function transition(state,event,context={}) {
   const artifacts=canonicalCopy(context.artifacts ?? {},"Transition artifacts");
   if (!isPlainObject(artifacts)) throw new TypeError("Transition artifacts must be an object");
   const requiredKeys=assertRequiredArtifacts(state,event,artifacts);
+  assertGraphEvidence(state,event,artifacts,requiredKeys,source);
   const result={
     previous_state:state,
     event,
@@ -289,6 +468,7 @@ export function transition(state,event,context={}) {
   if (event==="QUESTIONS_FOUND" ||
       (state==="QUESTIONS_PENDING" && event==="DECISION_STARTED")) {
     result.next_action=questionNextAction(artifacts.decision_package);
+    result.decision_package=artifacts.decision_package;
   }
   if (event==="DECISIONS_RESOLVED") {
     assertDecisionPackage(artifacts.decision_package);
@@ -296,11 +476,21 @@ export function transition(state,event,context={}) {
         artifacts.decision_package?.gate?.status!=="CLEAR") {
       throw new TypeError("DECISIONS_RESOLVED requires a clear decision package");
     }
+    result.decision_package=artifacts.decision_package;
   }
   if (event==="ADR_APPROVAL_REQUIRED") {
     result.next_action=adrNextAction(artifacts.decision_package,artifacts.adrs);
+    result.decision_package=artifacts.decision_package;
   }
-  if (event==="AUDIT_BLOCKED" || event==="BLOCK") {
+  if (event==="AUDIT_BLOCKED") {
+    const supplied=canonicalNextAction(context.next_action);
+    const expected=auditBlockedNextAction(artifacts.spec_audit);
+    if (canonicalJson(supplied)!==canonicalJson(expected)) {
+      throw new TypeError("AUDIT_BLOCKED next_action must preserve the blocking finding owner");
+    }
+    result.next_action=expected;
+  }
+  if (event==="BLOCK") {
     result.next_action=canonicalNextAction(context.next_action);
   }
   if (event==="FAIL_RETRYABLE" || event==="FAIL_TERMINAL") {

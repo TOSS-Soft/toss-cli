@@ -69,7 +69,7 @@
       "required": ["action", "owner"],
       "properties": {
         "action": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"},
-        "owner": {"enum": ["PM", "ARCHITECT", "USER", "SPEC_AUDITOR"]},
+        "owner": {"enum": ["PM", "ARCHITECT", "PM_FINALIZATION", "USER"]},
         "decision_package": {
           "oneOf": [
             {"$ref": "https://toss.software/schemas/pipeline/decision-package.v1.schema.json"},
@@ -126,6 +126,12 @@
           "type": "array",
           "uniqueItems": true,
           "items": {"$ref": "#/$defs/artifact_reference"}
+        },
+        "decision_package": {
+          "oneOf": [
+            {"$ref": "https://toss.software/schemas/pipeline/decision-package.v1.schema.json"},
+            {"$ref": "#/$defs/adr_approval_package"}
+          ]
         },
         "next_action": {"$ref": "#/$defs/next_action"},
         "failure": {"$ref": "#/$defs/failure"},

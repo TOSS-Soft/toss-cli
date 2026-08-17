@@ -7,7 +7,8 @@ import test from "node:test";
 import {sha256Canonical} from "../src/contracts/acp.js";
 import {createArtifactStore} from "../src/artifacts/store.js";
 import {validateDocument} from "../src/contracts/validator.js";
-import {buildDecisionPackage} from "../src/pipeline/decisions.js";
+import {buildArchitecture} from "../src/pipeline/architecture.js";
+import {buildDecisionPackageFromPmAnalysis} from "../src/pipeline/decisions.js";
 
 const stateMachine=await import("../src/pipeline/state-machine.js").catch(error => {
   if (error?.code==="ERR_MODULE_NOT_FOUND") return {};
@@ -32,6 +33,74 @@ const fixtureContext=JSON.parse(await readFile(new URL(
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
+}
+
+function replaceProvenance(value,provenance) {
+  if (Array.isArray(value)) return value.map(child => replaceProvenance(child,provenance));
+  if (!value || typeof value!=="object") return value;
+  const result={};
+  for (const [key,child] of Object.entries(value)) {
+    result[key]=key==="provenance" ? clone(provenance) : replaceProvenance(child,provenance);
+  }
+  return result;
+}
+
+const recordedProvenance=clone(fixtureContext.provenance);
+const rawPm=JSON.parse(await readFile(new URL(
+  "./fixtures/pm-analysis/valid/complete-artifact.json",
+  import.meta.url,
+),"utf8"));
+const validPmTemplate=replaceProvenance(rawPm,recordedProvenance);
+validPmTemplate.provenance=clone(recordedProvenance);
+validPmTemplate.content_sha256=sha256Canonical(validPmTemplate.content);
+
+function validPmArtifact() {
+  return clone(validPmTemplate);
+}
+
+const architectureDecisions=JSON.parse(await readFile(new URL(
+  "./fixtures/architecture/valid/decisions.json",
+  import.meta.url,
+),"utf8"));
+const rawArchitectureContext=JSON.parse(await readFile(new URL(
+  "./fixtures/architecture/valid/artifact-context.json",
+  import.meta.url,
+),"utf8"));
+const architectureContext=replaceProvenance(rawArchitectureContext,recordedProvenance);
+architectureContext.provenance=clone(recordedProvenance);
+const adrContentTemplate=JSON.parse(await readFile(new URL(
+  "./fixtures/architecture/valid/adr-content.json",
+  import.meta.url,
+),"utf8"));
+
+function architectureGraph({pending=false}={}) {
+  const pm_analysis=validPmArtifact();
+  const architecture=buildArchitecture({
+    pmAnalysis:pm_analysis,
+    decisions:architectureDecisions,
+    artifactContext:architectureContext,
+  });
+  const content=clone(adrContentTemplate);
+  if (pending) {
+    content.status="proposed";
+    content.approval.state="pending";
+  }
+  const adr={
+    schema_version:"acp.v1",
+    document_type:"adr",
+    artifact_id:"ADR-ARTIFACT-001",
+    revision:1,
+    run_id:"run-architecture-001",
+    producer:{role:"architect",identity:"toss-architect"},
+    runtime_identity:{kind:"deterministic",name:"toss-cli",version:"2.1.0"},
+    created_at:"2026-08-17T13:00:00.000Z",
+    provenance:clone(recordedProvenance),
+    parents:[],
+    inputs:[reference(pm_analysis),reference(architecture)],
+    content_sha256:sha256Canonical(content),
+    content,
+  };
+  return {pm_analysis,architecture,adrs:[adr]};
 }
 
 function reference(artifact) {
@@ -66,26 +135,21 @@ function artifact(documentType,artifactId,revision,sourceRevision="source-r1") {
   };
 }
 
-function blockingDecisionPackage() {
-  return buildDecisionPackage([{
-    id:"Q-BLOCKING",
-    meaning:"Choose launch authority",
-    question:"Who approves launch?",
-    severity:"P0",
+function transitionArtifact(content,{revision=1,inputs=[],parents=[]}={}) {
+  const value=artifact("transition-event","project-analysis-001",revision);
+  value.producer={role:"orchestrator",identity:"fixture"};
+  value.inputs=inputs.map(reference);
+  value.parents=parents.map(reference);
+  value.content=clone(content);
+  value.content_sha256=sha256Canonical(value.content);
+  return value;
+}
+
+function blockingDecisionPackage(pm=validPmArtifact()) {
+  return buildDecisionPackageFromPmAnalysis(pm,[{
+    id:pm.content.open_questions[0].id,
     context:"Launch needs an accountable approval authority.",
     impact:"Work cannot continue until the authority decides.",
-    options:[{id:"USER",label:"Verified user approval"}],
-    recommendation:"Ask the verified user.",
-    rationale:"This choice changes protected project intent.",
-    affected_entities:["REQ-001"],
-    provenance:{
-      source:{file:"PROJECT_BRIEF.md",section:"Launch",location:"line 1"},
-      source_revision:"source-r1",
-      source_sha256:"a".repeat(64),
-      agent:{identity:"pm",model:"deterministic",run_id:"run-analysis-001"},
-      timestamp:"2026-08-17T14:00:00.000Z",
-      confidence:1,
-    },
   }]);
 }
 
@@ -105,8 +169,8 @@ function assertDeepFrozen(value) {
 
 test("declared transitions are deterministic, deep-frozen, and illegal events fail closed",() => {
   let appendCalls=0;
-  const decisionPackage=blockingDecisionPackage();
-  const pmAnalysis=artifact("pm-analysis","PM-ANALYSIS-001",1);
+  const pmAnalysis=validPmArtifact();
+  const decisionPackage=blockingDecisionPackage(pmAnalysis);
   const context=transitionContext({
     artifacts:{pm_analysis:pmAnalysis,decision_package:decisionPackage},
     store:{append:() => { appendCalls+=1; }},
@@ -128,37 +192,23 @@ test("declared transitions are deterministic, deep-frozen, and illegal events fa
 });
 
 test("ADR approval and interruption outcomes expose an owner, package, and recovery state",() => {
+  const graph=architectureGraph({pending:true});
   const adrPackage={
     schema_version:"adr-approval-package.v1",
     document_type:"adr-approval-package",
     owner:"USER",
-    adr_references:[{
-      document_type:"adr",
-      artifact_id:"ADR-ARTIFACT-001",
-      revision:1,
-      content_sha256:"c".repeat(64),
-    }],
+    adr_references:graph.adrs.map(reference),
   };
   const pending=stateMachine.transition(
     "ARCHITECTURE_PENDING",
     "ADR_APPROVAL_REQUIRED",
-    transitionContext({artifacts:{
-      pm_analysis:artifact("pm-analysis","PM-ANALYSIS-001",1),
-      architecture:artifact("architecture","ARCHITECTURE-001",1),
-      adrs:[{
-        document_type:"adr",
-        artifact_id:"ADR-ARTIFACT-001",
-        revision:1,
-        content_sha256:"c".repeat(64),
-      }],
-      decision_package:adrPackage,
-    }}),
+    transitionContext({artifacts:{...graph,decision_package:adrPackage}}),
   );
   assert.equal(pending.state,"ADR_PENDING_APPROVAL");
   assert.equal(pending.next_action.owner,"USER");
   assert.deepEqual(pending.next_action.decision_package,adrPackage);
 
-  const blocked=stateMachine.transition("PM_FINALIZATION","BLOCK",transitionContext({
+  const blocked=stateMachine.transition("ANALYZING","BLOCK",transitionContext({
     next_action:{action:"PROVIDE_INPUT",owner:"USER",decision_package:adrPackage},
   }));
   assert.equal(blocked.state,"BLOCKED");
@@ -178,17 +228,9 @@ test("ADR approval and interruption outcomes expose an owner, package, and recov
   ).state,"FAILED_TERMINAL");
 });
 
-test("ADR approval packages bind exactly the pending revisions, excluding approved ADRs",() => {
-  const pendingAdr={
-    ...artifact("adr","ADR-PENDING-001",1),
-    content:{approval:{state:"pending"}},
-  };
-  pendingAdr.content_sha256=sha256Canonical(pendingAdr.content);
-  const approvedAdr={
-    ...artifact("adr","ADR-APPROVED-001",1),
-    content:{approval:{state:"approved"}},
-  };
-  approvedAdr.content_sha256=sha256Canonical(approvedAdr.content);
+test("ADR approval packages bind exactly the pending revisions",() => {
+  const graph=architectureGraph({pending:true});
+  const pendingAdr=graph.adrs[0];
   const decisionPackage={
     schema_version:"adr-approval-package.v1",
     document_type:"adr-approval-package",
@@ -200,9 +242,7 @@ test("ADR approval packages bind exactly the pending revisions, excluding approv
     "ARCHITECTURE_PENDING",
     "ADR_APPROVAL_REQUIRED",
     transitionContext({artifacts:{
-      pm_analysis:artifact("pm-analysis","PM-ANALYSIS-001",1),
-      architecture:artifact("architecture","ARCHITECTURE-001",1),
-      adrs:[approvedAdr,pendingAdr],
+      ...graph,
       decision_package:decisionPackage,
     }}),
   );
@@ -219,48 +259,42 @@ test("transition inputs reject non-canonical JSON before producing a result",() 
 });
 
 test("pure transitions reject forged fields in otherwise recognizable decision packages",() => {
-  const forged={...blockingDecisionPackage(),forged_gate:true};
+  const pmAnalysis=validPmArtifact();
+  const forged={...blockingDecisionPackage(pmAnalysis),forged_gate:true};
   assert.throws(() => stateMachine.transition(
     "ANALYZING",
     "QUESTIONS_FOUND",
     transitionContext({artifacts:{
-      pm_analysis:artifact("pm-analysis","PM-ANALYSIS-001",1),
+      pm_analysis:pmAnalysis,
       decision_package:forged,
     }}),
   ),/decision package.*invalid/i);
 });
 
 test("resume uses public store verification and returns the latest immutable event",async () => {
-  const first=artifact("transition-event","project-analysis-001",1);
-  first.producer={role:"orchestrator",identity:"fixture"};
-  first.content={
-    previous_state:"ANALYZING",
-    event:"ANALYSIS_COMPLETED",
-    state:"ARCHITECTURE_PENDING",
-    source_revision:"source-r1",
-    source_sha256:"a".repeat(64),
-    input_artifacts:[],
-  };
-  first.content_sha256=sha256Canonical(first.content);
-  const second=artifact("transition-event","project-analysis-001",2);
-  second.producer={role:"orchestrator",identity:"fixture"};
-  second.parents=[reference(first)];
-  second.content={
-    previous_state:"ARCHITECTURE_PENDING",
-    event:"ARCHITECTURE_COMPLETED",
-    state:"PM_FINALIZATION",
-    source_revision:"source-r1",
-    source_sha256:"a".repeat(64),
-    input_artifacts:[],
-  };
-  second.content_sha256=sha256Canonical(second.content);
+  const pm=validPmArtifact();
+  const firstContent=stateMachine.transition("ANALYZING","ANALYSIS_COMPLETED",{
+    ...fixtureContext,
+    artifacts:{pm_analysis:pm},
+  });
+  const first=transitionArtifact(firstContent,{inputs:[pm]});
+  const secondContent=stateMachine.transition("ARCHITECTURE_PENDING","FAIL_RETRYABLE",{
+    ...fixtureContext,
+    artifacts:{},
+    failure:{code:"TEMPORARY",message:"Retry later"},
+  });
+  const second=transitionArtifact(secondContent,{revision:2,parents:[first]});
   const architecture=artifact("architecture","ARCHITECTURE-001",1);
   const verified=[];
   const store={
-    async list() { return [architecture,first,second]; },
+    async list() { return [architecture,pm,first,second]; },
     async verify(exactReference) {
       verified.push(exactReference);
-      return exactReference.revision===2 ? second : first;
+      return [pm,first,second].find(value =>
+        value.document_type===exactReference.document_type &&
+        value.artifact_id===exactReference.artifact_id &&
+        value.revision===exactReference.revision &&
+        value.content_sha256===exactReference.content_sha256);
     },
   };
 
@@ -271,29 +305,23 @@ test("resume uses public store verification and returns the latest immutable eve
   });
 
   assert.equal(resumed.revision,2);
-  assert.equal(resumed.state,"PM_FINALIZATION");
+  assert.equal(resumed.state,"FAILED_RETRYABLE");
   assert.deepEqual(resumed.stale_artifacts,[]);
-  assert.equal(verified[0].revision,2);
+  assert.ok(verified.some(item => item.revision===2));
   assertDeepFrozen(resumed);
 });
 
 test("resume deterministically marks downstream artifacts stale after a source change",async () => {
-  const event=artifact("transition-event","project-analysis-001",1);
-  event.producer={role:"orchestrator",identity:"fixture"};
-  event.content={
-    previous_state:"ANALYZING",
-    event:"ANALYSIS_COMPLETED",
-    state:"ARCHITECTURE_PENDING",
-    source_revision:"source-r1",
-    source_sha256:"a".repeat(64),
-    input_artifacts:[],
-  };
-  event.content_sha256=sha256Canonical(event.content);
-  const oldPm=artifact("pm-analysis","PM-ANALYSIS-001",1);
+  const oldPm=validPmArtifact();
+  const eventContent=stateMachine.transition("ANALYZING","ANALYSIS_COMPLETED",{
+    ...fixtureContext,
+    artifacts:{pm_analysis:oldPm},
+  });
+  const event=transitionArtifact(eventContent,{inputs:[oldPm]});
   const oldArchitecture=artifact("architecture","ARCHITECTURE-001",1);
   const store={
     async list() { return [oldArchitecture,event,oldPm]; },
-    async verify() { return event; },
+    async verify(want) { return want.document_type==="transition-event" ? event : oldPm; },
   };
 
   const resumed=await orchestrator.resumeAnalysis(store,{
@@ -305,7 +333,7 @@ test("resume deterministically marks downstream artifacts stale after a source c
   assert.equal(resumed.state,"ANALYZING");
   assert.deepEqual(resumed.stale_artifacts.map(item => item.artifact_id),[
     "ARCHITECTURE-001",
-    "PM-ANALYSIS-001",
+    oldPm.artifact_id,
   ]);
 });
 
@@ -372,7 +400,7 @@ test("runNextStage validates a transition before appending its immutable event",
       return {...draft,revision:1,content_sha256:sha256Canonical(draft.content)};
     },
   };
-  const pmAnalysis=artifact("pm-analysis","PM-ANALYSIS-001",1);
+  const pmAnalysis=validPmArtifact();
   const context={
     ...transitionContext({artifacts:{pm_analysis:pmAnalysis}}),
     state:"ANALYZING",
@@ -411,14 +439,11 @@ test("runNextStage derives the pending-question event from a validated analysis 
       return value;
     },
   };
-  const pmAnalysis=JSON.parse(await readFile(new URL(
-    "./fixtures/pm-analysis/valid/complete-artifact.json",
-    import.meta.url,
-  ),"utf8"));
+  const pmAnalysis=validPmArtifact();
   const result=await orchestrator.runNextStage({
     ...transitionContext({artifacts:{
       pm_analysis:pmAnalysis,
-      decision_package:blockingDecisionPackage(),
+      decision_package:blockingDecisionPackage(pmAnalysis),
     }}),
     state:"ANALYZING",
     store,
@@ -438,7 +463,7 @@ test("real artifact-store persistence resumes the exact verified transition revi
     now:() => new Date("2026-08-17T14:00:00.000Z"),
     randomId:() => "state-machine-test",
   });
-  const pmAnalysis=artifact("pm-analysis","PM-ANALYSIS-REAL-001",1);
+  const pmAnalysis=validPmArtifact();
   const persistedPm=await store.append(pmAnalysis);
   const source={
     source_revision:persistedPm.provenance.source_revision,

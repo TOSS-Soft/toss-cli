@@ -43,14 +43,14 @@ an earlier event.
 | --- | --- | --- | --- |
 | `ANALYZING` | `QUESTIONS_FOUND` | `QUESTIONS_PENDING` | Exact PM analysis and a canonical blocked `decision-package.v1` |
 | `ANALYZING` | `ANALYSIS_COMPLETED` | `ARCHITECTURE_PENDING` | Exact validated PM analysis |
-| `QUESTIONS_PENDING` | `DECISION_STARTED` | `USER_DECISION` | The same blocked decision package |
-| `USER_DECISION` | `DECISIONS_RESOLVED` | `ARCHITECTURE_PENDING` | Decision package gate is exactly `CLEAR` and `can_continue=true` |
+| `QUESTIONS_PENDING` | `DECISION_STARTED` | `USER_DECISION` | Exact PM analysis and the same blocked decision package |
+| `USER_DECISION` | `DECISIONS_RESOLVED` | `ARCHITECTURE_PENDING` | Exact PM analysis; decision package gate is exactly `CLEAR` and `can_continue=true` |
 | `ARCHITECTURE_PENDING` | `ADR_APPROVAL_REQUIRED` | `ADR_PENDING_APPROVAL` | Exact PM, architecture, and ADR revisions plus a USER-owned package containing exactly the pending ADR revisions |
 | `ARCHITECTURE_PENDING` | `ARCHITECTURE_COMPLETED` | `PM_FINALIZATION` | Exact PM, architecture, and ADR revisions; architecture validation is complete |
 | `ADR_PENDING_APPROVAL` | `ADR_APPROVED` | `PM_FINALIZATION` | Exact PM, architecture, and ADR revisions; architecture validation is complete and approvals are current |
 | `PM_FINALIZATION` | `FINALIZATION_COMPLETED` | `SPEC_AUDIT` | Exact PM, architecture, ADR, and issue-plan revisions; issue-plan validation is complete |
 | `SPEC_AUDIT` | `AUDIT_PASSED` | `READY_FOR_ISSUES` | Exact PM, architecture, ADR, issue-plan, and spec-audit revisions; audit says ready |
-| `SPEC_AUDIT` | `AUDIT_BLOCKED` | `BLOCKED` | A named owner and remediation action |
+| `SPEC_AUDIT` | `AUDIT_BLOCKED` | `BLOCKED` | Exact PM, architecture, ADR, issue-plan, and deterministically reproduced spec-audit revisions; remediation owner is the first blocking finding's actual owner |
 | `BLOCKED` | `RESUME` | recorded recovery state | Recovery state is active and non-terminal |
 | `FAILED_RETRYABLE` | `RETRY` | recorded recovery state | Recovery state is active and non-terminal |
 
@@ -60,9 +60,9 @@ Any non-terminal active state may emit `BLOCK`, `FAIL_RETRYABLE`, or
 message. Retryable failures record the state to retry; terminal failures do not
 permit another transition.
 
-Every other state/event pair is illegal. An illegal transition is rejected
-before artifact-store discovery or append, so it produces no event or other
-artifact.
+Every other state/event pair is illegal. Existing history may be read and
+verified first to establish append continuity, but an illegal transition is
+always rejected before append, so it produces no event or other artifact.
 
 ## Decision ownership
 
@@ -76,6 +76,18 @@ whose approval state is not `approved`. Already-approved ADRs remain pipeline
 inputs but are not repeated as pending decisions. A missing, extra, stale, or
 hash-mismatched ADR reference rejects the transition.
 
+Spec-audit remediation preserves the owner of the first deterministically
+ordered blocking finding. The complete finding-owner set is `PM`, `ARCHITECT`,
+`PM_FINALIZATION`, and `USER`; the findings-only Spec Auditor is never assigned
+remediation work. Both automatic derivation and an explicit `AUDIT_BLOCKED`
+event enforce the same exact action and owner.
+
+Every required artifact is canonical JSON, valid under the registered schema
+for its exact document type, content-hash valid, bound to the current source,
+and linked to its exact immutable upstream input set. A property name or a
+`ready_for_github` boolean is not evidence. Spec-audit content must equal a
+fresh deterministic audit over the supplied immutable graph.
+
 ## Transition-event revisions
 
 Each successful transition is appended as a `transition-event` ACP artifact:
@@ -87,6 +99,8 @@ Each successful transition is appended as a `transition-event` ACP artifact:
   transition-event revision;
 - `inputs` contains the canonical, sorted, exact references required by that
   transition;
+- decision-wait events embed the exact closed package used for later
+  predecessor-continuity checks;
 - provenance `source_revision` and `source_sha256` exactly match the event
   content and current source descriptor; and
 - the closed `transition-event.v1` schema is validated before append.
@@ -120,8 +134,12 @@ Resume performs these steps in order:
 1. Call `store.list()`; no filesystem path or artifact filename is inspected.
 2. Select transition events for the requested analysis ID and order them by
    immutable revision.
-3. Call `store.verify()` with the exact reference of the newest event.
-4. If its provenance matches the requested source revision and hash, resume
+3. Verify every event and referenced input through `store.verify()`. Revalidate
+   the contiguous revision/parent chain, legal `(previous_state, event, state)`
+   tuple, predecessor-state continuity, content/envelope source and input
+   equality, schema, content hash, and source/input lineage before selecting a
+   checkpoint.
+4. If the latest verified event's provenance matches the requested source revision and hash, resume
    from its recorded state. Otherwise resume at `ANALYZING` while retaining the
    last verified event reference as audit evidence.
    Retryable and blocked checkpoints also expose their recorded
