@@ -9,6 +9,7 @@ const specAuditorModule=await import("../src/pipeline/spec-auditor.js").catch(er
 
 test("spec auditor exposes the pure specification audit contract",() => {
   assert.equal(typeof specAuditorModule.auditSpecification,"function");
+  assert.equal(typeof specAuditorModule.SpecAuditInputError,"function");
 });
 
 if (typeof specAuditorModule.auditSpecification==="function") {
@@ -351,5 +352,192 @@ if (typeof specAuditorModule.auditSpecification==="function") {
       value:true,
     });
     assert.throws(() => auditSpecification(graph),/canonical JSON|non-enumerable/i);
+  });
+
+  test("AC coverage is computed per owning issue instead of across the whole plan",() => {
+    const graph=completeGraph();
+    const firstIssue=graph.issuePlan.content.issues[0];
+    const firstCriterion=graph.issuePlan.content.acceptance_criteria[0];
+    firstIssue.source_requirements=requirementReferences(["REQ-001"]);
+    firstCriterion.verifies=requirementReferences(["NFR-001"]);
+
+    const secondIssue=clone(firstIssue);
+    secondIssue.id="ISSUE-002";
+    secondIssue.meaning="Expose customer support request status.";
+    secondIssue.atomic_scope="Expose only the current status of a customer request.";
+    secondIssue.source_requirements=requirementReferences(["NFR-001","NFR-002"]);
+    secondIssue.acceptance_criteria=[{kind:"acceptance-criterion",id:"AC-002"}];
+    const secondCriterion=clone(firstCriterion);
+    secondCriterion.id="AC-002";
+    secondCriterion.meaning="A customer can view the current request status.";
+    secondCriterion.issue={kind:"issue",id:"ISSUE-002"};
+    secondCriterion.verifies=requirementReferences(["REQ-001","NFR-002"]);
+    graph.issuePlan.content.issues.push(secondIssue);
+    graph.issuePlan.content.acceptance_criteria.push(secondCriterion);
+    rehash(graph.issuePlan);
+
+    const result=auditSpecification(graph);
+    const coverage=result.findings.filter(finding => finding.type==="AC_COVERAGE");
+
+    assert.equal(result.status,"FAIL");
+    assert.ok(coverage.some(finding =>
+      finding.affected_entities.includes("ISSUE-001") &&
+      finding.affected_entities.includes("REQ-001"),
+    ));
+    assert.ok(coverage.some(finding =>
+      finding.affected_entities.includes("ISSUE-002") &&
+      finding.affected_entities.includes("NFR-001"),
+    ));
+  });
+
+  test("an authoritative epic with no issue reverse-use is a blocking orphan",() => {
+    const graph=completeGraph();
+    const orphan=clone(graph.issuePlan.content.epics[0]);
+    orphan.id="EPIC-002";
+    orphan.meaning="Customer support request status.";
+    orphan.source_requirements=requirementReferences(["NFR-001"]);
+    graph.issuePlan.content.epics.push(orphan);
+    rehash(graph.issuePlan);
+
+    const result=auditSpecification(graph);
+    const finding=result.findings.find(item => item.type==="ORPHAN_EPIC");
+
+    assert.equal(result.status,"FAIL");
+    assert.ok(finding);
+    assert.equal(finding.owner,"PM_FINALIZATION");
+    assert.equal(finding.path,"/content/epics/1");
+    assert.deepEqual(finding.affected_entities,["EPIC-002"]);
+  });
+
+  test("duplicate IDs and meanings span every collection in one owner domain",() => {
+    const graph=completeGraph();
+    const duplicate=clone(graph.pmAnalysis.content.non_functional_requirements[0]);
+    duplicate.intent_type="business-constraint";
+    graph.pmAnalysis.content.constraints.push(duplicate);
+    rehash(graph.pmAnalysis);
+
+    const result=auditSpecification(graph);
+
+    assert.ok(result.findings.some(finding =>
+      finding.type==="DUPLICATE_ENTITY_ID" &&
+      finding.path==="/content/constraints/1/id" &&
+      finding.affected_entities.includes("NFR-001"),
+    ));
+    assert.ok(result.findings.some(finding =>
+      finding.type==="DUPLICATE_ENTITY_MEANING" &&
+      finding.path==="/content/constraints/1/meaning" &&
+      finding.affected_entities.includes("NFR-001"),
+    ));
+  });
+
+  test("raw options are validated without invoking accessors and require exact own keys",() => {
+    const graph=completeGraph();
+    function assertInputError(operation) {
+      assert.throws(operation,error => {
+        assert.equal(error?.name,"SpecAuditInputError");
+        assert.equal(error?.code,"SPEC_AUDIT_INPUT_INVALID");
+        return true;
+      });
+    }
+
+    assertInputError(() => auditSpecification());
+    assertInputError(() => auditSpecification(null));
+    assertInputError(() => auditSpecification([]));
+
+    let getterReads=0;
+    const accessor={architecture:graph.architecture,issuePlan:graph.issuePlan};
+    Object.defineProperty(accessor,"pmAnalysis",{
+      enumerable:true,
+      get() {
+        getterReads+=1;
+        return graph.pmAnalysis;
+      },
+    });
+    assertInputError(() => auditSpecification(accessor));
+    assert.equal(getterReads,0);
+
+    assertInputError(() => auditSpecification(Object.assign(
+      Object.create({inherited:true}),
+      graph,
+    )));
+    assertInputError(() => auditSpecification({...graph,extra:true}));
+    assertInputError(() => auditSpecification({
+      ...graph,
+      architecture:{...graph.architecture,extra:true},
+    }));
+    const missing=clone(graph);
+    delete missing.pmAnalysis;
+    assertInputError(() => auditSpecification(missing));
+
+    const symbol=clone(graph);
+    symbol[Symbol("hidden")]=true;
+    assertInputError(() => auditSpecification(symbol));
+    const nonEnumerable=clone(graph);
+    Object.defineProperty(nonEnumerable,"hidden",{value:true,enumerable:false});
+    assertInputError(() => auditSpecification(nonEnumerable));
+
+    const sparse=clone(graph);
+    sparse.pmAnalysis.content.functional_requirements.length=2;
+    assertInputError(() => auditSpecification(sparse));
+    const cyclic=clone(graph);
+    cyclic.pmAnalysis.loop=cyclic.pmAnalysis;
+    assertInputError(() => auditSpecification(cyclic));
+  });
+
+  test("a dangling issue ADR reference is routed to PM Finalization",() => {
+    const graph=completeGraph();
+    graph.issuePlan.content.issues[0].adr_refs=[{kind:"adr",id:"ADR-MISSING"}];
+    rehash(graph.issuePlan);
+
+    const result=auditSpecification(graph);
+    const finding=result.findings.find(item =>
+      item.type==="DANGLING_REFERENCE" &&
+      item.path==="/content/issues/0/adr_refs/0",
+    );
+
+    assert.ok(finding);
+    assert.equal(finding.owner,"PM_FINALIZATION");
+  });
+
+  test("minimum envelope identity errors are typed while invalid content emits schema findings",() => {
+    const missingIdentity=completeGraph();
+    delete missingIdentity.issuePlan.artifact_id;
+
+    assert.throws(() => auditSpecification(missingIdentity),error => {
+      assert.equal(error?.name,"SpecAuditInputError");
+      assert.equal(error?.code,"SPEC_AUDIT_INPUT_INVALID");
+      assert.equal(error?.path,"/issuePlan/artifact_id");
+      return true;
+    });
+
+    const missingAdrIdentity=completeGraph(
+      "./fixtures/spec-audit/warn/orphan-requirement.json",
+      {secondAdr:true},
+    );
+    delete missingAdrIdentity.architecture.adrs[1].artifact_id;
+    assert.throws(() => auditSpecification(missingAdrIdentity),error => {
+      assert.equal(error?.name,"SpecAuditInputError");
+      assert.equal(error?.code,"SPEC_AUDIT_INPUT_INVALID");
+      assert.match(error?.path,/^\/architecture\/adrs\/\d+\/artifact_id$/);
+      return true;
+    });
+
+    const invalidContent=completeGraph();
+    delete invalidContent.issuePlan.content.summary;
+    rehash(invalidContent.issuePlan);
+    const before=clone(invalidContent);
+
+    const result=auditSpecification(invalidContent);
+
+    assert.deepEqual(invalidContent,before);
+    assert.equal(result.status,"FAIL");
+    assert.equal(result.ready_for_github,false);
+    assert.ok(result.findings.some(finding =>
+      finding.type==="SCHEMA_VALIDATION" &&
+      finding.owner==="PM_FINALIZATION",
+    ));
+    assert.equal(validateDocument(result.artifact,"spec-audit.v1").valid,true);
+    assert.equal(result.artifact.content.status,result.status);
+    assert.equal(result.artifact.content.ready_for_github,result.ready_for_github);
   });
 }

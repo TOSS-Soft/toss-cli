@@ -7,6 +7,19 @@ const BLOCKING_SEVERITIES=new Set(["P0","P1","P2"]);
 const SEVERITY_ORDER=new Map(["P0","P1","P2","P3","P4"].map(
   (severity,index) => [severity,index],
 ));
+const OPTION_KEYS=Object.freeze(["architecture","issuePlan","pmAnalysis"]);
+const SHA256_PATTERN=/^[a-f0-9]{64}$/;
+const ARTIFACT_ID_PATTERN=/^[A-Za-z0-9][A-Za-z0-9:._-]*$/;
+const DOCUMENT_TYPE_PATTERN=/^[a-z][a-z0-9-]*$/;
+
+export class SpecAuditInputError extends TypeError {
+  constructor(message,{path="/",cause}={}) {
+    super(message,{cause});
+    this.name="SpecAuditInputError";
+    this.code="SPEC_AUDIT_INPUT_INVALID";
+    this.path=path;
+  }
+}
 
 function isPlainObject(value) {
   if (!value || typeof value!=="object" || Array.isArray(value)) return false;
@@ -152,13 +165,14 @@ function normalizeMeaning(value) {
 
 function duplicateFindings(collections,artifactId,owner) {
   const findings=[];
-  for (const {path,entities} of collections) {
+  const byId=new Map();
+  const byMeaning=new Map();
+  for (const {path,entities,artifactIds} of collections) {
     if (!Array.isArray(entities)) continue;
-    const byId=new Map();
-    const byMeaning=new Map();
     for (const [index,entity] of entities.entries()) {
       if (!isPlainObject(entity)) continue;
       const entityPath=`${path}/${index}`;
+      const findingArtifactId=artifactIds?.[index] ?? artifactId;
       if (typeof entity.id==="string") {
         if (byId.has(entity.id)) {
           findings.push(rawFinding({
@@ -168,7 +182,7 @@ function duplicateFindings(collections,artifactId,owner) {
             path:`${entityPath}/id`,
             message:`Entity ID ${entity.id} is defined more than once`,
             affected_entities:[entity.id],
-            artifact_id:artifactId,
+            artifact_id:findingArtifactId,
           }));
         } else {
           byId.set(entity.id,entityPath);
@@ -186,7 +200,7 @@ function duplicateFindings(collections,artifactId,owner) {
           path:`${entityPath}/meaning`,
           message:`Materially identical ${String(entity.kind)} meanings are duplicated`,
           affected_entities:[previous.id,entity.id].filter(Boolean),
-          artifact_id:artifactId,
+          artifact_id:findingArtifactId,
         }));
       } else {
         byMeaning.set(meaningKey,{id:entity.id,path:entityPath});
@@ -325,7 +339,9 @@ function coverageFindings(pmAnalysis,issuePlan) {
     Array.isArray(criterion?.verifies) ?
       criterion.verifies.map(reference => reference?.id) : [],
   ));
-  for (const {entity,path,blocking} of requirementEntries(pmAnalysis)) {
+  const requirements=requirementEntries(pmAnalysis);
+  const requirementById=new Map(requirements.map(entry => [entry.entity.id,entry]));
+  for (const {entity,path,blocking} of requirements) {
     if (!isPlainObject(entity) || typeof entity.id!=="string") continue;
     const mentioned=issueRequirementIds.has(entity.id);
     const verified=acRequirementIds.has(entity.id);
@@ -339,16 +355,6 @@ function coverageFindings(pmAnalysis,issuePlan) {
         affected_entities:[entity.id],
         artifact_id:pmAnalysis.artifact_id,
       }));
-    } else if (mentioned && !verified) {
-      findings.push(rawFinding({
-        type:"AC_COVERAGE",
-        owner:"PM_FINALIZATION",
-        severity:blocking ? "P1" : "P2",
-        path:"/content/acceptance_criteria",
-        message:`Requirement ${entity.id} is mentioned by an issue but has no acceptance-criterion verification`,
-        affected_entities:[entity.id],
-        artifact_id:issuePlan.artifact_id,
-      }));
     } else if (!mentioned && verified) {
       findings.push(rawFinding({
         type:"REQUIREMENT_AC_WITHOUT_ISSUE",
@@ -357,6 +363,30 @@ function coverageFindings(pmAnalysis,issuePlan) {
         path:"/content/acceptance_criteria",
         message:`Requirement ${entity.id} is verified by an AC but not owned by an issue`,
         affected_entities:[entity.id],
+        artifact_id:issuePlan.artifact_id,
+      }));
+    }
+  }
+  const criteriaById=new Map(criteria.map(criterion => [criterion?.id,criterion]));
+  for (const [issueIndex,issue] of issues.entries()) {
+    if (!isPlainObject(issue)) continue;
+    const ownedCriteria=(issue.acceptance_criteria ?? []).map(reference =>
+      criteriaById.get(reference?.id),
+    ).filter(criterion => criterion?.issue?.id===issue.id);
+    for (const [referenceIndex,reference] of (issue.source_requirements ?? []).entries()) {
+      const requirement=requirementById.get(reference?.id);
+      if (!requirement) continue;
+      const verifiedByOwnedCriterion=ownedCriteria.some(criterion =>
+        (criterion.verifies ?? []).some(target => target?.id===reference.id),
+      );
+      if (verifiedByOwnedCriterion) continue;
+      findings.push(rawFinding({
+        type:"AC_COVERAGE",
+        owner:"PM_FINALIZATION",
+        severity:requirement.blocking ? "P1" : "P2",
+        path:`/content/issues/${issueIndex}/source_requirements/${referenceIndex}`,
+        message:`Requirement ${reference.id} is not verified by an acceptance criterion owned by issue ${issue.id}`,
+        affected_entities:[issue.id,reference.id],
         artifact_id:issuePlan.artifact_id,
       }));
     }
@@ -380,6 +410,48 @@ function issueAndReferenceFindings(pmAnalysis,adrs,issuePlan) {
   }
   for (const criterion of criteria) {
     if (!criterionById.has(criterion?.id)) criterionById.set(criterion?.id,criterion);
+  }
+
+  const usedEpicIds=new Set(issues.map(issue => issue?.epic?.id).filter(Boolean));
+  for (const [index,epic] of epics.entries()) {
+    if (!isPlainObject(epic)) continue;
+    const path=`/content/epics/${index}`;
+    const incomplete=typeof epic.meaning!=="string" || !epic.meaning.trim() ||
+      !Array.isArray(epic.source_requirements) || epic.source_requirements.length===0;
+    if (incomplete) {
+      findings.push(rawFinding({
+        type:"EPIC_INCOMPLETE",
+        owner:"PM_FINALIZATION",
+        severity:"P1",
+        path,
+        message:`Epic ${String(epic.id)} lacks material meaning or source requirements`,
+        affected_entities:[epic.id].filter(Boolean),
+        artifact_id:issuePlan.artifact_id,
+      }));
+    }
+    for (const [referenceIndex,reference] of (epic.source_requirements ?? []).entries()) {
+      if (requirementIds.has(reference?.id)) continue;
+      findings.push(rawFinding({
+        type:"DANGLING_REFERENCE",
+        owner:"PM_FINALIZATION",
+        severity:"P1",
+        path:`${path}/source_requirements/${referenceIndex}`,
+        message:`Epic ${String(epic.id)} references missing requirement ${String(reference?.id)}`,
+        affected_entities:[epic.id,reference?.id].filter(Boolean),
+        artifact_id:issuePlan.artifact_id,
+      }));
+    }
+    if (!usedEpicIds.has(epic.id)) {
+      findings.push(rawFinding({
+        type:"ORPHAN_EPIC",
+        owner:"PM_FINALIZATION",
+        severity:"P1",
+        path,
+        message:`Authoritative epic ${String(epic.id)} is not used by any issue`,
+        affected_entities:[epic.id].filter(Boolean),
+        artifact_id:issuePlan.artifact_id,
+      }));
+    }
   }
 
   for (const [index,issue] of issues.entries()) {
@@ -486,7 +558,7 @@ function issueAndReferenceFindings(pmAnalysis,adrs,issuePlan) {
       if (adrById.has(reference?.id)) continue;
       findings.push(rawFinding({
         type:"DANGLING_REFERENCE",
-        owner:"ARCHITECT",
+        owner:"PM_FINALIZATION",
         severity:"P1",
         path:`${path}/adr_refs/${referenceIndex}`,
         message:`Issue ${String(issue.id)} references missing ADR ${String(reference?.id)}`,
@@ -741,41 +813,120 @@ function auditProvenance(issuePlan,runId) {
 function assertAggregate(architecture) {
   if (!isPlainObject(architecture) || !isPlainObject(architecture.artifact) ||
       !Array.isArray(architecture.adrs)) {
-    throw new TypeError(
-      "Spec audit architecture must be a plain JSON aggregate with artifact and adrs",
+    throw new SpecAuditInputError(
+      "Spec audit architecture must contain a plain artifact and adrs array",
+      {path:"/architecture"},
     );
   }
   const keys=Object.keys(architecture).sort();
   if (canonicalJson(keys)!==canonicalJson(["adrs","artifact"])) {
-    throw new TypeError("Spec audit architecture aggregate contains unsupported fields");
+    throw new SpecAuditInputError(
+      "Spec audit architecture aggregate requires exactly artifact and adrs",
+      {path:"/architecture"},
+    );
   }
 }
 
-export function auditSpecification({pmAnalysis,architecture,issuePlan}={}) {
-  let normalized;
+function canonicalOptions(options) {
+  let canonical;
   try {
-    normalized=canonicalCopy({pmAnalysis,architecture,issuePlan});
+    canonical=canonicalJson(options);
   } catch (error) {
-    throw new TypeError(
-      `Spec audit inputs must be canonical JSON: ${
-        error instanceof Error ? error.message : "non-JSON value"
+    throw new SpecAuditInputError(
+      `Spec audit options must be canonical plain JSON: ${
+        error instanceof Error ? error.message : "invalid input"
       }`,
       {cause:error},
     );
   }
+  const normalized=JSON.parse(canonical);
+  if (!isPlainObject(normalized)) {
+    throw new SpecAuditInputError("Spec audit options must be a plain JSON object");
+  }
+  const keys=Object.keys(normalized).sort();
+  if (canonicalJson(keys)!==canonicalJson(OPTION_KEYS)) {
+    throw new SpecAuditInputError(
+      "Spec audit options require exactly architecture, issuePlan, and pmAnalysis",
+    );
+  }
+  return normalized;
+}
+
+function assertReferenceIdentity(artifact,path) {
+  if (!isPlainObject(artifact)) {
+    throw new SpecAuditInputError("Artifact must be a plain JSON object",{path});
+  }
+  for (const [field,valid] of [
+    ["document_type",typeof artifact.document_type==="string" &&
+      DOCUMENT_TYPE_PATTERN.test(artifact.document_type)],
+    ["artifact_id",typeof artifact.artifact_id==="string" &&
+      ARTIFACT_ID_PATTERN.test(artifact.artifact_id)],
+    ["revision",Number.isSafeInteger(artifact.revision) && artifact.revision>=1],
+    ["content_sha256",typeof artifact.content_sha256==="string" &&
+      SHA256_PATTERN.test(artifact.content_sha256)],
+  ]) {
+    if (!valid) {
+      throw new SpecAuditInputError(
+        `Artifact lacks usable immutable envelope field ${field}`,
+        {path:`${path}/${field}`},
+      );
+    }
+  }
+}
+
+function assertOutputMetadata(issuePlan) {
+  const runId=typeof issuePlan.run_id==="string" ? issuePlan.run_id : "";
+  const probe={
+    schema_version:"acp.v1",
+    document_type:"spec-audit",
+    artifact_id:"spec-audit:metadata-probe",
+    revision:1,
+    run_id:runId,
+    producer:{role:"spec-auditor",identity:"toss-spec-auditor"},
+    runtime_identity:issuePlan.runtime_identity,
+    created_at:issuePlan.created_at,
+    provenance:issuePlan.provenance,
+    parents:[],
+    inputs:[],
+    content_sha256:"0".repeat(64),
+    content:{},
+  };
+  const validation=validateDocument(probe,"artifact-envelope.v1");
+  if (validation.valid) return;
+  const first=validation.errors[0];
+  const missing=first?.keyword==="required" ? first.params?.missingProperty : undefined;
+  const relativePath=missing===undefined ? first?.instancePath :
+    `${first?.instancePath}/${escapePointerSegment(missing)}`;
+  throw new SpecAuditInputError(
+    "Issue-plan envelope lacks metadata required for a valid audit artifact",
+    {path:`/issuePlan${relativePath || "/"}`},
+  );
+}
+
+function assertMinimumEnvelopes(pmAnalysis,architectureArtifact,adrs,issuePlan) {
+  assertReferenceIdentity(pmAnalysis,"/pmAnalysis");
+  assertReferenceIdentity(architectureArtifact,"/architecture/artifact");
+  for (const [index,adr] of adrs.entries()) {
+    assertReferenceIdentity(adr,`/architecture/adrs/${index}`);
+  }
+  assertReferenceIdentity(issuePlan,"/issuePlan");
+  assertOutputMetadata(issuePlan);
+}
+
+export function auditSpecification(options) {
+  const normalized=canonicalOptions(options);
   assertAggregate(normalized.architecture);
   const pm=normalized.pmAnalysis;
   const architectureArtifact=normalized.architecture.artifact;
-  const adrs=[...normalized.architecture.adrs].sort((left,right) =>
+  const adrs=[...normalized.architecture.adrs];
+  const plan=normalized.issuePlan;
+  assertMinimumEnvelopes(pm,architectureArtifact,adrs,plan);
+  adrs.sort((left,right) =>
     compareText(
       referenceIdentity(artifactReference(left)),
       referenceIdentity(artifactReference(right)),
     ),
   );
-  const plan=normalized.issuePlan;
-  if (!isPlainObject(pm) || !isPlainObject(plan)) {
-    throw new TypeError("Spec audit requires plain JSON PM analysis and issue plan artifacts");
-  }
 
   const rawFindings=[
     ...validationFindings(pm,"pm-analysis.v1","PM"),
@@ -793,9 +944,11 @@ export function auditSpecification({pmAnalysis,architecture,issuePlan}={}) {
     ...duplicateFindings([
       {path:"/content/components",entities:architectureArtifact.content?.components},
       {path:"/content/constraints",entities:architectureArtifact.content?.constraints},
-    ],architectureArtifact.artifact_id,"ARCHITECT"),
-    ...duplicateFindings([
-      {path:"/content/adrs",entities:adrs.map(adr => adr.content)},
+      {
+        path:"/architecture/adrs",
+        entities:adrs.map(adr => adr.content),
+        artifactIds:adrs.map(adr => adr.artifact_id),
+      },
     ],architectureArtifact.artifact_id,"ARCHITECT"),
     ...duplicateFindings([
       {path:"/content/epics",entities:plan.content?.epics},

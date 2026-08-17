@@ -28,6 +28,13 @@ aggregate rather than a single artifact:
 }
 ```
 
+The raw options value must be a canonical plain JSON object with exactly the
+own enumerable keys `pmAnalysis`, `architecture`, and `issuePlan`. The runtime
+validates property descriptors before reading any value. Prototypes, accessors,
+symbol or non-enumerable keys, missing or extra keys, sparse arrays, and cyclic
+values are rejected without executing a getter. The architecture aggregate is
+also closed to exactly `artifact` and `adrs`.
+
 The aggregate is required because an architecture artifact does not embed the
 complete ADR contents. Auditing only issue-plan ADR snapshots would prove that
 a reference exists, but could not prove ADR completeness, approval,
@@ -52,21 +59,37 @@ accessor, non-enumerable, sparse, cyclic, or unsupported values, are rejected
 before audit execution. Valid JSON inputs are copied before analysis. The
 auditor never freezes or otherwise changes the caller's objects.
 
+`SpecAuditInputError` is the deterministic public error for an input from
+which a valid audit artifact cannot be built. It extends `TypeError` and
+exposes `code: "SPEC_AUDIT_INPUT_INVALID"` plus a stable `path`. This includes
+raw boundary failures and a missing minimum immutable envelope identity
+(`document_type`, `artifact_id`, `revision`, or `content_sha256`). The issue
+plan must also contain valid run, runtime, timestamp, and provenance metadata
+because those fields identify the emitted audit.
+
+An artifact that has usable immutable envelope identity and output metadata
+but invalid domain content does not cause accidental metadata synthesis or an
+untyped exception. It produces blocking, owner-routed `SCHEMA_VALIDATION`
+findings inside a schema-valid `spec-audit.v1` artifact.
+
 ## Deterministic Checks
 
 The audit recomputes relationships rather than trusting summary fields. Its
 checks include:
 
 - functional and non-functional requirement-to-issue coverage;
-- requirements mentioned by an issue but not verified by an acceptance
-  criterion;
+- every source requirement of every issue being verified by an acceptance
+  criterion owned and linked back by that same issue (cross-issue ACs never
+  satisfy coverage);
 - acceptance-criterion ownership, back-links, and requirement targets;
 - issue scope, acceptance criteria, Definition of Done, epic/standalone
   placement, source requirement or governance rationale, and required ADRs;
 - ADR existence, approval/readiness through the upstream architecture
   contract, requirement relevance, resolved-question evidence, and orphan
   ADRs;
-- orphan requirements, ADRs, and issues;
+- authoritative epic completeness, requirement links, reverse issue use, and
+  orphan epics;
+- orphan requirements, epics, ADRs, and issues;
 - duplicate identities and materially equal meanings within an ownership
   collection;
 - dangling requirement, epic, issue, acceptance-criterion, ADR, and dependency
@@ -95,7 +118,7 @@ Owners are routed as follows:
 | --- | --- |
 | `PM` | PM requirements, constraints, or business intent |
 | `ARCHITECT` | architecture and ADR contents |
-| `PM_FINALIZATION` | finalized issues, ACs, links, dependencies, and snapshots |
+| `PM_FINALIZATION` | finalized epics/issues, ACs, issue-owned ADR refs, links, dependencies, and snapshots |
 | `USER` | an explicitly user-authoritative decision when a later rule requires it |
 
 Findings are deduplicated by canonical content and sorted by severity, type,
