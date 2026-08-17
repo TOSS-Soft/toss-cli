@@ -1,0 +1,35 @@
+{
+  "schema_version": "acp.v1",
+  "document_type": "pm-analysis",
+  "artifact_id": "PM-ANALYSIS-MISSING-001",
+  "revision": 1,
+  "run_id": "run-pm-analysis-invalid-001",
+  "producer": {"role": "pm", "identity": "toss-pm"},
+  "runtime_identity": "deterministic",
+  "created_at": "2026-08-17T12:00:00.000Z",
+  "provenance": {
+    "source_revision": "project-brief-r1",
+    "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "locations": ["PROJECT_BRIEF.md"]
+  },
+  "parents": [],
+  "inputs": [],
+  "content_sha256": "556dae097ddcbaa153374e2072a66611fbdda2306aa0af3897638a9089cdc63d",
+  "content": {
+    "summary": "An intentionally incomplete PM analysis.",
+    "goals": [],
+    "non_goals": [],
+    "actors": [],
+    "functional_requirements": [],
+    "non_functional_requirements": [],
+    "business_rules": [],
+    "domains_modules": [],
+    "user_flows": [],
+    "integrations": [],
+    "constraints": [],
+    "assumptions": [],
+    "open_questions": [],
+    "architecture_questions": [],
+    "epic_candidates": []
+  }
+}

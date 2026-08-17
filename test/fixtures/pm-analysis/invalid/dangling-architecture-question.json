@@ -1,0 +1,74 @@
+{
+  "schema_version": "acp.v1",
+  "document_type": "pm-analysis",
+  "artifact_id": "PM-ANALYSIS-DANGLING-001",
+  "revision": 1,
+  "run_id": "run-pm-analysis-invalid-003",
+  "producer": {"role": "pm", "identity": "toss-pm"},
+  "runtime_identity": "deterministic",
+  "created_at": "2026-08-17T12:00:00.000Z",
+  "provenance": {
+    "source_revision": "project-brief-r1",
+    "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "locations": ["PROJECT_BRIEF.md"]
+  },
+  "parents": [],
+  "inputs": [],
+  "content_sha256": "6fbb65bfe3bbe4c5db23626a1fde1a1d6d5169d1ff3117a93618245a2aef2f65",
+  "content": {
+    "summary": "An analysis with a dangling architecture question.",
+    "goals": [],
+    "non_goals": [],
+    "actors": [],
+    "functional_requirements": [
+      {
+        "id": "REQ-001",
+        "kind": "functional-requirement",
+        "meaning": "A customer can submit a support request.",
+        "intent_type": "business-requirement",
+        "provenance": {
+          "source_revision": "project-brief-r1",
+          "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "locations": ["PROJECT_BRIEF.md:Requirements"]
+        }
+      }
+    ],
+    "non_functional_requirements": [],
+    "business_rules": [],
+    "domains_modules": [],
+    "user_flows": [],
+    "integrations": [],
+    "constraints": [
+      {
+        "id": "NFR-002",
+        "kind": "non-functional-requirement",
+        "meaning": "Respect the current customer identity policy.",
+        "intent_type": "business-constraint",
+        "provenance": {
+          "source_revision": "project-brief-r1",
+          "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "locations": ["PROJECT_BRIEF.md:Constraints"]
+        }
+      }
+    ],
+    "assumptions": [],
+    "open_questions": [],
+    "risks": [],
+    "architecture_questions": [
+      {
+        "id": "ARCHQ-001",
+        "kind": "architecture-question",
+        "meaning": "Determine the support request state representation.",
+        "question": "What architecture preserves request state?",
+        "affected_requirements": ["REQ-404"],
+        "affected_constraints": ["NFR-002"],
+        "provenance": {
+          "source_revision": "project-brief-r1",
+          "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "locations": ["PROJECT_BRIEF.md:Architecture questions"]
+        }
+      }
+    ],
+    "epic_candidates": []
+  }
+}
