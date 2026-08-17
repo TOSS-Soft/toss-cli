@@ -25,6 +25,14 @@ const BUILD_DECISION_FIELDS=new Set([
 
 const BLOCKING_SEVERITIES=new Set(["P0","P1","P2"]);
 
+export const ADR_STATUS_APPROVAL_MATRIX=Object.freeze({
+  proposed:Object.freeze(["pending"]),
+  accepted:Object.freeze(["approved"]),
+  blocked:Object.freeze(["pending"]),
+  superseded:Object.freeze(["approved"]),
+  rejected:Object.freeze(["rejected"]),
+});
+
 function isPlainObject(value) {
   if (!value || typeof value!=="object" || Array.isArray(value)) return false;
   const prototype=Object.getPrototypeOf(value);
@@ -96,8 +104,27 @@ function sameArtifactReference(reference,artifact) {
     reference.artifact_id===artifact.artifact_id &&
     reference.revision===artifact.revision &&
     reference.content_sha256===artifact.content_sha256 &&
-    (reference.document_type===undefined ||
-      reference.document_type===artifact.document_type);
+    reference.document_type===artifact.document_type;
+}
+
+function sameArtifactIdentity(reference,artifact) {
+  return isPlainObject(reference) &&
+    reference.artifact_id===artifact.artifact_id &&
+    reference.revision===artifact.revision &&
+    reference.document_type===artifact.document_type;
+}
+
+function referenceIdentity(reference) {
+  return [
+    reference.document_type,
+    reference.artifact_id,
+    reference.revision,
+    reference.content_sha256,
+  ].join("\u0000");
+}
+
+function artifactIdentity(artifact) {
+  return referenceIdentity(artifactReference(artifact));
 }
 
 function contentIntegrityFindings(artifact) {
@@ -194,18 +221,87 @@ function assertExactPmSnapshots(pmAnalysis,architecture) {
   }
 }
 
-function requiredInputFindings(artifact,expected,label) {
+function exactInputSetFindings(artifact,expectedInputs) {
   if (!Array.isArray(artifact.inputs)) return [];
-  if (artifact.inputs.some(reference => sameArtifactReference(reference,expected))) return [];
-  const sameIdentity=artifact.inputs.some(reference => isPlainObject(reference) &&
-    reference.artifact_id===expected.artifact_id && reference.revision===expected.revision);
-  return [freezeFinding({
-    type:sameIdentity ? `MISMATCHED_${label}_INPUT` : `MISSING_${label}_INPUT`,
-    path:"/inputs",
-    message:sameIdentity ?
-      `${label} input must resolve to the exact current artifact revision and hash` :
-      `${label} input is required`,
-  })];
+  const findings=[];
+  const seen=new Set();
+  for (const reference of artifact.inputs) {
+    const identity=referenceIdentity(reference);
+    if (seen.has(identity)) {
+      findings.push(freezeFinding({
+        type:"DUPLICATE_ARTIFACT_INPUT",
+        path:"/inputs",
+        message:"Artifact inputs must not repeat an exact reference",
+      }));
+    }
+    seen.add(identity);
+    if (sameArtifactIdentity(reference,artifact)) {
+      findings.push(freezeFinding({
+        type:"SELF_ARTIFACT_INPUT",
+        path:"/inputs",
+        message:"An artifact must not consume itself as an input",
+      }));
+      findings.push(freezeFinding({
+        type:"CYCLIC_ARTIFACT_INPUT",
+        path:"/inputs",
+        message:"An artifact input cycle is forbidden",
+      }));
+    }
+    if (!expectedInputs.some(expected => sameArtifactReference(reference,expected.artifact))) {
+      findings.push(freezeFinding({
+        type:"EXTRA_ARTIFACT_INPUT",
+        path:"/inputs",
+        message:"Artifact inputs must contain only the contractually required inputs",
+      }));
+    }
+  }
+  for (const expected of expectedInputs) {
+    if (artifact.inputs.some(reference => sameArtifactReference(reference,expected.artifact))) {
+      continue;
+    }
+    const sameIdentity=artifact.inputs.some(reference => isPlainObject(reference) &&
+      reference.artifact_id===expected.artifact.artifact_id &&
+      reference.revision===expected.artifact.revision);
+    findings.push(freezeFinding({
+      type:sameIdentity ?
+        `MISMATCHED_${expected.label}_INPUT` : `MISSING_${expected.label}_INPUT`,
+      path:"/inputs",
+      message:sameIdentity ?
+        `${expected.label} input must have the exact identity, revision, hash, and document type` :
+        `${expected.label} input is required`,
+    }));
+  }
+  return findings;
+}
+
+function artifactCycleFindings(artifacts) {
+  const documents=new Map(artifacts.map(artifact => [artifactIdentity(artifact),artifact]));
+  const visiting=new Set();
+  const visited=new Set();
+  const findings=[];
+
+  function visit(artifact) {
+    const identity=artifactIdentity(artifact);
+    if (visiting.has(identity)) {
+      findings.push(freezeFinding({
+        type:"CYCLIC_ARTIFACT_INPUT",
+        path:"/inputs",
+        message:"Artifact input cycle is forbidden",
+      }));
+      return;
+    }
+    if (visited.has(identity)) return;
+    visiting.add(identity);
+    for (const reference of artifact.inputs ?? []) {
+      const target=documents.get(referenceIdentity(reference));
+      if (target) visit(target);
+    }
+    visiting.delete(identity);
+    visited.add(identity);
+  }
+
+  for (const artifact of artifacts) visit(artifact);
+  return findings;
 }
 
 function architectureLinkFindings(pmAnalysis,architecture) {
@@ -255,6 +351,31 @@ function architectureLinkFindings(pmAnalysis,architecture) {
         message:`Architecture references unknown PM architecture question ${question.id}`,
         affected_entities:[question.id],
       }));
+    }
+  }
+  return findings;
+}
+
+function architectureEntityIdentityFindings(architecture) {
+  const findings=[];
+  const seen=new Map();
+  const collections=[
+    ["components",architecture.content.components],
+    ["constraints",architecture.content.constraints],
+    ["unresolved_findings",architecture.content.unresolved_findings],
+  ];
+  for (const [collection,entities] of collections) {
+    for (const [index,entity] of entities.entries()) {
+      if (seen.has(entity.id)) {
+        findings.push(freezeFinding({
+          type:"DUPLICATE_ARCHITECTURE_ENTITY_ID",
+          path:`/content/${collection}/${index}/id`,
+          message:`Architecture entity identity ${entity.id} is duplicated`,
+          affected_entities:[entity.id],
+        }));
+      } else {
+        seen.set(entity.id,`/content/${collection}/${index}/id`);
+      }
     }
   }
   return findings;
@@ -417,6 +538,39 @@ function adrSemanticFindings(pmAnalysis,architecture,adrs) {
   return findings;
 }
 
+function adrStatusApprovalFindings(adrs) {
+  const findings=[];
+  for (const [index,adr] of adrs.entries()) {
+    const {status,approval}=adr.content;
+    if (ADR_STATUS_APPROVAL_MATRIX[status]?.includes(approval.state)) continue;
+    findings.push(freezeFinding({
+      type:"ADR_STATUS_APPROVAL_CONFLICT",
+      path:`/adrs/${index}/content/approval/state`,
+      message:`ADR ${adr.content.id} cannot use approval ${approval.state} while ${status}`,
+      affected_entities:[adr.content.id],
+    }));
+  }
+  return findings;
+}
+
+function adrArtifactIdentityFindings(adrs) {
+  const findings=[];
+  const identities=new Set();
+  for (const [index,adr] of adrs.entries()) {
+    const identity=`${adr.artifact_id}\u0000${adr.revision}`;
+    if (identities.has(identity)) {
+      findings.push(freezeFinding({
+        type:"DUPLICATE_ADR_ARTIFACT_IDENTITY",
+        path:`/adrs/${index}`,
+        message:`ADR artifact identity ${adr.artifact_id}@${adr.revision} is duplicated`,
+        affected_entities:[adr.content.id],
+      }));
+    }
+    identities.add(identity);
+  }
+  return findings;
+}
+
 function resultFor({contractFindings=[],gateFindings=[]}={}) {
   const findings=Object.freeze([...contractFindings,...gateFindings]);
   const valid=contractFindings.length===0;
@@ -542,10 +696,10 @@ export function validateArchitecture({pmAnalysis,architecture,adrs=[]}={}) {
 
   assertExactPmSnapshots(pm,architectureArtifact);
   contractFindings.push(...architectureLinkFindings(pm,architectureArtifact));
-  contractFindings.push(...requiredInputFindings(
+  contractFindings.push(...architectureEntityIdentityFindings(architectureArtifact));
+  contractFindings.push(...exactInputSetFindings(
     architectureArtifact,
-    pm,
-    "PM",
+    [{artifact:pm,label:"PM"}],
   ));
 
   if (!Array.isArray(adrArtifacts)) {
@@ -565,14 +719,22 @@ export function validateArchitecture({pmAnalysis,architecture,adrs=[]}={}) {
   if (contractFindings.length>0) return resultFor({contractFindings,gateFindings});
 
   for (const adr of validAdrs) {
-    contractFindings.push(...requiredInputFindings(adr,pm,"PM"));
-    contractFindings.push(...requiredInputFindings(
+    contractFindings.push(...exactInputSetFindings(
       adr,
-      architectureArtifact,
-      "ARCHITECTURE",
+      [
+        {artifact:pm,label:"PM"},
+        {artifact:architectureArtifact,label:"ARCHITECTURE"},
+      ],
     ));
   }
+  contractFindings.push(...artifactCycleFindings([
+    pm,
+    architectureArtifact,
+    ...validAdrs,
+  ]));
+  contractFindings.push(...adrArtifactIdentityFindings(validAdrs));
   contractFindings.push(...adrSemanticFindings(pm,architectureArtifact,validAdrs));
+  contractFindings.push(...adrStatusApprovalFindings(validAdrs));
   gateFindings.push(...unresolvedFindingGates(architectureArtifact));
   gateFindings.push(...architectureReadinessFindings(
     pm,

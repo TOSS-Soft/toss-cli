@@ -263,3 +263,147 @@ test("producer, exact provenance inputs, and programmatic JSON violations fail c
   assert.equal(result.valid,false);
   assert.equal(result.findings[0].type,"CANONICAL_JSON");
 });
+
+test("ADR status and approval state use one deterministic consistency matrix",() => {
+  const validPairs=[
+    {status:"proposed",approval:"pending",ready:false},
+    {status:"accepted",approval:"approved",ready:true},
+    {status:"blocked",approval:"pending",ready:false},
+    {status:"superseded",approval:"approved",ready:false},
+    {status:"rejected",approval:"rejected",ready:false},
+  ];
+  const allowed=new Set(validPairs.map(pair => `${pair.status}:${pair.approval}`));
+  const statuses=["proposed","accepted","blocked","superseded","rejected"];
+  const approvals=["pending","approved","rejected"];
+
+  for (const pair of validPairs) {
+    const chain=clone(completeChain());
+    chain.adrs[0].content.status=pair.status;
+    chain.adrs[0].content.approval.state=pair.approval;
+    rehash(chain.adrs[0]);
+
+    const result=validateArchitecture(chain);
+
+    assert.equal(result.valid,true,`${pair.status}:${pair.approval}`);
+    assert.equal(
+      result.ready_for_pm_finalization,
+      pair.ready,
+      `${pair.status}:${pair.approval}`,
+    );
+  }
+
+  for (const status of statuses) {
+    for (const approval of approvals) {
+      if (allowed.has(`${status}:${approval}`)) continue;
+      const chain=clone(completeChain());
+      chain.adrs[0].content.status=status;
+      chain.adrs[0].content.approval.state=approval;
+      rehash(chain.adrs[0]);
+
+      const result=validateArchitecture(chain);
+
+      assert.equal(result.valid,false,`${status}:${approval}`);
+      assert.ok(result.findings.some(finding =>
+        finding.type==="ADR_STATUS_APPROVAL_CONFLICT",
+      ),`${status}:${approval}`);
+    }
+  }
+});
+
+test("architecture and ADR artifacts accept only their exact acyclic input sets",() => {
+  const architectureSelfInput=clone(completeChain());
+  architectureSelfInput.architecture.inputs.push(reference(
+    architectureSelfInput.architecture,
+  ));
+  let result=validateArchitecture(architectureSelfInput);
+  assert.equal(result.valid,false);
+  assert.ok(result.findings.some(finding =>
+    finding.type==="SELF_ARTIFACT_INPUT" && finding.path==="/inputs",
+  ));
+  assert.ok(result.findings.some(finding =>
+    finding.type==="CYCLIC_ARTIFACT_INPUT",
+  ));
+
+  const adrSelfInput=clone(completeChain());
+  adrSelfInput.adrs[0].inputs.push(reference(adrSelfInput.adrs[0]));
+  result=validateArchitecture(adrSelfInput);
+  assert.equal(result.valid,false);
+  assert.ok(result.findings.some(finding =>
+    finding.type==="SELF_ARTIFACT_INPUT",
+  ));
+
+  const unrelatedInput=clone(completeChain());
+  unrelatedInput.adrs[0].inputs.push({
+    artifact_id:"UNRELATED-001",
+    revision:1,
+    content_sha256:"f".repeat(64),
+    document_type:"pm-analysis",
+  });
+  result=validateArchitecture(unrelatedInput);
+  assert.equal(result.valid,false);
+  assert.ok(result.findings.some(finding =>
+    finding.type==="EXTRA_ARTIFACT_INPUT",
+  ));
+
+  const duplicateInput=clone(completeChain());
+  duplicateInput.adrs[0].inputs.push(clone(duplicateInput.adrs[0].inputs[0]));
+  result=validateArchitecture(duplicateInput);
+  assert.equal(result.valid,false);
+  assert.ok(result.findings.some(finding =>
+    finding.type==="DUPLICATE_ARTIFACT_INPUT",
+  ));
+
+  const missingDocumentType=clone(completeChain());
+  delete missingDocumentType.architecture.inputs[0].document_type;
+  result=validateArchitecture(missingDocumentType);
+  assert.equal(result.valid,false);
+  assert.ok(result.findings.some(finding =>
+    finding.type==="MISMATCHED_PM_INPUT",
+  ));
+});
+
+test("architecture and ADR identities are globally unique within an architecture contract",() => {
+  const duplicateComponent=clone(completeChain());
+  duplicateComponent.architecture.content.components.push(clone(
+    duplicateComponent.architecture.content.components[0],
+  ));
+  rehash(duplicateComponent.architecture);
+  duplicateComponent.adrs[0].inputs[1]=reference(duplicateComponent.architecture);
+  let result=validateArchitecture(duplicateComponent);
+  assert.equal(result.valid,false);
+  assert.ok(result.findings.some(finding =>
+    finding.type==="DUPLICATE_ARCHITECTURE_ENTITY_ID",
+  ));
+
+  const duplicateConstraint=clone(completeChain());
+  duplicateConstraint.architecture.content.constraints.push(clone(
+    duplicateConstraint.architecture.content.constraints[0],
+  ));
+  rehash(duplicateConstraint.architecture);
+  duplicateConstraint.adrs[0].inputs[1]=reference(duplicateConstraint.architecture);
+  result=validateArchitecture(duplicateConstraint);
+  assert.equal(result.valid,false);
+  assert.ok(result.findings.some(finding =>
+    finding.type==="DUPLICATE_ARCHITECTURE_ENTITY_ID",
+  ));
+
+  const duplicateArtifactIdentity=clone(completeChain());
+  const secondAdr=clone(duplicateArtifactIdentity.adrs[0]);
+  secondAdr.content.id="ADR-002";
+  secondAdr.content.meaning="A second decision stored under the same artifact revision.";
+  rehash(secondAdr);
+  duplicateArtifactIdentity.adrs.push(secondAdr);
+  result=validateArchitecture(duplicateArtifactIdentity);
+  assert.equal(result.valid,false);
+  assert.ok(result.findings.some(finding =>
+    finding.type==="DUPLICATE_ADR_ARTIFACT_IDENTITY",
+  ));
+
+  const duplicateContentIdentity=clone(completeChain());
+  const copiedContentAdr=clone(duplicateContentIdentity.adrs[0]);
+  copiedContentAdr.artifact_id="ADR-ARTIFACT-002";
+  duplicateContentIdentity.adrs.push(copiedContentAdr);
+  result=validateArchitecture(duplicateContentIdentity);
+  assert.equal(result.valid,false);
+  assert.ok(result.findings.some(finding => finding.type==="DUPLICATE_ADR"));
+});
