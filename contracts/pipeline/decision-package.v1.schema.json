@@ -48,7 +48,7 @@
         "record_revision",
         "record_sha256",
         "timestamp",
-        "binding_sha256"
+        "signature"
       ],
       "properties": {
         "verification_kind": {
@@ -63,7 +63,10 @@
         "record_revision": {"type": "integer", "minimum": 1},
         "record_sha256": {"$ref": "#/$defs/sha256"},
         "timestamp": {"type": "string", "format": "rfc3339-date-time"},
-        "binding_sha256": {"$ref": "#/$defs/sha256"}
+        "signature": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9+/]{86}==$"
+        }
       }
     },
     "authority_resolution": {

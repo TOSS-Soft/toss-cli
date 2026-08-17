@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
+import {createPrivateKey, sign as signDetached} from "node:crypto";
 import {readFile} from "node:fs/promises";
 import test from "node:test";
 
 import {canonicalJson, sha256Canonical} from "../src/contracts/acp.js";
 import {validateDocument} from "../src/contracts/validator.js";
 import {
+  authorityAttestationSigningPayload,
   buildDecisionPackage,
   buildDecisionPackageFromPmAnalysis,
   classifyQuestion,
@@ -27,29 +29,33 @@ function authorityAttestation(question,resolution,record={}) {
   const recordId=record.record_id ?? `AUTH-${question.id}`;
   const recordRevision=record.record_revision ?? 1;
   const attestation={
-    verification_kind:a3 ?
+    verification_kind:record.verification_kind ?? (a3 ?
       "A3_VERIFIED_CEO_OR_USER_AUTHORITY" :
-      "A2_ARCHITECT_OR_SPECIALIST_EVIDENCE",
-    actor_id:a3 ? "verified-ceo" : "assigned-architect",
-    actor_role:a3 ? "CEO" : "ARCHITECT",
+      "A2_ARCHITECT_OR_SPECIALIST_EVIDENCE"),
+    actor_id:record.actor_id ?? (a3 ? "verified-ceo" : "assigned-architect"),
+    actor_role:record.actor_role ?? (a3 ? "CEO" : "ARCHITECT"),
     record_id:recordId,
     record_revision:recordRevision,
     record_sha256:record.record_sha256 ?? sha256Canonical({
       record_id:recordId,
       revision:recordRevision,
     }),
-    timestamp:"2026-08-17T12:05:00.000Z",
+    timestamp:record.timestamp ?? "2026-08-17T12:05:00.000Z",
   };
   return {
     ...attestation,
-    binding_sha256:sha256Canonical({
-      source_id:question.id,
-      decision:resolution.decision,
-      rationale:resolution.rationale,
-      authority:resolution.authority,
-      owner:resolution.owner,
-      authority_attestation:attestation,
-    }),
+    signature:signDetached(
+      null,
+      Buffer.from(canonicalJson(authorityAttestationSigningPayload({
+        source_id:question.id,
+        decision:resolution.decision,
+        rationale:resolution.rationale,
+        authority:resolution.authority,
+        owner:resolution.owner,
+        ...attestation,
+      })),"utf8"),
+      record.privateKey ?? TRUSTED_AUTHORITY_PRIVATE_KEY,
+    ).toString("base64"),
   };
 }
 
@@ -64,6 +70,78 @@ function authorityResolution(question,authority,owner) {
   return {
     ...resolution,
     authority_attestation:authorityAttestation(question,resolution),
+  };
+}
+
+const TRUSTED_AUTHORITY_PRIVATE_KEY=createPrivateKey(`-----BEGIN PRIVATE KEY-----
+MC4CAQAwBQYDK2VwBCIEICMMwUatUwxz9nHC1Z8Ycl5we3pAdGkWjX497KGuvT2y
+-----END PRIVATE KEY-----`);
+const UNTRUSTED_AUTHORITY_PRIVATE_KEY=createPrivateKey(`-----BEGIN PRIVATE KEY-----
+MC4CAQAwBQYDK2VwBCIEIL3WhOzOzLGZnMHlDN3MNVEAy0WArQTuw8Ie9aX7qE7M
+-----END PRIVATE KEY-----`);
+const TRUSTED_AUTHORITY_PUBLIC_KEY=`-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEA2EfZW/G5ES5AjZflH3kWHqXYeKTS9/7qQ1QklZtMGzc=
+-----END PUBLIC KEY-----`;
+
+function trustedAuthorityRegistry() {
+  return {
+    actors:[
+      {
+        actor_id:"verified-ceo",
+        actor_role:"CEO",
+        public_key:TRUSTED_AUTHORITY_PUBLIC_KEY,
+        allowed_routes:[{
+          authority:"A3",
+          verification_kind:"A3_VERIFIED_CEO_OR_USER_AUTHORITY",
+        }],
+      },
+      {
+        actor_id:"assigned-architect",
+        actor_role:"ARCHITECT",
+        public_key:TRUSTED_AUTHORITY_PUBLIC_KEY,
+        allowed_routes:[{
+          authority:"A2",
+          verification_kind:"A2_ARCHITECT_OR_SPECIALIST_EVIDENCE",
+        }],
+      },
+    ],
+  };
+}
+
+function signedAuthorityResolution(question,authority,owner,{
+  privateKey=TRUSTED_AUTHORITY_PRIVATE_KEY,
+  record_id=`AUTH-${question.id}`,
+  record_revision=1,
+  record_sha256=sha256Canonical({record_id,record_revision}),
+  actor_id=authority==="A3" ? "verified-ceo" : "assigned-architect",
+  actor_role=authority==="A3" ? "CEO" : "ARCHITECT",
+  verification_kind=authority==="A3" ?
+    "A3_VERIFIED_CEO_OR_USER_AUTHORITY" :
+    "A2_ARCHITECT_OR_SPECIALIST_EVIDENCE",
+  timestamp="2026-08-17T12:05:00.000Z",
+}={}) {
+  const resolution={
+    decision:`${question.id} was resolved by the required authority.`,
+    rationale:"The recorded decision resolves the blocking ambiguity.",
+    authority,
+    owner,
+    provenance:clone(question.provenance),
+  };
+  const attestation={
+    verification_kind,
+    actor_id,
+    actor_role,
+    record_id,
+    record_revision,
+    record_sha256,
+    timestamp,
+  };
+  return {
+    ...resolution,
+    authority_attestation:authorityAttestation(question,resolution,{
+      ...attestation,
+      privateKey,
+    }),
   };
 }
 
@@ -166,11 +244,12 @@ test("resolved P0-P2 decisions do not block a package",async () => {
     severity:"P2",
   };
   p2.authority_resolution=authorityResolution(p2,"A3","USER");
-  const packageResult=buildDecisionPackage([...resolved,p1,p2]);
+  const registry=trustedAuthorityRegistry();
+  const packageResult=buildDecisionPackage([...resolved,p1,p2],registry);
 
   assert.equal(packageResult.gate.can_continue,true);
   assert.deepEqual(packageResult.gate.unresolved_blocking_question_ids,[]);
-  assert.equal(evaluateDecisionGate(packageResult).can_continue,true);
+  assert.equal(evaluateDecisionGate(packageResult,registry).can_continue,true);
 });
 
 test("blocking resolution records require the exact derived authority, owner, and provenance",async () => {
@@ -192,7 +271,7 @@ test("blocking resolution records require the exact derived authority, owner, an
       ...extra,
     };
     question.authority_resolution=authorityResolution(question,authority,owner);
-    const packageResult=buildDecisionPackage([question]);
+    const packageResult=buildDecisionPackage([question],trustedAuthorityRegistry());
     assert.equal(packageResult.gate.can_continue,true,id);
     assert.equal(packageResult.questions[0].authority_resolutions[0].authority,authority,id);
     assert.equal(packageResult.questions[0].authority_resolutions[0].owner,owner,id);
@@ -216,7 +295,10 @@ test("ordinary PM provenance cannot clear a P0 without a verified authority atte
   delete p0.authority_resolution.authority_attestation;
 
   assert.equal(p0.authority_resolution.provenance.agent.identity,"pm-agent");
-  assert.throws(() => buildDecisionPackage([p0]),/authority attestation/i);
+  assert.throws(
+    () => buildDecisionPackage([p0],trustedAuthorityRegistry()),
+    /authority attestation/i,
+  );
 });
 
 test("ordinary A2 specialist resolution cannot clear a P1 without an authority attestation",async () => {
@@ -230,23 +312,32 @@ test("ordinary A2 specialist resolution cannot clear a P1 without an authority a
   p1.authority_resolution=authorityResolution(p1,"A2","ARCHITECT");
   delete p1.authority_resolution.authority_attestation;
 
-  assert.throws(() => buildDecisionPackage([p1]),/authority attestation/i);
+  assert.throws(
+    () => buildDecisionPackage([p1],trustedAuthorityRegistry()),
+    /authority attestation/i,
+  );
 });
 
-test("a tampered authority-attestation binding cannot clear a P0",async () => {
+test("a tampered authority signature cannot clear a P0",async () => {
   const [base]=await fixture("valid/blocking.json");
   const p0={...clone(base),status:"resolved"};
   p0.authority_resolution=authorityResolution(p0,"A3","USER");
   p0.authority_resolution.decision="A tampered authority decision.";
 
-  assert.throws(() => buildDecisionPackage([p0]),/binding/i);
+  assert.throws(
+    () => buildDecisionPackage([p0],trustedAuthorityRegistry()),
+    /signature/i,
+  );
 
   const verified={...clone(base),status:"resolved"};
   verified.authority_resolution=authorityResolution(verified,"A3","USER");
-  const forgedPackage=clone(buildDecisionPackage([verified]));
+  const forgedPackage=clone(buildDecisionPackage([verified],trustedAuthorityRegistry()));
   forgedPackage.questions[0].evidence[0].authority_resolution.decision=
     "A forged retained-evidence decision.";
-  assert.throws(() => evaluateDecisionGate(forgedPackage),/binding/i);
+  assert.throws(
+    () => evaluateDecisionGate(forgedPackage,trustedAuthorityRegistry()),
+    /signature/i,
+  );
 });
 
 test("authority-attestation route profiles reject wrong verification kinds and actor roles",async () => {
@@ -255,12 +346,18 @@ test("authority-attestation route profiles reject wrong verification kinds and a
   wrongKind.authority_resolution=authorityResolution(wrongKind,"A3","USER");
   wrongKind.authority_resolution.authority_attestation.verification_kind=
     "A2_ARCHITECT_OR_SPECIALIST_EVIDENCE";
-  assert.throws(() => buildDecisionPackage([wrongKind]),/route/i);
+  assert.throws(
+    () => buildDecisionPackage([wrongKind],trustedAuthorityRegistry()),
+    /route/i,
+  );
 
   const wrongRole={...clone(base),status:"resolved"};
   wrongRole.authority_resolution=authorityResolution(wrongRole,"A3","USER");
   wrongRole.authority_resolution.authority_attestation.actor_role="ARCHITECT";
-  assert.throws(() => buildDecisionPackage([wrongRole]),/actor role.*route/i);
+  assert.throws(
+    () => buildDecisionPackage([wrongRole],trustedAuthorityRegistry()),
+    /actor role.*route/i,
+  );
 });
 
 test("authority attestations require a non-blank actor and cannot reuse an immutable record",async () => {
@@ -268,33 +365,22 @@ test("authority attestations require a non-blank actor and cannot reuse an immut
   const malformed={...clone(base),status:"resolved"};
   malformed.authority_resolution=authorityResolution(malformed,"A3","USER");
   malformed.authority_resolution.authority_attestation.actor_id="";
-  assert.throws(() => buildDecisionPackage([malformed]),/actor_id/i);
+  assert.throws(
+    () => buildDecisionPackage([malformed],trustedAuthorityRegistry()),
+    /actor_id/i,
+  );
 
   const malformedTimestamp={...clone(base),status:"resolved"};
-  malformedTimestamp.authority_resolution=authorityResolution(
+  malformedTimestamp.authority_resolution=signedAuthorityResolution(
     malformedTimestamp,
     "A3",
     "USER",
+    {timestamp:"not-a-timestamp"},
   );
-  malformedTimestamp.authority_resolution.authority_attestation.timestamp="not-a-timestamp";
-  const attestation=malformedTimestamp.authority_resolution.authority_attestation;
-  attestation.binding_sha256=sha256Canonical({
-    source_id:malformedTimestamp.id,
-    decision:malformedTimestamp.authority_resolution.decision,
-    rationale:malformedTimestamp.authority_resolution.rationale,
-    authority:malformedTimestamp.authority_resolution.authority,
-    owner:malformedTimestamp.authority_resolution.owner,
-    authority_attestation:{
-      verification_kind:attestation.verification_kind,
-      actor_id:attestation.actor_id,
-      actor_role:attestation.actor_role,
-      record_id:attestation.record_id,
-      record_revision:attestation.record_revision,
-      record_sha256:attestation.record_sha256,
-      timestamp:attestation.timestamp,
-    },
-  });
-  assert.throws(() => buildDecisionPackage([malformedTimestamp]),/timestamp/i);
+  assert.throws(
+    () => buildDecisionPackage([malformedTimestamp],trustedAuthorityRegistry()),
+    /timestamp/i,
+  );
 
   const first={...clone(base),status:"resolved"};
   first.authority_resolution=authorityResolution(first,"A3","USER");
@@ -310,7 +396,10 @@ test("authority attestations require a non-blank actor and cannot reuse an immut
     second.authority_resolution,
     record,
   );
-  assert.throws(() => buildDecisionPackage([first,second]),/duplicated/i);
+  assert.throws(
+    () => buildDecisionPackage([first,second],trustedAuthorityRegistry()),
+    /duplicated/i,
+  );
 });
 
 test("retained evidence exactly determines material fields, source identities, and blocking resolution coverage",async () => {
@@ -329,23 +418,33 @@ test("retained evidence exactly determines material fields, source identities, a
     severity:"P1",
   };
   p1.authority_resolution=authorityResolution(p1,"A2","ARCHITECT");
-  const packageResult=buildDecisionPackage([p0,p1]);
+  const registry=trustedAuthorityRegistry();
+  const packageResult=buildDecisionPackage([p0,p1],registry);
   assert.equal(packageResult.gate.status,"CLEAR");
   assert.equal(packageResult.questions[0].authority_resolutions.length,2);
 
   const materialForgery=clone(packageResult);
   materialForgery.questions[0].context="Forged top-level context.";
-  assert.throws(() => evaluateDecisionGate(materialForgery),/canonical.*evidence/i);
+  assert.throws(
+    () => evaluateDecisionGate(materialForgery,registry),
+    /canonical.*evidence/i,
+  );
 
   const sourceIdForgery=clone(packageResult);
   sourceIdForgery.questions[0].source_ids=["Q-RESOLUTION-P0"];
-  assert.throws(() => evaluateDecisionGate(sourceIdForgery),/source ID.*source_ids/i);
+  assert.throws(
+    () => evaluateDecisionGate(sourceIdForgery,registry),
+    /source ID.*source_ids/i,
+  );
 
   const missingResolution=clone(packageResult);
   delete missingResolution.questions[0].evidence.find(evidence =>
     evidence.source_id==="Q-RESOLUTION-P1",
   ).authority_resolution;
-  assert.throws(() => evaluateDecisionGate(missingResolution),/authority_resolution|authority resolution/i);
+  assert.throws(
+    () => evaluateDecisionGate(missingResolution,registry),
+    /authority_resolution|authority resolution/i,
+  );
 });
 
 test("gate evaluation rejects forged canonical routing when retained evidence remains blocking",async () => {
@@ -521,4 +620,183 @@ test("noncanonical values and conflicting duplicate identities fail closed",asyn
     await fixture("valid/blocking.json"),
   ));
   assert.doesNotThrow(() => canonicalJson(canonicalPackage));
+});
+
+test("a self-generated authority hash cannot clear a resolved P0 without a trusted registry",async () => {
+  const [base]=await fixture("valid/blocking.json");
+  const p0={...clone(base),status:"resolved"};
+  p0.authority_resolution=authorityResolution(p0,"A3","USER");
+
+  assert.throws(
+    () => buildDecisionPackage([p0]),
+    /trusted authority registry/i,
+  );
+});
+
+test("a trusted registry verifies signed A3 and A2 authority records",async () => {
+  const [base]=await fixture("valid/blocking.json");
+  const p0={...clone(base),status:"resolved"};
+  p0.authority_resolution=signedAuthorityResolution(p0,"A3","USER");
+  const p1={
+    ...clone(base),
+    id:"Q-SIGNED-P1",
+    meaning:"Record an independently signed architecture decision",
+    question:"Has the architecture decision been signed by the assigned authority?",
+    severity:"P1",
+    status:"resolved",
+  };
+  p1.authority_resolution=signedAuthorityResolution(p1,"A2","ARCHITECT");
+  const registry=trustedAuthorityRegistry();
+
+  const packageResult=buildDecisionPackage([p0,p1],registry);
+  assert.equal(packageResult.gate.status,"CLEAR");
+  assert.equal(evaluateDecisionGate(packageResult,registry).can_continue,true);
+  assert.throws(
+    () => evaluateDecisionGate(packageResult),
+    /trusted authority registry/i,
+  );
+});
+
+test("external authority verification rejects wrong keys, tampering, and closed-registry conflicts",async () => {
+  const [base]=await fixture("valid/blocking.json");
+  const wrongKey={...clone(base),status:"resolved"};
+  wrongKey.authority_resolution=signedAuthorityResolution(
+    wrongKey,
+    "A3",
+    "USER",
+    {privateKey:UNTRUSTED_AUTHORITY_PRIVATE_KEY},
+  );
+  assert.throws(
+    () => buildDecisionPackage([wrongKey],trustedAuthorityRegistry()),
+    /invalid authority signature/i,
+  );
+
+  const tampered={...clone(base),status:"resolved"};
+  tampered.authority_resolution=signedAuthorityResolution(tampered,"A3","USER");
+  tampered.authority_resolution.decision="A different post-signature decision.";
+  assert.throws(
+    () => buildDecisionPackage([tampered],trustedAuthorityRegistry()),
+    /invalid authority signature/i,
+  );
+
+  const conflictingFirst={...clone(base),status:"resolved"};
+  conflictingFirst.authority_resolution=signedAuthorityResolution(
+    conflictingFirst,
+    "A3",
+    "USER",
+    {record_id:"AUTH-CONFLICT",record_revision:2},
+  );
+  const conflictingSecond={
+    ...clone(base),
+    id:"Q-SIGNED-CONFLICT",
+    meaning:"Record a conflicting immutable authority record",
+    question:"Does the immutable authority record conflict?",
+    status:"resolved",
+  };
+  conflictingSecond.authority_resolution=signedAuthorityResolution(
+    conflictingSecond,
+    "A3",
+    "USER",
+    {
+      record_id:"AUTH-CONFLICT",
+      record_revision:2,
+      record_sha256:"b".repeat(64),
+    },
+  );
+  assert.throws(
+    () => buildDecisionPackage(
+      [conflictingFirst,conflictingSecond],
+      trustedAuthorityRegistry(),
+    ),
+    /record.*hash.*conflict/i,
+  );
+});
+
+test("authority attestations only trust closed registry actors and routes",async () => {
+  const [base]=await fixture("valid/blocking.json");
+  const unknownActor={...clone(base),status:"resolved"};
+  unknownActor.authority_resolution=signedAuthorityResolution(
+    unknownActor,
+    "A3",
+    "USER",
+    {actor_id:"unregistered-ceo"},
+  );
+  assert.throws(
+    () => buildDecisionPackage([unknownActor],trustedAuthorityRegistry()),
+    /actor is not trusted/i,
+  );
+
+  const wrongRegistryRole={...clone(base),status:"resolved"};
+  wrongRegistryRole.authority_resolution=signedAuthorityResolution(
+    wrongRegistryRole,
+    "A3",
+    "USER",
+    {actor_id:"verified-ceo",actor_role:"USER"},
+  );
+  assert.throws(
+    () => buildDecisionPackage([wrongRegistryRole],trustedAuthorityRegistry()),
+    /actor role does not match registry/i,
+  );
+
+  const packageKeyInjection={...clone(base),status:"resolved"};
+  packageKeyInjection.authority_resolution=signedAuthorityResolution(
+    packageKeyInjection,
+    "A3",
+    "USER",
+  );
+  packageKeyInjection.authority_resolution.authority_attestation.public_key=
+    TRUSTED_AUTHORITY_PUBLIC_KEY;
+  assert.throws(
+    () => buildDecisionPackage([packageKeyInjection],trustedAuthorityRegistry()),
+    /unsupported field public_key/i,
+  );
+
+  const duplicateActor=trustedAuthorityRegistry();
+  duplicateActor.actors.push(clone(duplicateActor.actors[0]));
+  assert.throws(
+    () => buildDecisionPackage([packageKeyInjection],duplicateActor),
+    /duplicates actor_id/i,
+  );
+
+  const duplicateRoute=trustedAuthorityRegistry();
+  duplicateRoute.actors[0].allowed_routes.push(
+    clone(duplicateRoute.actors[0].allowed_routes[0]),
+  );
+  assert.throws(
+    () => buildDecisionPackage([packageKeyInjection],duplicateRoute),
+    /duplicates allowed route/i,
+  );
+
+  const privateKeyRegistry=trustedAuthorityRegistry();
+  privateKeyRegistry.actors[0].public_key=TRUSTED_AUTHORITY_PRIVATE_KEY
+    .export({format:"pem",type:"pkcs8"})
+    .toString();
+  assert.throws(
+    () => buildDecisionPackage([packageKeyInjection],privateKeyRegistry),
+    /public PEM key/i,
+  );
+});
+
+test("the PM adapter threads external authority trust for resolved PM questions",async () => {
+  const pmAnalysis=await pmAnalysisFixture();
+  const enrichments=await fixture("valid/pm-enrichments.json");
+  const pmQuestion={...pmAnalysis.content.open_questions[0],...enrichments[0]};
+  const resolvedEnrichments=[{
+    ...enrichments[0],
+    status:"resolved",
+    authority_resolution:signedAuthorityResolution(pmQuestion,"A3","USER"),
+  }];
+  const registry=trustedAuthorityRegistry();
+
+  const packageResult=buildDecisionPackageFromPmAnalysis(
+    pmAnalysis,
+    resolvedEnrichments,
+    registry,
+  );
+  assert.equal(packageResult.gate.status,"CLEAR");
+  assert.equal(evaluateDecisionGate(packageResult,registry).can_continue,true);
+  assert.throws(
+    () => buildDecisionPackageFromPmAnalysis(pmAnalysis,resolvedEnrichments),
+    /trusted authority registry/i,
+  );
 });

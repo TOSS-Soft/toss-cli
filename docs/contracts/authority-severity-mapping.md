@@ -34,32 +34,64 @@ records as `authority_resolutions`, keyed by source ID.
 An authority attestation MUST identify the actual `actor_id` and `actor_role`,
 its route-specific `verification_kind`, an immutable authority-record reference
 (`record_id`, positive `record_revision`, and `record_sha256`), an RFC3339
-`timestamp`, and a lowercase `binding_sha256`. The binding digest is the
-SHA-256 of canonical JSON exactly equivalent to:
+`timestamp`, and a canonical base64 Ed25519 `signature`. The signature is
+verified against a separate trusted authority registry; neither an attestation
+nor a decision package may embed or select a public key. The registry is a
+closed canonical-JSON context supplied independently to build and gate
+evaluation, with this shape:
 
 ```json
 {
+  "actors": [
+    {
+      "actor_id": "verified-ceo",
+      "actor_role": "CEO",
+      "public_key": "<Ed25519 PEM public key>",
+      "allowed_routes": [
+        {
+          "authority": "A3",
+          "verification_kind": "A3_VERIFIED_CEO_OR_USER_AUTHORITY"
+        }
+      ]
+    }
+  ]
+}
+```
+
+Actor IDs and allowed routes are unique; unknown fields, duplicate actor IDs,
+duplicate or contradictory routes, malformed keys, and non-Ed25519 keys fail
+closed. The consumer controls this immutable trust anchor. Runtime parsing
+normalizes the PEM and verifies that its key type is Ed25519 before trusting
+it.
+
+The signed payload is the canonical JSON exactly equivalent to:
+
+```json
+{
+  "domain": "toss.decision-package.authority-attestation.v1",
   "source_id": "<source question ID>",
   "decision": "<authority-resolution decision>",
   "rationale": "<authority-resolution rationale>",
   "authority": "<derived authority>",
   "owner": "<derived owner>",
-  "authority_attestation": {
-    "verification_kind": "...",
-    "actor_id": "...",
-    "actor_role": "...",
-    "record_id": "...",
-    "record_revision": 1,
-    "record_sha256": "...",
-    "timestamp": "..."
-  }
+  "verification_kind": "...",
+  "actor_id": "...",
+  "actor_role": "...",
+  "record_id": "...",
+  "record_revision": 1,
+  "record_sha256": "...",
+  "timestamp": "..."
 }
 ```
 
-`binding_sha256` itself is omitted from that payload. Consumers MUST recompute
-the digest and reject a missing, altered, unbound, malformed, or duplicate
-immutable authority record. The same immutable record reference MUST NOT be
-reused for a different source question.
+`authorityAttestationSigningPayload` exposes this deterministic payload shape
+for integrators; the pipeline does not export signing or private-key behavior.
+Both `buildDecisionPackage` and `evaluateDecisionGate` recompute and verify the
+same payload. A missing registry, unknown actor, registry role or route
+mismatch, wrong key, malformed signature, or any signed-field tampering fails
+closed. The record identity is exactly `record_id@record_revision`: a different
+`record_sha256` for that identity is a conflict, and the same exact record may
+not be reused for another source question.
 
 For `P0`, `authority: A3` and `owner: USER` is the explicit representation of
 the required verified authority; the resolution's provenance remains only the
@@ -113,16 +145,18 @@ merged fields before a result can be clear.
 
 ## PM-analysis adapter
 
-`buildDecisionPackageFromPmAnalysis(pmAnalysis, enrichments)` is the direct
-path from a validated `pm-analysis.v1` artifact. It first calls the existing
-`validatePmAnalysis` contract and consumes only `content.open_questions`; it
-does not alter the PM artifact or infer missing decisions. `enrichments` MUST
-contain exactly one closed entry for every PM open-question ID and no unknown
-IDs. Each entry supplies the material `context` and `impact` that
-`pm-analysis.v1` intentionally does not require, plus only the structured
-fields needed for decision routing when applicable: status, authority
-resolution, P1 `business_input_missing`, technical-preference marker,
-P3/P4 reversibility, and dependencies. Missing, duplicate, extra, or
+`buildDecisionPackageFromPmAnalysis(pmAnalysis, enrichments, authorityRegistry)`
+is the direct path from a validated `pm-analysis.v1` artifact. It first calls
+the existing `validatePmAnalysis` contract and consumes only
+`content.open_questions`; it does not alter the PM artifact or infer missing
+decisions. `enrichments` MUST contain exactly one closed entry for every PM
+open-question ID and no unknown IDs. Each entry supplies the material `context`
+and `impact` that `pm-analysis.v1` intentionally does not require, plus only
+the structured fields needed for decision routing when applicable: status,
+authority resolution, P1 `business_input_missing`, technical-preference marker,
+P3/P4 reversibility, and dependencies. If an enrichment resolves a P0–P2
+question, the same separately supplied trusted registry is required and is
+threaded unchanged to package construction. Missing, duplicate, extra, or
 non-canonical enrichment data fails closed.
 
 ## Determinism and safety
@@ -143,4 +177,6 @@ fail closed.
 
 `classifyQuestion`, `buildDecisionPackage`, and `evaluateDecisionGate` accept
 only canonical JSON values, never mutate inputs, return deeply frozen values,
-and perform no persistence, network, terminal, or provider operation.
+and perform no persistence, network, terminal, or provider operation. The
+optional registry argument is required whenever retained evidence resolves a
+P0–P2 item; it remains external trust context rather than package data.

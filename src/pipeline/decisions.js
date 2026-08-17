@@ -1,4 +1,6 @@
-import {canonicalJson, sha256Canonical} from "../contracts/acp.js";
+import {createPublicKey, verify as verifyDetached} from "node:crypto";
+
+import {canonicalJson} from "../contracts/acp.js";
 import {validateDocument} from "../contracts/validator.js";
 import {validatePmAnalysis} from "./pm-analysis.js";
 
@@ -13,6 +15,10 @@ const REVERSIBILITY_RANK=Object.freeze({
   irreversible:2,
 });
 const SHA256_PATTERN=/^[a-f0-9]{64}$/;
+const ED25519_SIGNATURE_PATTERN=/^[A-Za-z0-9+/]{86}==$/;
+const RFC3339_DATE_TIME=/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-](\d{2}):(\d{2}))$/;
+const AUTHORITY_ATTESTATION_SIGNING_DOMAIN=
+  "toss.decision-package.authority-attestation.v1";
 const AUTHORITY_ATTESTATION_ROUTES=Object.freeze({
   A2:Object.freeze({
     verification_kind:"A2_ARCHITECT_OR_SPECIALIST_EVIDENCE",
@@ -23,6 +29,7 @@ const AUTHORITY_ATTESTATION_ROUTES=Object.freeze({
     actor_roles:Object.freeze(["CEO","USER"]),
   }),
 });
+const AUTHORITY_ACTOR_ROLES=new Set(["ARCHITECT","SPECIALIST","CEO","USER"]);
 const INPUT_FIELDS=new Set([
   "id",
   "kind",
@@ -177,32 +184,194 @@ function requiredSha256(value,label) {
   return digest;
 }
 
-function authorityAttestationBinding({
+function isRfc3339DateTime(value) {
+  if (typeof value!=="string") return false;
+  const match=RFC3339_DATE_TIME.exec(value);
+  if (!match) return false;
+  const [
+    ,yearText,monthText,dayText,hourText,minuteText,secondText,
+    offsetHourText,offsetMinuteText,
+  ]=match;
+  const year=Number(yearText);
+  const month=Number(monthText);
+  const day=Number(dayText);
+  const hour=Number(hourText);
+  const minute=Number(minuteText);
+  const second=Number(secondText);
+  const leapYear=year%4===0 && (year%100!==0 || year%400===0);
+  const daysInMonth=month===2 ? (leapYear ? 29 : 28) :
+    [4,6,9,11].includes(month) ? 30 : 31;
+  if (month<1 || month>12 || day<1 || day>daysInMonth ||
+      hour>23 || minute>59 || second>59) {
+    return false;
+  }
+  return offsetHourText===undefined ||
+    (Number(offsetHourText)<=23 && Number(offsetMinuteText)<=59);
+}
+
+function requiredRfc3339DateTime(value,label) {
+  const timestamp=requiredText(value,label);
+  if (!isRfc3339DateTime(timestamp)) {
+    throw new TypeError(`${label} must be an RFC3339 timestamp`);
+  }
+  return timestamp;
+}
+
+function authorityRouteKey(authority,verificationKind) {
+  return canonicalJson({authority,verification_kind:verificationKind});
+}
+
+function rejectUnknownFields(value,allowedFields,label) {
+  for (const field of Object.keys(value)) {
+    if (!allowedFields.includes(field)) {
+      throw new TypeError(`${label} contains unsupported field ${field}`);
+    }
+  }
+}
+
+function canonicalAuthorityRegistry(value) {
+  if (value===undefined) return undefined;
+  let registry;
+  try {
+    registry=canonicalCopy(value);
+  } catch (error) {
+    throw new TypeError(
+      `Trusted authority registry must be canonical JSON: ${
+        error instanceof Error ? error.message : "invalid value"
+      }`,
+      {cause:error},
+    );
+  }
+  if (!isPlainObject(registry)) {
+    throw new TypeError("Trusted authority registry must be a closed plain object");
+  }
+  const registryFields=["actors"];
+  rejectUnknownFields(registry,registryFields,"Trusted authority registry");
+  if (!Object.hasOwn(registry,"actors") || !Array.isArray(registry.actors) ||
+      registry.actors.length===0) {
+    throw new TypeError("Trusted authority registry requires a non-empty actors array");
+  }
+
+  const actors=new Map();
+  for (const [index,rawActor] of registry.actors.entries()) {
+    const label=`Trusted authority registry actor ${index}`;
+    if (!isPlainObject(rawActor)) {
+      throw new TypeError(`${label} must be a closed plain object`);
+    }
+    const actorFields=["actor_id","actor_role","public_key","allowed_routes"];
+    rejectUnknownFields(rawActor,actorFields,label);
+    for (const field of actorFields) {
+      if (!Object.hasOwn(rawActor,field)) {
+        throw new TypeError(`${label} requires ${field}`);
+      }
+    }
+    const actorId=normalizeDisplayText(rawActor.actor_id,`${label} actor_id`);
+    const actorRole=requiredText(rawActor.actor_role,`${label} actor_role`);
+    if (!AUTHORITY_ACTOR_ROLES.has(actorRole)) {
+      throw new TypeError(`${label} actor_role is invalid`);
+    }
+    if (actors.has(actorId)) {
+      throw new TypeError(`Trusted authority registry duplicates actor_id ${actorId}`);
+    }
+    const publicKeyText=requiredText(rawActor.public_key,`${label} public_key`);
+    if (!/^-----BEGIN PUBLIC KEY-----\r?\n[\s\S]+\r?\n-----END PUBLIC KEY-----$/u.test(
+      publicKeyText,
+    )) {
+      throw new TypeError(`${label} public_key must be an Ed25519 public PEM key`);
+    }
+    let publicKey;
+    try {
+      publicKey=createPublicKey(publicKeyText);
+      // Re-export to force parse/normalization before this key becomes trusted.
+      publicKey.export({format:"pem",type:"spki"});
+    } catch (error) {
+      throw new TypeError(`${label} public_key is not a valid public PEM key`,{
+        cause:error,
+      });
+    }
+    if (publicKey.asymmetricKeyType!=="ed25519") {
+      throw new TypeError(`${label} public_key must be an Ed25519 public key`);
+    }
+    if (!Array.isArray(rawActor.allowed_routes) || rawActor.allowed_routes.length===0) {
+      throw new TypeError(`${label} requires a non-empty allowed_routes array`);
+    }
+    const allowedRoutes=new Set();
+    for (const [routeIndex,rawRoute] of rawActor.allowed_routes.entries()) {
+      const routeLabel=`${label} allowed_routes ${routeIndex}`;
+      if (!isPlainObject(rawRoute)) {
+        throw new TypeError(`${routeLabel} must be a closed plain object`);
+      }
+      const routeFields=["authority","verification_kind"];
+      rejectUnknownFields(rawRoute,routeFields,routeLabel);
+      for (const field of routeFields) {
+        if (!Object.hasOwn(rawRoute,field)) {
+          throw new TypeError(`${routeLabel} requires ${field}`);
+        }
+      }
+      const authority=requiredText(rawRoute.authority,`${routeLabel} authority`);
+      const verificationKind=requiredText(
+        rawRoute.verification_kind,
+        `${routeLabel} verification_kind`,
+      );
+      const route=AUTHORITY_ATTESTATION_ROUTES[authority];
+      if (route===undefined || verificationKind!==route.verification_kind ||
+          !route.actor_roles.includes(actorRole)) {
+        throw new TypeError(`${routeLabel} contradicts the actor role or authority route`);
+      }
+      const routeKey=authorityRouteKey(authority,verificationKind);
+      if (allowedRoutes.has(routeKey)) {
+        throw new TypeError(`${label} duplicates allowed route ${authority}`);
+      }
+      allowedRoutes.add(routeKey);
+    }
+    actors.set(actorId,Object.freeze({actor_role:actorRole,public_key:publicKey,allowed_routes:allowedRoutes}));
+  }
+  return actors;
+}
+
+/**
+ * Return the exact, domain-separated canonical payload that an external
+ * authority signs. This helper never signs and never accepts a public key.
+ */
+export function authorityAttestationSigningPayload({
   source_id,
   decision,
   rationale,
   authority,
   owner,
-  authority_attestation,
+  verification_kind,
+  actor_id,
+  actor_role,
+  record_id,
+  record_revision,
+  record_sha256,
+  timestamp,
 }) {
-  const {binding_sha256,...attestationIdentity}=authority_attestation;
-  return {
+  return deepFreeze({
+    domain:AUTHORITY_ATTESTATION_SIGNING_DOMAIN,
     source_id,
     decision,
     rationale,
     authority,
     owner,
-    authority_attestation:attestationIdentity,
-  };
+    verification_kind,
+    actor_id,
+    actor_role,
+    record_id,
+    record_revision,
+    record_sha256,
+    timestamp,
+  });
 }
 
 function parseAuthorityAttestation(value,classification,{
   source_id,
   decision,
   rationale,
-  authority,
-  owner,
-}) {
+},trustedAuthorityRegistry) {
+  if (trustedAuthorityRegistry===undefined) {
+    throw new TypeError(`Question ${source_id} requires a trusted authority registry`);
+  }
   if (!isPlainObject(value)) {
     throw new TypeError(
       `Question ${source_id} requires a closed authority attestation`,
@@ -216,18 +385,18 @@ function parseAuthorityAttestation(value,classification,{
     "record_revision",
     "record_sha256",
     "timestamp",
-    "binding_sha256",
+    "signature",
   ];
   for (const field of requiredFields) {
     if (!Object.hasOwn(value,field)) {
       throw new TypeError(`Question ${source_id} authority attestation requires ${field}`);
     }
   }
-  for (const field of Object.keys(value)) {
-    if (!requiredFields.includes(field)) {
-      throw new TypeError(`Question ${source_id} authority attestation contains unsupported field ${field}`);
-    }
-  }
+  rejectUnknownFields(
+    value,
+    requiredFields,
+    `Question ${source_id} authority attestation`,
+  );
   const route=AUTHORITY_ATTESTATION_ROUTES[classification.authority];
   if (route===undefined) {
     throw new TypeError(
@@ -257,6 +426,17 @@ function parseAuthorityAttestation(value,classification,{
       `Question ${source_id} authority attestation record_revision must be a positive integer`,
     );
   }
+  const signature=requiredText(
+    value.signature,
+    `Question ${source_id} authority attestation signature`,
+  );
+  if (!ED25519_SIGNATURE_PATTERN.test(signature) ||
+      Buffer.from(signature,"base64").length!==64 ||
+      Buffer.from(signature,"base64").toString("base64")!==signature) {
+    throw new TypeError(
+      `Question ${source_id} authority attestation signature must be canonical Ed25519 base64`,
+    );
+  }
   const attestation={
     verification_kind:verificationKind,
     actor_id:normalizeDisplayText(
@@ -273,27 +453,46 @@ function parseAuthorityAttestation(value,classification,{
       value.record_sha256,
       `Question ${source_id} authority attestation record_sha256`,
     ),
-    timestamp:requiredText(
+    timestamp:requiredRfc3339DateTime(
       value.timestamp,
       `Question ${source_id} authority attestation timestamp`,
     ),
-    binding_sha256:requiredSha256(
-      value.binding_sha256,
-      `Question ${source_id} authority attestation binding_sha256`,
-    ),
+    signature,
   };
-  const expected=sha256Canonical(authorityAttestationBinding({
+  const actor=trustedAuthorityRegistry.get(attestation.actor_id);
+  if (actor===undefined) {
+    throw new TypeError(`Question ${source_id} authority actor is not trusted`);
+  }
+  if (actor.actor_role!==attestation.actor_role) {
+    throw new TypeError(`Question ${source_id} authority actor role does not match registry`);
+  }
+  if (!actor.allowed_routes.has(authorityRouteKey(
+    classification.authority,
+    attestation.verification_kind,
+  ))) {
+    throw new TypeError(`Question ${source_id} authority route is not trusted for actor`);
+  }
+  const payload=authorityAttestationSigningPayload({
     source_id,
     decision,
     rationale,
-    authority,
-    owner,
-    authority_attestation:attestation,
-  }));
-  if (attestation.binding_sha256!==expected) {
-    throw new TypeError(
-      `Question ${source_id} authority attestation binding SHA-256 does not match the decision`,
+    authority:classification.authority,
+    owner:classification.owner,
+    ...attestation,
+  });
+  let verified=false;
+  try {
+    verified=verifyDetached(
+      null,
+      Buffer.from(canonicalJson(payload),"utf8"),
+      actor.public_key,
+      Buffer.from(attestation.signature,"base64"),
     );
+  } catch {
+    verified=false;
+  }
+  if (!verified) {
+    throw new TypeError(`Question ${source_id} has an invalid authority signature`);
   }
   return attestation;
 }
@@ -302,7 +501,6 @@ function immutableAuthorityRecordKey(attestation) {
   return canonicalJson({
     record_id:attestation.record_id,
     record_revision:attestation.record_revision,
-    record_sha256:attestation.record_sha256,
   });
 }
 
@@ -313,16 +511,24 @@ function assertUniqueAuthorityAttestations(questions) {
     if (attestation===undefined) continue;
     const key=immutableAuthorityRecordKey(attestation);
     const existing=sourceByRecord.get(key);
-    if (existing!==undefined && existing!==question.id) {
+    if (existing!==undefined && existing.source_id!==question.id) {
+      if (existing.record_sha256!==attestation.record_sha256) {
+        throw new TypeError(
+          `Authority attestation record hash conflicts for ${existing.source_id} and ${question.id}`,
+        );
+      }
       throw new TypeError(
-        `Authority attestation immutable record is duplicated for ${existing} and ${question.id}`,
+        `Authority attestation immutable record is duplicated for ${existing.source_id} and ${question.id}`,
       );
     }
-    sourceByRecord.set(key,question.id);
+    sourceByRecord.set(key,{
+      source_id:question.id,
+      record_sha256:attestation.record_sha256,
+    });
   }
 }
 
-function parseAuthorityResolution(value,classification,required,id) {
+function parseAuthorityResolution(value,classification,required,id,trustedAuthorityRegistry) {
   if (value===undefined) {
     if (required) {
       throw new TypeError(
@@ -376,9 +582,8 @@ function parseAuthorityResolution(value,classification,required,id) {
         source_id:id,
         decision,
         rationale,
-        authority,
-        owner,
       },
+      trustedAuthorityRegistry,
     );
   } else if (value.authority_attestation!==undefined) {
     throw new TypeError(
@@ -499,7 +704,7 @@ function rejectUnknownInputFields(question) {
   }
 }
 
-function analyzeQuestion(question,index) {
+function analyzeQuestion(question,index,trustedAuthorityRegistry) {
   if (!isPlainObject(question)) {
     throw new TypeError(`Question at index ${index} must be a plain object`);
   }
@@ -521,6 +726,7 @@ function analyzeQuestion(question,index) {
     classification,
     BLOCKING_SEVERITIES.has(severity) && status==="resolved",
     id,
+    trustedAuthorityRegistry,
   );
   const result={
     id,
@@ -809,11 +1015,12 @@ function schemaError(result,label) {
   );
 }
 
-function analyzedEvidence(evidence,questionIndex,evidenceIndex) {
+function analyzedEvidence(evidence,questionIndex,evidenceIndex,trustedAuthorityRegistry) {
   const {source_id:sourceId,...sourceQuestion}=evidence;
   return analyzeQuestion(
     {id:sourceId,...sourceQuestion},
     `evidence ${questionIndex}:${evidenceIndex}`,
+    trustedAuthorityRegistry,
   );
 }
 
@@ -825,7 +1032,7 @@ function sortedSourceIds(value,label) {
   return sorted;
 }
 
-function recomputeQuestionsFromEvidence(questions) {
+function recomputeQuestionsFromEvidence(questions,trustedAuthorityRegistry) {
   const groups=[];
   const canonicalSourceIds=new Map();
   const normalizedKeys=new Set();
@@ -853,7 +1060,12 @@ function recomputeQuestionsFromEvidence(questions) {
         throw new TypeError(`Decision package evidence source ID ${sourceId} occurs more than once`);
       }
       canonicalSourceIds.set(sourceId,question.id);
-      const member=analyzedEvidence(evidence,questionIndex,evidenceIndex);
+      const member=analyzedEvidence(
+        evidence,
+        questionIndex,
+        evidenceIndex,
+        trustedAuthorityRegistry,
+      );
       evidenceQuestions.push(member);
       return member;
     });
@@ -884,8 +1096,11 @@ function recomputeQuestionsFromEvidence(questions) {
   );
 }
 
-function assertPackageQuestions(packageValue) {
-  const recomputedQuestions=recomputeQuestionsFromEvidence(packageValue.questions);
+function assertPackageQuestions(packageValue,trustedAuthorityRegistry) {
+  const recomputedQuestions=recomputeQuestionsFromEvidence(
+    packageValue.questions,
+    trustedAuthorityRegistry,
+  );
   if (canonicalJson(packageValue.questions)!==canonicalJson(recomputedQuestions)) {
     throw new TypeError(
       "Decision package canonical questions differ from recomputed evidence",
@@ -894,7 +1109,7 @@ function assertPackageQuestions(packageValue) {
   return recomputedQuestions;
 }
 
-function canonicalPackage(value) {
+function canonicalPackage(value,trustedAuthorityRegistry) {
   let packageValue;
   try {
     packageValue=canonicalCopy(value);
@@ -908,7 +1123,7 @@ function canonicalPackage(value) {
   }
   const shape=validateDocument(packageValue,"decision-package.v1");
   if (!shape.valid) throw schemaError(shape,"Decision package");
-  const recomputedQuestions=assertPackageQuestions(packageValue);
+  const recomputedQuestions=assertPackageQuestions(packageValue,trustedAuthorityRegistry);
   const recomputedGate=recomputeGate(recomputedQuestions);
   if (canonicalJson(packageValue.gate)!==canonicalJson(recomputedGate)) {
     throw new TypeError("Decision package gate differs from recomputed evidence gate");
@@ -916,7 +1131,8 @@ function canonicalPackage(value) {
   return packageValue;
 }
 
-export function buildDecisionPackage(questions) {
+export function buildDecisionPackage(questions,authorityRegistry) {
+  const trustedAuthorityRegistry=canonicalAuthorityRegistry(authorityRegistry);
   let canonicalQuestions;
   try {
     canonicalQuestions=canonicalCopy(questions);
@@ -932,7 +1148,9 @@ export function buildDecisionPackage(questions) {
     throw new TypeError("Decision questions must be an array");
   }
   assertSourceIdentityConsistency(canonicalQuestions);
-  const analyzed=canonicalQuestions.map(analyzeQuestion);
+  const analyzed=canonicalQuestions.map((question,index) =>
+    analyzeQuestion(question,index,trustedAuthorityRegistry),
+  );
   assertUniqueAuthorityAttestations(analyzed);
   const groups=buildGroups(analyzed);
   const idBySource=new Map();
@@ -948,7 +1166,7 @@ export function buildDecisionPackage(questions) {
     questions:ordered,
     gate:recomputeGate(ordered),
   };
-  canonicalPackage(packageValue);
+  canonicalPackage(packageValue,trustedAuthorityRegistry);
   return deepFreeze(packageValue);
 }
 
@@ -1019,7 +1237,11 @@ function canonicalEnrichments(value) {
  * artifact remains unchanged: only caller-supplied material enrichments fill
  * fields that pm-analysis.v1 intentionally does not own.
  */
-export function buildDecisionPackageFromPmAnalysis(pmAnalysis,enrichments) {
+export function buildDecisionPackageFromPmAnalysis(
+  pmAnalysis,
+  enrichments,
+  authorityRegistry,
+) {
   const analysis=canonicalPmAnalysis(pmAnalysis);
   const enrichmentById=canonicalEnrichments(enrichments);
   const pmQuestionIds=new Set();
@@ -1042,13 +1264,17 @@ export function buildDecisionPackageFromPmAnalysis(pmAnalysis,enrichments) {
     }
   }
 
-  return buildDecisionPackage(questions.map(question => ({
-    ...question,
-    ...enrichmentById.get(question.id),
-  })));
+  return buildDecisionPackage(
+    questions.map(question => ({
+      ...question,
+      ...enrichmentById.get(question.id),
+    })),
+    authorityRegistry,
+  );
 }
 
-export function evaluateDecisionGate(packageValue) {
-  const canonical=canonicalPackage(packageValue);
+export function evaluateDecisionGate(packageValue,authorityRegistry) {
+  const trustedAuthorityRegistry=canonicalAuthorityRegistry(authorityRegistry);
+  const canonical=canonicalPackage(packageValue,trustedAuthorityRegistry);
   return deepFreeze(recomputeGate(canonical.questions));
 }
