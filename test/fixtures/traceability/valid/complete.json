@@ -1,0 +1,18 @@
+{
+  "source_requirement_ids": ["REQ-001", "NFR-001", "NFR-002"],
+  "downstream_from_req_001": [
+    "ARCHQ-001",
+    "ADR-001",
+    "EPIC-001",
+    "ISSUE-001",
+    "AC-001"
+  ],
+  "coverage": 1,
+  "business_rule": {
+    "id": "BR-001",
+    "type": "BR",
+    "file": "PROJECT_BRIEF.md",
+    "section": "Business rules",
+    "location": "line 24"
+  }
+}

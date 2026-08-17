@@ -18,6 +18,8 @@ const schemaDefinitions=[
   ["finding.v1","../../contracts/agents/finding.v1.schema.json"],
   ["spec-audit.v1","../../contracts/agents/spec-audit.v1.schema.json"],
   ["decision-package.v1","../../contracts/pipeline/decision-package.v1.schema.json"],
+  ["trace-graph.v1","../../contracts/pipeline/trace-graph.v1.schema.json"],
+  ["trace-result.v1","../../contracts/pipeline/trace-result.v1.schema.json"],
 ];
 
 function loadSchema(path) {

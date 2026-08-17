@@ -1,0 +1,130 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://toss.software/schemas/pipeline/trace-graph.v1.schema.json",
+  "title": "TOSS Trace Graph v1",
+  "description": "A closed deterministic traceability graph derived from exact PM, architecture, ADR, and issue-plan revisions.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "document_type", "input_snapshots", "nodes", "edges"],
+  "properties": {
+    "schema_version": {"const": "trace-graph.v1"},
+    "document_type": {"const": "trace-graph"},
+    "input_snapshots": {"$ref": "#/$defs/input_snapshots"},
+    "nodes": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/node"}
+    },
+    "edges": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/edge"}
+    }
+  },
+  "$defs": {
+    "entity_id": {
+      "type": "string",
+      "pattern": "^(?:REQ|NFR|BR|ARCHQ|ADR|EPIC|ISSUE|AC)-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"
+    },
+    "artifact_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["document_type", "artifact_id", "revision", "content_sha256"],
+      "properties": {
+        "document_type": {"enum": ["pm-analysis", "architecture", "adr", "issue-plan"]},
+        "artifact_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9:._-]*$"},
+        "revision": {"type": "integer", "minimum": 1},
+        "content_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      }
+    },
+    "input_snapshots": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pm_analysis", "architecture", "adrs", "issue_plan"],
+      "properties": {
+        "pm_analysis": {
+          "allOf": [
+            {"$ref": "#/$defs/artifact_reference"},
+            {"type": "object", "properties": {"document_type": {"const": "pm-analysis"}}}
+          ]
+        },
+        "architecture": {
+          "allOf": [
+            {"$ref": "#/$defs/artifact_reference"},
+            {"type": "object", "properties": {"document_type": {"const": "architecture"}}}
+          ]
+        },
+        "adrs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "allOf": [
+              {"$ref": "#/$defs/artifact_reference"},
+              {"type": "object", "properties": {"document_type": {"const": "adr"}}}
+            ]
+          }
+        },
+        "issue_plan": {
+          "allOf": [
+            {"$ref": "#/$defs/artifact_reference"},
+            {"type": "object", "properties": {"document_type": {"const": "issue-plan"}}}
+          ]
+        }
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact", "path"],
+      "properties": {
+        "artifact": {"$ref": "#/$defs/artifact_reference"},
+        "path": {"type": "string", "pattern": "^/"}
+      }
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "type", "kind", "meaning", "provenance", "source"],
+      "properties": {
+        "id": {"$ref": "#/$defs/entity_id"},
+        "type": {"enum": ["REQ", "NFR", "BR", "ARCHQ", "ADR", "EPIC", "ISSUE", "AC"]},
+        "kind": {"type": "string", "minLength": 1},
+        "meaning": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"},
+        "provenance": {"$ref": "https://toss.software/schemas/common/provenance.v1.schema.json"},
+        "source": {"$ref": "#/$defs/source"}
+      },
+      "allOf": [
+        {"if": {"properties": {"type": {"const": "REQ"}}}, "then": {"properties": {"id": {"type": "string", "pattern": "^REQ-"}, "kind": {"const": "functional-requirement"}}}},
+        {"if": {"properties": {"type": {"const": "NFR"}}}, "then": {"properties": {"id": {"type": "string", "pattern": "^NFR-"}, "kind": {"const": "non-functional-requirement"}}}},
+        {"if": {"properties": {"type": {"const": "BR"}}}, "then": {"properties": {"id": {"type": "string", "pattern": "^BR-"}, "kind": {"const": "business-rule"}}}},
+        {"if": {"properties": {"type": {"const": "ARCHQ"}}}, "then": {"properties": {"id": {"type": "string", "pattern": "^ARCHQ-"}, "kind": {"const": "architecture-question"}}}},
+        {"if": {"properties": {"type": {"const": "ADR"}}}, "then": {"properties": {"id": {"type": "string", "pattern": "^ADR-"}, "kind": {"enum": ["architecture-decision", "architecture-decision-record"]}}}},
+        {"if": {"properties": {"type": {"const": "EPIC"}}}, "then": {"properties": {"id": {"type": "string", "pattern": "^EPIC-"}, "kind": {"const": "epic"}}}},
+        {"if": {"properties": {"type": {"const": "ISSUE"}}}, "then": {"properties": {"id": {"type": "string", "pattern": "^ISSUE-"}, "kind": {"const": "issue"}}}},
+        {"if": {"properties": {"type": {"const": "AC"}}}, "then": {"properties": {"id": {"type": "string", "pattern": "^AC-"}, "kind": {"const": "acceptance-criterion"}}}}
+      ]
+    },
+    "edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to", "type", "source"],
+      "properties": {
+        "from": {"$ref": "#/$defs/entity_id"},
+        "to": {"$ref": "#/$defs/entity_id"},
+        "type": {
+          "enum": [
+            "ADDRESSES",
+            "RESOLVED_BY",
+            "AFFECTS",
+            "SCOPES",
+            "SOURCE_REQUIREMENT",
+            "REQUIRES_DECISION",
+            "CONTAINS",
+            "BLOCKS",
+            "OWNS",
+            "VERIFIED_BY"
+          ]
+        },
+        "source": {"$ref": "#/$defs/source"}
+      }
+    }
+  }
+}
