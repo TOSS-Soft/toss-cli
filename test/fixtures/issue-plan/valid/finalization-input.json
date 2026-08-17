@@ -1,0 +1,57 @@
+{
+  "artifact_context": {
+    "artifact_id": "ISSUE-PLAN-001",
+    "revision": 1,
+    "run_id": "run-issue-plan-001",
+    "producer": {"role": "pm-finalization", "identity": "toss-pm-finalization"},
+    "runtime_identity": {"kind": "deterministic", "name": "toss-cli", "version": "2.1.0"},
+    "created_at": "2026-08-17T13:30:00.000Z",
+    "provenance": {
+      "source": {"file": "PROJECT_BRIEF.md", "section": "Issue plan", "location": "line 60"},
+      "source_revision": "project-brief-r1",
+      "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "agent": {"identity": "toss-pm-finalization", "model": "deterministic", "run_id": "run-issue-plan-001"},
+      "timestamp": "2026-08-17T13:30:00.000Z",
+      "confidence": 1
+    },
+    "parents": []
+  },
+  "plan": {
+    "summary": "Deliver a traceable customer support request intake slice.",
+    "epics": [
+      {
+        "id": "EPIC-001",
+        "kind": "epic",
+        "meaning": "Customer support request intake.",
+        "finalization_status": "authoritative",
+        "source_requirements": [{"kind": "requirement", "id": "REQ-001"}]
+      }
+    ],
+    "issues": [
+      {
+        "id": "ISSUE-001",
+        "kind": "issue",
+        "meaning": "Create customer support request intake.",
+        "finalization_status": "authoritative",
+        "atomic_scope": "Implement only the customer request submission boundary and its durable record.",
+        "epic": {"kind": "epic", "id": "EPIC-001"},
+        "source_requirements": [{"kind": "requirement", "id": "REQ-001"}],
+        "acceptance_criteria": [{"kind": "acceptance-criterion", "id": "AC-001"}],
+        "definition_of_done": ["The request submission boundary persists a customer-owned request record and all acceptance criteria pass."],
+        "requires_adr": true,
+        "adr_refs": [{"kind": "adr", "id": "ADR-001"}],
+        "dependencies": []
+      }
+    ],
+    "acceptance_criteria": [
+      {
+        "id": "AC-001",
+        "kind": "acceptance-criterion",
+        "meaning": "A customer can submit a support request with category and description.",
+        "finalization_status": "authoritative",
+        "issue": {"kind": "issue", "id": "ISSUE-001"},
+        "verifies": [{"kind": "requirement", "id": "REQ-001"}]
+      }
+    ]
+  }
+}

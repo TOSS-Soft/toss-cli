@@ -1,0 +1,156 @@
+{
+  "schema_version": "acp.v1",
+  "document_type": "issue-plan",
+  "artifact_id": "ISSUE-PLAN-001",
+  "revision": 1,
+  "run_id": "run-issue-plan-001",
+  "producer": {
+    "identity": "toss-pm-finalization",
+    "role": "pm-finalization"
+  },
+  "runtime_identity": {
+    "kind": "deterministic",
+    "name": "toss-cli",
+    "version": "2.1.0"
+  },
+  "created_at": "2026-08-17T13:30:00.000Z",
+  "provenance": {
+    "agent": {
+      "identity": "toss-pm-finalization",
+      "model": "deterministic",
+      "run_id": "run-issue-plan-001"
+    },
+    "confidence": 1,
+    "source": {
+      "file": "PROJECT_BRIEF.md",
+      "location": "line 60",
+      "section": "Issue plan"
+    },
+    "source_revision": "project-brief-r1",
+    "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "timestamp": "2026-08-17T13:30:00.000Z"
+  },
+  "parents": [],
+  "inputs": [
+    {
+      "document_type": "pm-analysis",
+      "artifact_id": "PM-ANALYSIS-001",
+      "revision": 1,
+      "content_sha256": "f032020534d77e347fe6ddd4687dab434ec58ee7acc327e96596323c6439521c"
+    },
+    {
+      "document_type": "architecture",
+      "artifact_id": "ARCHITECTURE-001",
+      "revision": 1,
+      "content_sha256": "c5f1842e341a90e5eb70d7457bdae2a3d77fbc6005868893bc956d2601d4dade"
+    },
+    {
+      "document_type": "adr",
+      "artifact_id": "ADR-ARTIFACT-001",
+      "revision": 1,
+      "content_sha256": "eb6fd34c80b9c9c57c3fb286f297786e199510f7818fec22471618649ea01b28"
+    }
+  ],
+  "content_sha256": "cbe44dcd5439c53c2dfe12e813b979652f1ec266d1047ab3699209da8524810b",
+  "content": {
+    "acceptance_criteria": [
+      {
+        "finalization_status": "authoritative",
+        "id": "AC-001",
+        "issue": {
+          "id": "ISSUE-001",
+          "kind": "issue"
+        },
+        "kind": "acceptance-criterion",
+        "meaning": "A customer can submit a support request with category and description.",
+        "verifies": [
+          {
+            "id": "REQ-001",
+            "kind": "requirement"
+          }
+        ]
+      }
+    ],
+    "epics": [
+      {
+        "finalization_status": "authoritative",
+        "id": "EPIC-001",
+        "kind": "epic",
+        "meaning": "Customer support request intake.",
+        "source_requirements": [
+          {
+            "id": "REQ-001",
+            "kind": "requirement"
+          }
+        ]
+      }
+    ],
+    "issues": [
+      {
+        "acceptance_criteria": [
+          {
+            "id": "AC-001",
+            "kind": "acceptance-criterion"
+          }
+        ],
+        "adr_refs": [
+          {
+            "id": "ADR-001",
+            "kind": "adr"
+          }
+        ],
+        "atomic_scope": "Implement only the customer request submission boundary and its durable record.",
+        "definition_of_done": [
+          "The request submission boundary persists a customer-owned request record and all acceptance criteria pass."
+        ],
+        "dependencies": [],
+        "epic": {
+          "id": "EPIC-001",
+          "kind": "epic"
+        },
+        "finalization_status": "authoritative",
+        "id": "ISSUE-001",
+        "kind": "issue",
+        "meaning": "Create customer support request intake.",
+        "requires_adr": true,
+        "source_requirements": [
+          {
+            "id": "REQ-001",
+            "kind": "requirement"
+          }
+        ]
+      }
+    ],
+    "summary": "Deliver a traceable customer support request intake slice.",
+    "input_snapshots": {
+      "pm_analysis": {
+        "document_type": "pm-analysis",
+        "artifact_id": "PM-ANALYSIS-001",
+        "revision": 1,
+        "content_sha256": "f032020534d77e347fe6ddd4687dab434ec58ee7acc327e96596323c6439521c"
+      },
+      "architecture": {
+        "document_type": "architecture",
+        "artifact_id": "ARCHITECTURE-001",
+        "revision": 1,
+        "content_sha256": "c5f1842e341a90e5eb70d7457bdae2a3d77fbc6005868893bc956d2601d4dade"
+      },
+      "adrs": [
+        {
+          "document_type": "adr",
+          "artifact_id": "ADR-ARTIFACT-001",
+          "revision": 1,
+          "content_sha256": "eb6fd34c80b9c9c57c3fb286f297786e199510f7818fec22471618649ea01b28"
+        }
+      ]
+    },
+    "coverage": {
+      "must_requirement_policy": "pm-analysis.v1-functional-requirements-are-must",
+      "must_requirements": 1,
+      "covered_must_requirements": 1,
+      "uncovered_must_requirement_ids": [],
+      "ready": true
+    },
+    "status": "ready-for-issues"
+  }
+}
