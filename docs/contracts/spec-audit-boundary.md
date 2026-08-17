@@ -72,6 +72,15 @@ but invalid domain content does not cause accidental metadata synthesis or an
 untyped exception. It produces blocking, owner-routed `SCHEMA_VALIDATION`
 findings inside a schema-valid `spec-audit.v1` artifact.
 
+Schema and content-hash validation form a trust barrier before every semantic
+or cross-document check. If any upstream artifact fails that barrier, the
+auditor does not traverse its domain content or attempt relationship checks.
+It emits a deterministic FAIL artifact from the already validated envelope
+metadata and exact immutable input references, reports only the upstream
+validation findings, and leaves `audited_issue_ids` empty because issue
+content was not trusted. Semantic checks below run only when every upstream
+artifact passes schema and content-hash validation.
+
 ## Deterministic Checks
 
 The audit recomputes relationships rather than trusting summary fields. Its

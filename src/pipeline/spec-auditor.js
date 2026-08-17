@@ -928,22 +928,25 @@ export function auditSpecification(options) {
     ),
   );
 
-  const rawFindings=[
+  const upstreamValidationFindings=[
     ...validationFindings(pm,"pm-analysis.v1","PM"),
     ...validationFindings(architectureArtifact,"architecture.v1","ARCHITECT"),
     ...adrs.flatMap(adr => validationFindings(adr,"adr.v1","ARCHITECT")),
     ...validationFindings(plan,"issue-plan.v1","PM_FINALIZATION"),
+  ];
+  const inputsTrusted=upstreamValidationFindings.length===0;
+  const rawFindings=inputsTrusted ? [
     ...exactInputFindings(pm,architectureArtifact,adrs,plan),
     ...duplicateFindings([
-      {path:"/content/functional_requirements",entities:pm.content?.functional_requirements},
-      {path:"/content/non_functional_requirements",entities:pm.content?.non_functional_requirements},
-      {path:"/content/constraints",entities:pm.content?.constraints},
-      {path:"/content/business_rules",entities:pm.content?.business_rules},
-      {path:"/content/architecture_questions",entities:pm.content?.architecture_questions},
+      {path:"/content/functional_requirements",entities:pm.content.functional_requirements},
+      {path:"/content/non_functional_requirements",entities:pm.content.non_functional_requirements},
+      {path:"/content/constraints",entities:pm.content.constraints},
+      {path:"/content/business_rules",entities:pm.content.business_rules},
+      {path:"/content/architecture_questions",entities:pm.content.architecture_questions},
     ],pm.artifact_id,"PM"),
     ...duplicateFindings([
-      {path:"/content/components",entities:architectureArtifact.content?.components},
-      {path:"/content/constraints",entities:architectureArtifact.content?.constraints},
+      {path:"/content/components",entities:architectureArtifact.content.components},
+      {path:"/content/constraints",entities:architectureArtifact.content.constraints},
       {
         path:"/architecture/adrs",
         entities:adrs.map(adr => adr.content),
@@ -951,16 +954,16 @@ export function auditSpecification(options) {
       },
     ],architectureArtifact.artifact_id,"ARCHITECT"),
     ...duplicateFindings([
-      {path:"/content/epics",entities:plan.content?.epics},
-      {path:"/content/issues",entities:plan.content?.issues},
-      {path:"/content/acceptance_criteria",entities:plan.content?.acceptance_criteria},
+      {path:"/content/epics",entities:plan.content.epics},
+      {path:"/content/issues",entities:plan.content.issues},
+      {path:"/content/acceptance_criteria",entities:plan.content.acceptance_criteria},
     ],plan.artifact_id,"PM_FINALIZATION"),
     ...coverageFindings(pm,plan),
     ...issueAndReferenceFindings(pm,adrs,plan),
     ...dependencyCycleFindings(plan),
     ...adrFindings(architectureArtifact,adrs,plan),
     ...upstreamFindings(pm,architectureArtifact,adrs,plan),
-  ];
+  ] : upstreamValidationFindings;
   const findings=finalizeFindings(rawFindings);
   const blocking=findings.filter(finding => BLOCKING_SEVERITIES.has(
     finding.severity,
@@ -974,13 +977,13 @@ export function auditSpecification(options) {
     ...adrs.map(artifactReference),
     artifactReference(plan),
   ];
+  const auditedIssueIds=inputsTrusted ?
+    [...new Set(plan.content.issues.map(issue => issue.id))].sort() : [];
   const content={
     status,
     ready_for_github:readyForGithub,
     summary:{total:findings.length,blocking,warnings},
-    audited_issue_ids:[...new Set((plan.content?.issues ?? []).map(issue => issue?.id).filter(
-      id => typeof id==="string",
-    ))].sort(),
+    audited_issue_ids:auditedIssueIds,
     findings,
   };
   const runId=`${plan.run_id}:spec-audit`;

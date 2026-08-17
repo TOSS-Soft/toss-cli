@@ -289,7 +289,7 @@ if (typeof specAuditorModule.auditSpecification==="function") {
       [...first.findings].map(finding => finding.id));
   });
 
-  test("dangling references, dependency cycles, and orphan issues are explicit findings",() => {
+  test("valid graph defects stay semantic while schema-invalid orphan issues short-circuit",() => {
     const mutation=fixture("./fixtures/spec-audit/mutation/invalid-links.json");
 
     const dangling=completeGraph();
@@ -315,24 +315,27 @@ if (typeof specAuditorModule.auditSpecification==="function") {
     const orphan=completeGraph();
     delete orphan.issuePlan.content.issues[0].epic;
     rehash(orphan.issuePlan);
-    assert.ok(auditSpecification(orphan).findings.some(finding =>
-      finding.type==="ORPHAN_ISSUE",
+    const orphanResult=auditSpecification(orphan);
+    assert.ok(orphanResult.findings.some(finding =>
+      finding.type==="SCHEMA_VALIDATION" && finding.owner==="PM_FINALIZATION",
     ));
+    assert.equal(orphanResult.findings.some(finding => finding.type==="ORPHAN_ISSUE"),false);
   });
 
-  test("issue completeness failures are owner-routed instead of hidden behind schema errors",() => {
+  test("schema-invalid issue completeness short-circuits with an owner-routed finding",() => {
     const graph=completeGraph();
-    graph.issuePlan.content.issues[0].definition_of_done=[];
+    graph.issuePlan.content.issues[0].adr_refs=[];
     rehash(graph.issuePlan);
 
     const result=auditSpecification(graph);
 
     assert.equal(result.status,"FAIL");
     assert.ok(result.findings.some(finding =>
-      finding.type==="ISSUE_INCOMPLETE" &&
+      finding.type==="SCHEMA_VALIDATION" &&
       finding.owner==="PM_FINALIZATION" &&
-      finding.affected_entities.includes("ISSUE-001"),
+      finding.path==="/content/issues/0/adr_refs",
     ));
+    assert.equal(result.findings.some(finding => finding.type==="ISSUE_INCOMPLETE"),false);
   });
 
   test("programmatic non-JSON inputs are rejected and valid inputs remain unchanged",() => {
@@ -539,5 +542,74 @@ if (typeof specAuditorModule.auditSpecification==="function") {
     assert.equal(validateDocument(result.artifact,"spec-audit.v1").valid,true);
     assert.equal(result.artifact.content.status,result.status);
     assert.equal(result.artifact.content.ready_for_github,result.ready_for_github);
+  });
+
+  test("a non-array issue collection short-circuits semantic traversal",() => {
+    const graph=completeGraph();
+    graph.issuePlan.content.issues="bad";
+    rehash(graph.issuePlan);
+    const before=clone(graph);
+
+    const first=auditSpecification(graph);
+    const second=auditSpecification(graph);
+
+    assert.deepEqual(graph,before);
+    assert.deepEqual(first,second);
+    assert.equal(first.status,"FAIL");
+    assert.equal(first.ready_for_github,false);
+    assert.ok(first.findings.some(finding =>
+      finding.type==="SCHEMA_VALIDATION" &&
+      finding.owner==="PM_FINALIZATION" &&
+      finding.path==="/content/issues" &&
+      finding.evidence[0].artifact_id===graph.issuePlan.artifact_id,
+    ));
+    assert.equal(validateDocument(first.artifact,"spec-audit.v1").valid,true);
+    assertDeepFrozen(first);
+  });
+
+  test("non-array issue acceptance criteria short-circuit semantic traversal",() => {
+    const graph=completeGraph();
+    graph.issuePlan.content.issues[0].acceptance_criteria={};
+    rehash(graph.issuePlan);
+    const before=clone(graph);
+
+    const first=auditSpecification(graph);
+    const second=auditSpecification(graph);
+
+    assert.deepEqual(graph,before);
+    assert.deepEqual(first,second);
+    assert.equal(first.status,"FAIL");
+    assert.equal(first.ready_for_github,false);
+    assert.ok(first.findings.some(finding =>
+      finding.type==="SCHEMA_VALIDATION" &&
+      finding.owner==="PM_FINALIZATION" &&
+      finding.path==="/content/issues/0/acceptance_criteria" &&
+      finding.evidence[0].artifact_id===graph.issuePlan.artifact_id,
+    ));
+    assert.equal(validateDocument(first.artifact,"spec-audit.v1").valid,true);
+    assertDeepFrozen(first);
+  });
+
+  test("non-array issue source requirements short-circuit semantic traversal",() => {
+    const graph=completeGraph();
+    graph.issuePlan.content.issues[0].source_requirements={};
+    rehash(graph.issuePlan);
+    const before=clone(graph);
+
+    const first=auditSpecification(graph);
+    const second=auditSpecification(graph);
+
+    assert.deepEqual(graph,before);
+    assert.deepEqual(first,second);
+    assert.equal(first.status,"FAIL");
+    assert.equal(first.ready_for_github,false);
+    assert.ok(first.findings.some(finding =>
+      finding.type==="SCHEMA_VALIDATION" &&
+      finding.owner==="PM_FINALIZATION" &&
+      finding.path==="/content/issues/0/source_requirements" &&
+      finding.evidence[0].artifact_id===graph.issuePlan.artifact_id,
+    ));
+    assert.equal(validateDocument(first.artifact,"spec-audit.v1").valid,true);
+    assertDeepFrozen(first);
   });
 }
