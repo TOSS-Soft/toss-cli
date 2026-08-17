@@ -1,13 +1,17 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import {
-  chmodSync, copyFileSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync
+  chmodSync, copyFileSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import YAML from 'yaml';
 import { readReleaseMetadata } from './release-metadata.mjs';
 import { prepareGitHubPackage } from './prepare-github-package.mjs';
+
+function canonicalFixturePath(value) {
+  return realpathSync(value);
+}
 
 const workflow = YAML.parse(readFileSync(new URL('../.github/workflows/publish.yml', import.meta.url), 'utf8'));
 const jobs = workflow.jobs ?? {};
@@ -33,6 +37,7 @@ assert.match(JSON.stringify(jobs.publish_github_packages), /prepare-github-packa
 
 const fixture = mkdtempSync(join(tmpdir(), 'toss-release-test-'));
 try {
+  const canonicalFixtureRoot = canonicalFixturePath(fixture);
   const publishFixture = join(fixture, 'publish-shell');
   const fakeBin = join(publishFixture, 'bin');
   const publishArgument = join(publishFixture, 'publish-argument.txt');
@@ -84,7 +89,7 @@ exit 1
   });
   assert.equal(
     readFileSync(publishArgument, 'utf8').trim(),
-    join(publishFixture, 'dist', 'fixture.tgz'),
+    join(canonicalFixtureRoot, 'publish-shell', 'dist', 'fixture.tgz'),
     'npm publish must receive an absolute tarball path'
   );
 
@@ -127,7 +132,7 @@ exit 1
   });
   assert.equal(
     readFileSync(githubPublishArgument, 'utf8').trim(),
-    join(githubPublishFixture, 'github-dist', 'toss-soft-cli-2.0.0.tgz'),
+    join(canonicalFixtureRoot, 'github-publish-shell', 'github-dist', 'toss-soft-cli-2.0.0.tgz'),
     'GitHub Packages publish must receive an absolute tarball path'
   );
 
@@ -178,7 +183,7 @@ exit 1
   });
   assert.equal(
     readFileSync(releaseArgument, 'utf8').trim(),
-    join(releaseFixture, 'dist', 'fixture.tgz'),
+    join(canonicalFixtureRoot, 'release-shell', 'dist', 'fixture.tgz'),
     'GitHub Release must be created outside a git checkout using explicit repository context'
   );
 
