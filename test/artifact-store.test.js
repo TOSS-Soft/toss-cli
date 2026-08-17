@@ -308,6 +308,35 @@ test("first revisions and on-disk later revisions enforce immutable lineage",asy
     /parent.*previous revision/i);
 });
 
+test("later revisions require exactly one immediate-predecessor parent",async (t) => {
+  const {root,store}=await createTestStore(t);
+  const unrelated=await store.append(draft({artifact_id:"ART-UNRELATED-PARENT-001"}));
+  const first=await store.append(draft({artifact_id:"ART-EXACT-PARENT-001"}));
+  const nextDraft=withoutContentHash(draft({
+    artifact_id:first.artifact_id,
+    run_id:"run-exact-parent-002",
+    parents:[reference(first),reference(unrelated)],
+    content:{entities:[{id:"REQ-001",kind:"requirement",meaning:"Exact parent revision"}]},
+  }));
+  await assert.rejects(store.append(nextDraft),/exactly one parent/i);
+
+  const second=await store.append(withoutContentHash(draft({
+    artifact_id:first.artifact_id,
+    run_id:"run-exact-parent-002",
+    parents:[reference(first)],
+    content:{entities:[{id:"REQ-001",kind:"requirement",meaning:"Exact parent revision"}]},
+  })));
+  const path=artifactPath(root,second);
+  const stored=JSON.parse(await readFile(path,"utf8"));
+  stored.parents.push(reference(unrelated));
+  await writeFile(path,JSON.stringify(stored),"utf8");
+
+  await assert.rejects(store.get(reference(second)),/exactly one parent/i);
+  await assert.rejects(store.verify(reference(second)),/exactly one parent/i);
+  await assert.rejects(store.list({artifact_id:second.artifact_id}),
+    /exactly one parent/i);
+});
+
 test("append enforces ACP producer ownership and complete provenance",async (t) => {
   const {store}=await createTestStore(t);
   const emptyProducer=draft({artifact_id:"ART-EMPTY-PRODUCER-001"});

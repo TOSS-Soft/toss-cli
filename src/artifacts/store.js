@@ -694,9 +694,10 @@ export function createArtifactStore({root,now=() => new Date(),randomId=randomUU
       }
       throw error;
     }
-    if (!artifact.parents.some(parent => isExactReference(parent,predecessor.artifact))) {
+    if (artifact.parents.length!==1 ||
+        !isExactReference(artifact.parents[0],predecessor.artifact)) {
       throw new ArtifactIntegrityError(
-        `Revision ${artifact.revision} requires a parent reference to the previous revision`,
+        `Revision ${artifact.revision} requires exactly one parent reference to the previous revision`,
       );
     }
   }
@@ -789,9 +790,10 @@ export function createArtifactStore({root,now=() => new Date(),randomId=randomUU
       }
       return;
     }
-    if (!artifact.parents.some(parent => isExactReference(parent,predecessor))) {
+    if (artifact.parents.length!==1 ||
+        !isExactReference(artifact.parents[0],predecessor)) {
       throw new ArtifactReferenceError(
-        `Revision ${artifact.revision} requires a parent reference to the previous revision`,
+        `Revision ${artifact.revision} requires exactly one parent reference to the previous revision`,
       );
     }
   }
