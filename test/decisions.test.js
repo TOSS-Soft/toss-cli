@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import {readFile} from "node:fs/promises";
 import test from "node:test";
 
-import {canonicalJson} from "../src/contracts/acp.js";
+import {canonicalJson, sha256Canonical} from "../src/contracts/acp.js";
 import {validateDocument} from "../src/contracts/validator.js";
 import {
   buildDecisionPackage,
@@ -22,13 +22,48 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
-function authorityResolution(question,authority,owner) {
+function authorityAttestation(question,resolution,record={}) {
+  const a3=resolution.authority==="A3";
+  const recordId=record.record_id ?? `AUTH-${question.id}`;
+  const recordRevision=record.record_revision ?? 1;
+  const attestation={
+    verification_kind:a3 ?
+      "A3_VERIFIED_CEO_OR_USER_AUTHORITY" :
+      "A2_ARCHITECT_OR_SPECIALIST_EVIDENCE",
+    actor_id:a3 ? "verified-ceo" : "assigned-architect",
+    actor_role:a3 ? "CEO" : "ARCHITECT",
+    record_id:recordId,
+    record_revision:recordRevision,
+    record_sha256:record.record_sha256 ?? sha256Canonical({
+      record_id:recordId,
+      revision:recordRevision,
+    }),
+    timestamp:"2026-08-17T12:05:00.000Z",
+  };
   return {
+    ...attestation,
+    binding_sha256:sha256Canonical({
+      source_id:question.id,
+      decision:resolution.decision,
+      rationale:resolution.rationale,
+      authority:resolution.authority,
+      owner:resolution.owner,
+      authority_attestation:attestation,
+    }),
+  };
+}
+
+function authorityResolution(question,authority,owner) {
+  const resolution={
     decision:`${question.id} was resolved by the required authority.`,
     rationale:"The recorded decision resolves the blocking ambiguity.",
     authority,
     owner,
     provenance:clone(question.provenance),
+  };
+  return {
+    ...resolution,
+    authority_attestation:authorityAttestation(question,resolution),
   };
 }
 
@@ -172,6 +207,110 @@ test("blocking resolution records require the exact derived authority, owner, an
 
   const bare={...clone(base),status:"resolved",resolution:"A claimed resolution"};
   assert.throws(() => buildDecisionPackage([bare]),/unsupported field resolution/i);
+});
+
+test("ordinary PM provenance cannot clear a P0 without a verified authority attestation",async () => {
+  const [base]=await fixture("valid/blocking.json");
+  const p0={...clone(base),status:"resolved"};
+  p0.authority_resolution=authorityResolution(p0,"A3","USER");
+  delete p0.authority_resolution.authority_attestation;
+
+  assert.equal(p0.authority_resolution.provenance.agent.identity,"pm-agent");
+  assert.throws(() => buildDecisionPackage([p0]),/authority attestation/i);
+});
+
+test("ordinary A2 specialist resolution cannot clear a P1 without an authority attestation",async () => {
+  const [base]=await fixture("valid/blocking.json");
+  const p1={
+    ...clone(base),
+    id:"Q-ATTESTATION-P1",
+    severity:"P1",
+    status:"resolved",
+  };
+  p1.authority_resolution=authorityResolution(p1,"A2","ARCHITECT");
+  delete p1.authority_resolution.authority_attestation;
+
+  assert.throws(() => buildDecisionPackage([p1]),/authority attestation/i);
+});
+
+test("a tampered authority-attestation binding cannot clear a P0",async () => {
+  const [base]=await fixture("valid/blocking.json");
+  const p0={...clone(base),status:"resolved"};
+  p0.authority_resolution=authorityResolution(p0,"A3","USER");
+  p0.authority_resolution.decision="A tampered authority decision.";
+
+  assert.throws(() => buildDecisionPackage([p0]),/binding/i);
+
+  const verified={...clone(base),status:"resolved"};
+  verified.authority_resolution=authorityResolution(verified,"A3","USER");
+  const forgedPackage=clone(buildDecisionPackage([verified]));
+  forgedPackage.questions[0].evidence[0].authority_resolution.decision=
+    "A forged retained-evidence decision.";
+  assert.throws(() => evaluateDecisionGate(forgedPackage),/binding/i);
+});
+
+test("authority-attestation route profiles reject wrong verification kinds and actor roles",async () => {
+  const [base]=await fixture("valid/blocking.json");
+  const wrongKind={...clone(base),status:"resolved"};
+  wrongKind.authority_resolution=authorityResolution(wrongKind,"A3","USER");
+  wrongKind.authority_resolution.authority_attestation.verification_kind=
+    "A2_ARCHITECT_OR_SPECIALIST_EVIDENCE";
+  assert.throws(() => buildDecisionPackage([wrongKind]),/route/i);
+
+  const wrongRole={...clone(base),status:"resolved"};
+  wrongRole.authority_resolution=authorityResolution(wrongRole,"A3","USER");
+  wrongRole.authority_resolution.authority_attestation.actor_role="ARCHITECT";
+  assert.throws(() => buildDecisionPackage([wrongRole]),/actor role.*route/i);
+});
+
+test("authority attestations require a non-blank actor and cannot reuse an immutable record",async () => {
+  const [base]=await fixture("valid/blocking.json");
+  const malformed={...clone(base),status:"resolved"};
+  malformed.authority_resolution=authorityResolution(malformed,"A3","USER");
+  malformed.authority_resolution.authority_attestation.actor_id="";
+  assert.throws(() => buildDecisionPackage([malformed]),/actor_id/i);
+
+  const malformedTimestamp={...clone(base),status:"resolved"};
+  malformedTimestamp.authority_resolution=authorityResolution(
+    malformedTimestamp,
+    "A3",
+    "USER",
+  );
+  malformedTimestamp.authority_resolution.authority_attestation.timestamp="not-a-timestamp";
+  const attestation=malformedTimestamp.authority_resolution.authority_attestation;
+  attestation.binding_sha256=sha256Canonical({
+    source_id:malformedTimestamp.id,
+    decision:malformedTimestamp.authority_resolution.decision,
+    rationale:malformedTimestamp.authority_resolution.rationale,
+    authority:malformedTimestamp.authority_resolution.authority,
+    owner:malformedTimestamp.authority_resolution.owner,
+    authority_attestation:{
+      verification_kind:attestation.verification_kind,
+      actor_id:attestation.actor_id,
+      actor_role:attestation.actor_role,
+      record_id:attestation.record_id,
+      record_revision:attestation.record_revision,
+      record_sha256:attestation.record_sha256,
+      timestamp:attestation.timestamp,
+    },
+  });
+  assert.throws(() => buildDecisionPackage([malformedTimestamp]),/timestamp/i);
+
+  const first={...clone(base),status:"resolved"};
+  first.authority_resolution=authorityResolution(first,"A3","USER");
+  const second={
+    ...clone(base),
+    id:"Q-ATTESTATION-DUPLICATE",
+    status:"resolved",
+  };
+  second.authority_resolution=authorityResolution(second,"A3","USER");
+  const record=first.authority_resolution.authority_attestation;
+  second.authority_resolution.authority_attestation=authorityAttestation(
+    second,
+    second.authority_resolution,
+    record,
+  );
+  assert.throws(() => buildDecisionPackage([first,second]),/duplicated/i);
 });
 
 test("retained evidence exactly determines material fields, source identities, and blocking resolution coverage",async () => {

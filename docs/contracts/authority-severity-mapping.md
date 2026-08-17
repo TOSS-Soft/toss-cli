@@ -26,18 +26,56 @@ but `status: resolved` is not a claim that a consumer may trust. Every
 retained source evidence record for a resolved blocking decision MUST carry a
 closed `authority_resolution` record with non-blank `decision` and `rationale`,
 the exact authority and owner derived for that source by `classifyQuestion`,
-and full `provenance.v1` provenance. A package preserves those records as
-`authority_resolutions`, keyed by source ID.
+full `provenance.v1` provenance, and a closed, decision-bound
+`authority_attestation`. Generic provenance records the source trail only; it
+MUST NOT by itself establish an actor's authority. A package preserves those
+records as `authority_resolutions`, keyed by source ID.
+
+An authority attestation MUST identify the actual `actor_id` and `actor_role`,
+its route-specific `verification_kind`, an immutable authority-record reference
+(`record_id`, positive `record_revision`, and `record_sha256`), an RFC3339
+`timestamp`, and a lowercase `binding_sha256`. The binding digest is the
+SHA-256 of canonical JSON exactly equivalent to:
+
+```json
+{
+  "source_id": "<source question ID>",
+  "decision": "<authority-resolution decision>",
+  "rationale": "<authority-resolution rationale>",
+  "authority": "<derived authority>",
+  "owner": "<derived owner>",
+  "authority_attestation": {
+    "verification_kind": "...",
+    "actor_id": "...",
+    "actor_role": "...",
+    "record_id": "...",
+    "record_revision": 1,
+    "record_sha256": "...",
+    "timestamp": "..."
+  }
+}
+```
+
+`binding_sha256` itself is omitted from that payload. Consumers MUST recompute
+the digest and reject a missing, altered, unbound, malformed, or duplicate
+immutable authority record. The same immutable record reference MUST NOT be
+reused for a different source question.
 
 For `P0`, `authority: A3` and `owner: USER` is the explicit representation of
-the required verified authority; the record's provenance is the evidence of
-that verified authority answer. A bare resolution string, a status flag, or a
-different A3 delegate is insufficient. The corresponding exact routes are A2
-`ARCHITECT` for ordinary `P1`, A3 `USER` for `P1` with
-`business_input_missing: true`, and A3 `USER` for `P2`. Missing, mismatched,
-or unprovenanced records fail closed. `P3` and `P4` are never user
-escalations: they remain visible assumptions and may proceed only when their
-evidence fields are complete.
+the required verified authority; the resolution's provenance remains only the
+source trace. Its attestation and immutable authority record establish the
+authority answer. Every A3 route (`P0`, `P1` with
+`business_input_missing: true`, and `P2`) MUST use
+`A3_VERIFIED_CEO_OR_USER_AUTHORITY` and name an actual `CEO` or `USER` actor.
+A bare resolution string, a status flag, ordinary PM provenance, or a different
+A3 delegate is insufficient. The corresponding exact A2 route is
+`ARCHITECT` for ordinary `P1`, whose attestation uses
+`A2_ARCHITECT_OR_SPECIALIST_EVIDENCE` and an `ARCHITECT` or `SPECIALIST` actor;
+A3 `USER` for `P1` with `business_input_missing: true`; and A3 `USER` for
+`P2`. Missing, mismatched, unbound, duplicate, malformed, or unprovenanced
+records fail closed. `P3` and `P4` are never user escalations: they remain
+visible assumptions and may proceed only when their evidence fields are
+complete.
 
 `business_input_missing` is a structured boolean accepted only for `P1`. It is
 the sole route by which a technical preference may be escalated directly to

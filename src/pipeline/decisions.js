@@ -1,4 +1,4 @@
-import {canonicalJson} from "../contracts/acp.js";
+import {canonicalJson, sha256Canonical} from "../contracts/acp.js";
 import {validateDocument} from "../contracts/validator.js";
 import {validatePmAnalysis} from "./pm-analysis.js";
 
@@ -11,6 +11,17 @@ const REVERSIBILITY_RANK=Object.freeze({
   reversible:0,
   "partially-reversible":1,
   irreversible:2,
+});
+const SHA256_PATTERN=/^[a-f0-9]{64}$/;
+const AUTHORITY_ATTESTATION_ROUTES=Object.freeze({
+  A2:Object.freeze({
+    verification_kind:"A2_ARCHITECT_OR_SPECIALIST_EVIDENCE",
+    actor_roles:Object.freeze(["ARCHITECT","SPECIALIST"]),
+  }),
+  A3:Object.freeze({
+    verification_kind:"A3_VERIFIED_CEO_OR_USER_AUTHORITY",
+    actor_roles:Object.freeze(["CEO","USER"]),
+  }),
 });
 const INPUT_FIELDS=new Set([
   "id",
@@ -158,6 +169,159 @@ function parseProvenance(value) {
   return canonicalCopy(value);
 }
 
+function requiredSha256(value,label) {
+  const digest=requiredText(value,label);
+  if (!SHA256_PATTERN.test(digest)) {
+    throw new TypeError(`${label} must be a lowercase SHA-256 digest`);
+  }
+  return digest;
+}
+
+function authorityAttestationBinding({
+  source_id,
+  decision,
+  rationale,
+  authority,
+  owner,
+  authority_attestation,
+}) {
+  const {binding_sha256,...attestationIdentity}=authority_attestation;
+  return {
+    source_id,
+    decision,
+    rationale,
+    authority,
+    owner,
+    authority_attestation:attestationIdentity,
+  };
+}
+
+function parseAuthorityAttestation(value,classification,{
+  source_id,
+  decision,
+  rationale,
+  authority,
+  owner,
+}) {
+  if (!isPlainObject(value)) {
+    throw new TypeError(
+      `Question ${source_id} requires a closed authority attestation`,
+    );
+  }
+  const requiredFields=[
+    "verification_kind",
+    "actor_id",
+    "actor_role",
+    "record_id",
+    "record_revision",
+    "record_sha256",
+    "timestamp",
+    "binding_sha256",
+  ];
+  for (const field of requiredFields) {
+    if (!Object.hasOwn(value,field)) {
+      throw new TypeError(`Question ${source_id} authority attestation requires ${field}`);
+    }
+  }
+  for (const field of Object.keys(value)) {
+    if (!requiredFields.includes(field)) {
+      throw new TypeError(`Question ${source_id} authority attestation contains unsupported field ${field}`);
+    }
+  }
+  const route=AUTHORITY_ATTESTATION_ROUTES[classification.authority];
+  if (route===undefined) {
+    throw new TypeError(
+      `Question ${source_id} authority attestation is only defined for A2 or A3 routes`,
+    );
+  }
+  const verificationKind=requiredText(
+    value.verification_kind,
+    `Question ${source_id} authority attestation verification_kind`,
+  );
+  if (verificationKind!==route.verification_kind) {
+    throw new TypeError(
+      `Question ${source_id} authority attestation verification kind does not match ${classification.authority} route`,
+    );
+  }
+  const actorRole=requiredText(
+    value.actor_role,
+    `Question ${source_id} authority attestation actor_role`,
+  );
+  if (!route.actor_roles.includes(actorRole)) {
+    throw new TypeError(
+      `Question ${source_id} authority attestation actor role does not match ${classification.authority} route`,
+    );
+  }
+  if (!Number.isInteger(value.record_revision) || value.record_revision<1) {
+    throw new TypeError(
+      `Question ${source_id} authority attestation record_revision must be a positive integer`,
+    );
+  }
+  const attestation={
+    verification_kind:verificationKind,
+    actor_id:normalizeDisplayText(
+      value.actor_id,
+      `Question ${source_id} authority attestation actor_id`,
+    ),
+    actor_role:actorRole,
+    record_id:normalizeDisplayText(
+      value.record_id,
+      `Question ${source_id} authority attestation record_id`,
+    ),
+    record_revision:value.record_revision,
+    record_sha256:requiredSha256(
+      value.record_sha256,
+      `Question ${source_id} authority attestation record_sha256`,
+    ),
+    timestamp:requiredText(
+      value.timestamp,
+      `Question ${source_id} authority attestation timestamp`,
+    ),
+    binding_sha256:requiredSha256(
+      value.binding_sha256,
+      `Question ${source_id} authority attestation binding_sha256`,
+    ),
+  };
+  const expected=sha256Canonical(authorityAttestationBinding({
+    source_id,
+    decision,
+    rationale,
+    authority,
+    owner,
+    authority_attestation:attestation,
+  }));
+  if (attestation.binding_sha256!==expected) {
+    throw new TypeError(
+      `Question ${source_id} authority attestation binding SHA-256 does not match the decision`,
+    );
+  }
+  return attestation;
+}
+
+function immutableAuthorityRecordKey(attestation) {
+  return canonicalJson({
+    record_id:attestation.record_id,
+    record_revision:attestation.record_revision,
+    record_sha256:attestation.record_sha256,
+  });
+}
+
+function assertUniqueAuthorityAttestations(questions) {
+  const sourceByRecord=new Map();
+  for (const question of questions) {
+    const attestation=question.authority_resolution?.authority_attestation;
+    if (attestation===undefined) continue;
+    const key=immutableAuthorityRecordKey(attestation);
+    const existing=sourceByRecord.get(key);
+    if (existing!==undefined && existing!==question.id) {
+      throw new TypeError(
+        `Authority attestation immutable record is duplicated for ${existing} and ${question.id}`,
+      );
+    }
+    sourceByRecord.set(key,question.id);
+  }
+}
+
 function parseAuthorityResolution(value,classification,required,id) {
   if (value===undefined) {
     if (required) {
@@ -171,13 +335,14 @@ function parseAuthorityResolution(value,classification,required,id) {
     throw new TypeError(`Question ${id} authority resolution must be a plain object`);
   }
   const requiredFields=["decision","rationale","authority","owner","provenance"];
+  const allowedFields=[...requiredFields,"authority_attestation"];
   for (const field of requiredFields) {
     if (!Object.hasOwn(value,field)) {
       throw new TypeError(`Question ${id} authority resolution requires ${field}`);
     }
   }
   for (const field of Object.keys(value)) {
-    if (!requiredFields.includes(field)) {
+    if (!allowedFields.includes(field)) {
       throw new TypeError(`Question ${id} authority resolution contains unsupported field ${field}`);
     }
   }
@@ -188,13 +353,39 @@ function parseAuthorityResolution(value,classification,required,id) {
       `Question ${id} authority resolution contradicts ${classification.severity} mapping`,
     );
   }
-  return {
-    decision:normalizeDisplayText(value.decision,`Question ${id} authority resolution decision`),
-    rationale:normalizeDisplayText(value.rationale,`Question ${id} authority resolution rationale`),
+  const decision=normalizeDisplayText(
+    value.decision,
+    `Question ${id} authority resolution decision`,
+  );
+  const rationale=normalizeDisplayText(
+    value.rationale,
+    `Question ${id} authority resolution rationale`,
+  );
+  const resolution={
+    decision,
+    rationale,
     authority,
     owner,
     provenance:parseProvenance(value.provenance),
   };
+  if (BLOCKING_SEVERITIES.has(classification.severity)) {
+    resolution.authority_attestation=parseAuthorityAttestation(
+      value.authority_attestation,
+      classification,
+      {
+        source_id:id,
+        decision,
+        rationale,
+        authority,
+        owner,
+      },
+    );
+  } else if (value.authority_attestation!==undefined) {
+    throw new TypeError(
+      `Question ${id} authority attestation is only valid for P0, P1, or P2`,
+    );
+  }
+  return resolution;
 }
 
 function parseReversibility(question,severity) {
@@ -638,6 +829,7 @@ function recomputeQuestionsFromEvidence(questions) {
   const groups=[];
   const canonicalSourceIds=new Map();
   const normalizedKeys=new Set();
+  const evidenceQuestions=[];
 
   for (const [questionIndex,question] of questions.entries()) {
     const sourceIds=sortedSourceIds(
@@ -661,7 +853,9 @@ function recomputeQuestionsFromEvidence(questions) {
         throw new TypeError(`Decision package evidence source ID ${sourceId} occurs more than once`);
       }
       canonicalSourceIds.set(sourceId,question.id);
-      return analyzedEvidence(evidence,questionIndex,evidenceIndex);
+      const member=analyzedEvidence(evidence,questionIndex,evidenceIndex);
+      evidenceQuestions.push(member);
+      return member;
     });
     if (members.length!==sourceIds.length ||
         members.some(member => !sourceIdSet.has(member.id))) {
@@ -677,6 +871,8 @@ function recomputeQuestionsFromEvidence(questions) {
     normalizedKeys.add(key);
     groups.push(members);
   }
+
+  assertUniqueAuthorityAttestations(evidenceQuestions);
 
   const canonicalIdBySource=new Map();
   for (const members of groups) {
@@ -737,6 +933,7 @@ export function buildDecisionPackage(questions) {
   }
   assertSourceIdentityConsistency(canonicalQuestions);
   const analyzed=canonicalQuestions.map(analyzeQuestion);
+  assertUniqueAuthorityAttestations(analyzed);
   const groups=buildGroups(analyzed);
   const idBySource=new Map();
   for (const members of groups.values()) {

@@ -10,6 +10,16 @@
       "rationale": "A release is irreversible without accountable authority.",
       "authority": "A3",
       "owner": "USER",
+      "authority_attestation": {
+        "verification_kind": "A3_VERIFIED_CEO_OR_USER_AUTHORITY",
+        "actor_id": "verified-ceo",
+        "actor_role": "CEO",
+        "record_id": "AUTH-Q-RESOLVED",
+        "record_revision": 1,
+        "record_sha256": "f6331b667a3de033f0338ee6a4a1737bc4e3dc9a17da0eb0d6cb7520f19ceb66",
+        "timestamp": "2026-08-17T12:05:00.000Z",
+        "binding_sha256": "0f17c952c61e9222cfc16ae16f05a3b10d8073d3ff3ada48911c0b306a6ebace"
+      },
       "provenance": {
         "source": {"file": "DECISIONS.md", "section": "Release approval", "location": "line 4"},
         "source_revision": "decision-r1",
