@@ -181,6 +181,16 @@ broader `resumeAnalysis.stale_artifacts` result continues to report every
 downstream artifact in the store whose source differs, including artifacts not
 previously consumed by an event.
 
+Generation source identities are globally unique across the complete verified
+stream: replay retains every earlier `(source_revision, source_sha256)` pair
+and rejects a later boundary that reuses any pair, including `A → B → A`.
+Multiple ordinary events inside one generation retain the same pair and remain
+valid. Although the pure transition function exposes `SOURCE_RESTARTED` so
+persisted events can be reconstructed, effectful `runNextStage` rejects every
+caller-supplied `SOURCE_RESTARTED` event and every caller-supplied
+`source_boundary`, including a boundary field smuggled on another event. Only
+its internally verified changed-source branch can persist the boundary.
+
 Any integrity error from `list` or `verify` fails closed. Resume never falls
 back to raw filesystem scanning and never treats an unverified revision as a
 checkpoint. Source changes do not delete old artifacts; they deterministically

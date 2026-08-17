@@ -208,6 +208,27 @@ function eventArtifact({
   };
 }
 
+async function generatedSourceBoundary() {
+  const oldPm=await validPm();
+  const firstContent=transition("ANALYZING","ANALYSIS_COMPLETED",{
+    ...transitionMetadata(oldPm),
+    artifacts:{pm_analysis:oldPm},
+  });
+  const first=eventArtifact({source:oldPm,inputs:[oldPm],extraContent:firstContent});
+  const store=fakeStore([oldPm,first]);
+  const sourceB={revision:"project-brief-r2",sha256:"b".repeat(64)};
+  const metadataB={
+    ...transitionMetadata(oldPm),
+    source_revision:sourceB.revision,
+    source_sha256:sourceB.sha256,
+    provenance:recordedProvenance(sourceB),
+    state:"ANALYZING",
+    artifacts:{},
+  };
+  const boundary=await runNextStage({...metadataB,store});
+  return {oldPm,first,store,sourceB,metadataB,boundary};
+}
+
 test("explicit transitions reject missing, wrong-type, stale-hash, and wrong-source PM evidence before append",async () => {
   const pm=await validPm();
   const wrongType=(await architectureGraph()).architecture;
@@ -697,6 +718,110 @@ test("tampered or caller-injected source generation boundaries fail closed",asyn
     store:midStreamStore,
   }),/auto.derive|generation|source/i);
   assert.equal(midStreamStore.appends.length,0);
+});
+
+test("effectful orchestration rejects same-source boundary injection and smuggled fields",async () => {
+  const injected=await generatedSourceBoundary();
+  const beforeInjected=clone(await injected.store.list());
+  const beforeAppendCount=injected.store.appends.length;
+  await assert.rejects(runNextStage({
+    ...injected.metadataB,
+    event:"SOURCE_RESTARTED",
+    source_boundary:{
+      previous_source_revision:injected.oldPm.provenance.source_revision,
+      previous_source_sha256:injected.oldPm.provenance.source_sha256,
+      stale_artifacts:[reference(injected.oldPm)],
+    },
+    store:injected.store,
+  }),/caller|auto.derive|source.*boundary|SOURCE_RESTARTED/i);
+  assert.equal(injected.store.appends.length,beforeAppendCount);
+  assert.deepEqual(await injected.store.list(),beforeInjected);
+
+  const smuggled=await generatedSourceBoundary();
+  const pmB=await validPm({
+    sourceRevision:smuggled.sourceB.revision,
+    sourceSha256:smuggled.sourceB.sha256,
+  });
+  await smuggled.store.append(pmB);
+  const beforeSmuggled=clone(await smuggled.store.list());
+  const beforeSmuggledCount=smuggled.store.appends.length;
+  await assert.rejects(runNextStage({
+    ...smuggled.metadataB,
+    event:"ANALYSIS_COMPLETED",
+    artifacts:{pm_analysis:pmB},
+    source_boundary:smuggled.boundary.content.source_boundary,
+    store:smuggled.store,
+  }),/source.*boundary|smuggl|caller/i);
+  assert.equal(smuggled.store.appends.length,beforeSmuggledCount);
+  assert.deepEqual(await smuggled.store.list(),beforeSmuggled);
+});
+
+test("replay rejects A-B-A source reuse while accepting A-B-C and same-source B events",async () => {
+  const reused=await generatedSourceBoundary();
+  const backToAContent=transition("ANALYZING","SOURCE_RESTARTED",{
+    ...transitionMetadata(reused.oldPm),
+    artifacts:{},
+    source_boundary:{
+      previous_source_revision:reused.sourceB.revision,
+      previous_source_sha256:reused.sourceB.sha256,
+      stale_artifacts:[],
+    },
+  });
+  const backToA=eventArtifact({
+    source:reused.oldPm,
+    revision:3,
+    previous_state:"ANALYZING",
+    event:"SOURCE_RESTARTED",
+    state:"ANALYZING",
+    parents:[reused.boundary],
+    extraContent:backToAContent,
+  });
+  assert.equal(validateDocument(backToA,"transition-event.v1").valid,true);
+  await assert.rejects(resumeAnalysis(fakeStore([
+    reused.oldPm,
+    reused.first,
+    reused.boundary,
+    backToA,
+  ]),{
+    analysis_id:reused.first.artifact_id,
+    source_revision:reused.oldPm.provenance.source_revision,
+    source_sha256:reused.oldPm.provenance.source_sha256,
+  }),/generation|reuse|source identity/i);
+
+  const advancing=await generatedSourceBoundary();
+  const pmB=await validPm({
+    sourceRevision:advancing.sourceB.revision,
+    sourceSha256:advancing.sourceB.sha256,
+  });
+  await advancing.store.append(pmB);
+  const sameSourceEvent=await runNextStage({
+    ...advancing.metadataB,
+    event:"ANALYSIS_COMPLETED",
+    artifacts:{pm_analysis:pmB},
+    store:advancing.store,
+  });
+  assert.equal(sameSourceEvent.revision,3);
+  assert.equal(sameSourceEvent.content.state,"ARCHITECTURE_PENDING");
+
+  const sourceC={revision:"project-brief-r3",sha256:"c".repeat(64)};
+  const boundaryC=await runNextStage({
+    ...advancing.metadataB,
+    source_revision:sourceC.revision,
+    source_sha256:sourceC.sha256,
+    provenance:recordedProvenance(sourceC),
+    state:"ANALYZING",
+    artifacts:{},
+    store:advancing.store,
+  });
+  assert.equal(boundaryC.revision,4);
+  assert.equal(boundaryC.content.event,"SOURCE_RESTARTED");
+  const resumedC=await resumeAnalysis(advancing.store,{
+    analysis_id:advancing.first.artifact_id,
+    source_revision:sourceC.revision,
+    source_sha256:sourceC.sha256,
+  });
+  assert.equal(resumedC.state,"ANALYZING");
+  assert.equal(resumedC.revision,4);
 });
 
 test("review fixtures remain canonical and independently derived",async () => {

@@ -133,6 +133,7 @@ async function historicalStaleReferences(store,events,source) {
 async function verifyTransitionChain(store,transitions) {
   const ordered=[...transitions].sort((left,right) => left.revision-right.revision);
   const verified=[];
+  const generationSources=new Set();
   for (const [index,envelope] of ordered.entries()) {
     if (envelope.revision!==index+1) {
       throw new TypeError("Transition revision chain must be contiguous and begin at revision 1");
@@ -165,10 +166,18 @@ async function verifyTransitionChain(store,transitions) {
     const sourceChanged=previous!==undefined &&
       (current.content.source_revision!==previous.content.source_revision ||
        current.content.source_sha256!==previous.content.source_sha256);
+    const sourceIdentity=canonicalJson({
+      source_revision:current.content.source_revision,
+      source_sha256:current.content.source_sha256,
+    });
     if (previous===undefined && current.content.event==="SOURCE_RESTARTED") {
       throw new TypeError("A source generation boundary requires a verified predecessor");
     }
+    if (previous===undefined) generationSources.add(sourceIdentity);
     if (sourceChanged) {
+      if (generationSources.has(sourceIdentity)) {
+        throw new TypeError("A source generation cannot reuse an earlier source identity");
+      }
       if (current.content.previous_state!=="ANALYZING" ||
           current.content.event!=="SOURCE_RESTARTED" ||
           current.content.state!=="ANALYZING") {
@@ -186,6 +195,7 @@ async function verifyTransitionChain(store,transitions) {
           !sameReference(current.inputs,expectedStale)) {
         throw new TypeError("Source generation boundary has a missing or stale relationship");
       }
+      generationSources.add(sourceIdentity);
     } else {
       if (current.content.event==="SOURCE_RESTARTED" ||
           current.content.source_boundary!==undefined) {
@@ -219,7 +229,8 @@ async function verifyTransitionChain(store,transitions) {
     const reconstructed=transition(current.content.previous_state,current.content.event,{
       source_revision:current.content.source_revision,
       source_sha256:current.content.source_sha256,
-      artifacts:artifactsForTransition(inputArtifacts,current.content.decision_package),
+      artifacts:current.content.event==="SOURCE_RESTARTED" ? {} :
+        artifactsForTransition(inputArtifacts,current.content.decision_package),
       next_action:current.content.next_action,
       failure:current.content.failure,
       resume_state:current.content.resume_state,
@@ -395,6 +406,11 @@ export async function runNextStage(context={}) {
   assertStore(context.store);
   if (typeof context.store.append!=="function") {
     throw new TypeError("runNextStage requires the public store append method");
+  }
+  if (context.event==="SOURCE_RESTARTED" || context.source_boundary!==undefined) {
+    throw new TypeError(
+      "SOURCE_RESTARTED and source_boundary are orchestrator-derived and cannot be caller supplied",
+    );
   }
 
   const analysisId=typeof context.analysis_id==="string" &&
