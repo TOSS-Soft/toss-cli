@@ -892,6 +892,7 @@ function help() {
 Usage:
   toss init [project-brief.yaml]
   toss create <project-brief.yaml>
+  toss trace <ENTITY-ID> [--json]
   toss "Project Name" [options]
 
 Recommended:
@@ -904,7 +905,7 @@ Global package:
 `);
 }
 
-function main() {
+async function main() {
   const args=process.argv.slice(2);
   if (!args.length || args[0]==="--help" || args[0]==="-h") return help();
   if (args[0]==="--version" || args[0]==="-v") return console.log(VERSION);
@@ -951,6 +952,24 @@ function main() {
     return createFromConfig(a,data);
   }
 
+  if (args[0]==="trace") {
+    const [
+      {createArtifactStore},
+      {runTraceCommand},
+      {renderTraceHuman,renderTraceJson},
+    ]=await Promise.all([
+      import("./artifacts/store.js"),
+      import("./commands/trace.js"),
+      import("./output/trace.js"),
+    ]);
+    const command=await runTraceCommand(args.slice(1),{
+      artifactStore:createArtifactStore({root:process.cwd()}),
+    });
+    console.log(command.format==="json" ?
+      renderTraceJson(command.result) : renderTraceHuman(command.result));
+    return;
+  }
+
   return createFromConfig({
     ...parseLegacy(args),
     governanceProfiles:{core:true,delivery:false},
@@ -958,4 +977,12 @@ function main() {
   },null);
 }
 
-main();
+try {
+  await main();
+} catch (error) {
+  const args=process.argv.slice(2);
+  if (args[0]!=="trace") throw error;
+  const {renderTraceError}=await import("./output/trace.js");
+  console.error(renderTraceError(error,{json:args.includes("--json")}));
+  process.exitCode=1;
+}

@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://toss.software/schemas/pipeline/trace-result.v1.schema.json",
+  "title": "TOSS Trace Result v1",
+  "description": "A closed raw machine result for one deterministic trace query. It is intentionally not command-result.v1.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "document_type",
+    "entity",
+    "upstream",
+    "downstream",
+    "requirement_coverage"
+  ],
+  "properties": {
+    "schema_version": {"const": "trace-result.v1"},
+    "document_type": {"const": "trace-result"},
+    "entity": {"$ref": "https://toss.software/schemas/pipeline/trace-graph.v1.schema.json#/$defs/node"},
+    "upstream": {
+      "type": "array",
+      "items": {"$ref": "https://toss.software/schemas/pipeline/trace-graph.v1.schema.json#/$defs/node"}
+    },
+    "downstream": {
+      "type": "array",
+      "items": {"$ref": "https://toss.software/schemas/pipeline/trace-graph.v1.schema.json#/$defs/node"}
+    },
+    "requirement_coverage": {
+      "description": "Issue-owned AC coverage for REQ and NFR nodes. BR remains a visible provenance root in v1 but is excluded until an upstream contract version permits BR issue/AC references.",
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    }
+  }
+}
