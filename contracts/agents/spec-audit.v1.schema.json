@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://toss.software/schemas/agents/spec-audit.v1.schema.json",
+  "title": "TOSS Specification Audit v1",
+  "description": "A closed ACP artifact containing the deterministic, read-only audit of an exact PM, architecture, ADR, and issue-plan graph.",
+  "allOf": [
+    {
+      "$ref": "https://toss.software/schemas/common/artifact-envelope.v1.schema.json"
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {"const": "acp.v1"},
+        "document_type": {"const": "spec-audit"},
+        "producer": {
+          "type": "object",
+          "properties": {
+            "role": {"const": "spec-auditor"}
+          }
+        },
+        "content": {"$ref": "#/$defs/content"}
+      }
+    }
+  ],
+  "$defs": {
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "blocking", "warnings"],
+      "properties": {
+        "total": {"type": "integer", "minimum": 0},
+        "blocking": {"type": "integer", "minimum": 0},
+        "warnings": {"type": "integer", "minimum": 0}
+      }
+    },
+    "content": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "ready_for_github",
+        "summary",
+        "audited_issue_ids",
+        "findings"
+      ],
+      "properties": {
+        "status": {"enum": ["PASS", "WARN", "FAIL"]},
+        "ready_for_github": {"type": "boolean"},
+        "summary": {"$ref": "#/$defs/summary"},
+        "audited_issue_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^ISSUE-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"
+          }
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "$ref": "https://toss.software/schemas/agents/finding.v1.schema.json"
+          }
+        }
+      }
+    }
+  }
+}

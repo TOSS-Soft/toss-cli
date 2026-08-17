@@ -1,0 +1,57 @@
+{
+  "schema_version": "acp.v1",
+  "document_type": "spec-audit",
+  "artifact_id": "spec-audit:ISSUE-PLAN-001",
+  "revision": 1,
+  "run_id": "run-issue-plan-001:spec-audit",
+  "producer": {"role": "spec-auditor", "identity": "toss-spec-auditor"},
+  "runtime_identity": {"kind": "deterministic", "name": "toss-cli", "version": "2.1.0"},
+  "created_at": "2026-08-17T13:30:00.000Z",
+  "provenance": {
+    "agent": {
+      "identity": "toss-spec-auditor",
+      "model": "deterministic",
+      "run_id": "run-issue-plan-001:spec-audit"
+    },
+    "confidence": 1,
+    "source": {"file": "PROJECT_BRIEF.md", "location": "line 60", "section": "Issue plan"},
+    "source_revision": "project-brief-r1",
+    "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "timestamp": "2026-08-17T13:30:00.000Z"
+  },
+  "parents": [],
+  "inputs": [
+    {
+      "document_type": "pm-analysis",
+      "artifact_id": "PM-ANALYSIS-001",
+      "revision": 1,
+      "content_sha256": "f032020534d77e347fe6ddd4687dab434ec58ee7acc327e96596323c6439521c"
+    },
+    {
+      "document_type": "architecture",
+      "artifact_id": "ARCHITECTURE-001",
+      "revision": 1,
+      "content_sha256": "c5f1842e341a90e5eb70d7457bdae2a3d77fbc6005868893bc956d2601d4dade"
+    },
+    {
+      "document_type": "adr",
+      "artifact_id": "ADR-ARTIFACT-001",
+      "revision": 1,
+      "content_sha256": "eb6fd34c80b9c9c57c3fb286f297786e199510f7818fec22471618649ea01b28"
+    },
+    {
+      "document_type": "issue-plan",
+      "artifact_id": "ISSUE-PLAN-001",
+      "revision": 1,
+      "content_sha256": "f0ed6f909811da0bd7d52d8f33caa613bbdaeb3c9e187e5b3be76e3af412328f"
+    }
+  ],
+  "content_sha256": "9054e7ee08058470296c4378e32377479d2cd1106b45c1e44c0e5ff5469cdf03",
+  "content": {
+    "status": "PASS",
+    "ready_for_github": true,
+    "summary": {"total": 0, "blocking": 0, "warnings": 0},
+    "audited_issue_ids": ["ISSUE-001"],
+    "findings": []
+  }
+}
