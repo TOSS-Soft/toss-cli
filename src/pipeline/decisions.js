@@ -229,6 +229,17 @@ function rejectUnknownFields(value,allowedFields,label) {
   }
 }
 
+function canonicalizePublicPemInput(value,label) {
+  if (typeof value!=="string" || value.trim().length===0) {
+    throw new TypeError(`${label} must be a non-blank string`);
+  }
+  if (value.replace(/\r\n/gu,"").includes("\r")) {
+    throw new TypeError(`${label} must use LF or CRLF line endings`);
+  }
+  const canonical=value.replace(/\r\n/gu,"\n");
+  return canonical.endsWith("\n") ? canonical : `${canonical}\n`;
+}
+
 function canonicalAuthorityRegistry(value) {
   if (value===undefined) return undefined;
   let registry;
@@ -273,17 +284,15 @@ function canonicalAuthorityRegistry(value) {
     if (actors.has(actorId)) {
       throw new TypeError(`Trusted authority registry duplicates actor_id ${actorId}`);
     }
-    const publicKeyText=requiredText(rawActor.public_key,`${label} public_key`);
-    if (!/^-----BEGIN PUBLIC KEY-----\r?\n[\s\S]+\r?\n-----END PUBLIC KEY-----$/u.test(
-      publicKeyText,
-    )) {
-      throw new TypeError(`${label} public_key must be an Ed25519 public PEM key`);
-    }
+    const publicKeyText=canonicalizePublicPemInput(
+      rawActor.public_key,
+      `${label} public_key`,
+    );
     let publicKey;
+    let normalizedPublicKey;
     try {
       publicKey=createPublicKey(publicKeyText);
-      // Re-export to force parse/normalization before this key becomes trusted.
-      publicKey.export({format:"pem",type:"spki"});
+      normalizedPublicKey=publicKey.export({format:"pem",type:"spki"}).toString();
     } catch (error) {
       throw new TypeError(`${label} public_key is not a valid public PEM key`,{
         cause:error,
@@ -291,6 +300,11 @@ function canonicalAuthorityRegistry(value) {
     }
     if (publicKey.asymmetricKeyType!=="ed25519") {
       throw new TypeError(`${label} public_key must be an Ed25519 public key`);
+    }
+    if (publicKeyText!==normalizedPublicKey) {
+      throw new TypeError(
+        `${label} public_key must contain exactly one canonical Ed25519 SPKI public PEM block`,
+      );
     }
     if (!Array.isArray(rawActor.allowed_routes) || rawActor.allowed_routes.length===0) {
       throw new TypeError(`${label} requires a non-empty allowed_routes array`);

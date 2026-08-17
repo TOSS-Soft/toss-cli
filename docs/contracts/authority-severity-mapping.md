@@ -61,8 +61,12 @@ evaluation, with this shape:
 Actor IDs and allowed routes are unique; unknown fields, duplicate actor IDs,
 duplicate or contradictory routes, malformed keys, and non-Ed25519 keys fail
 closed. The consumer controls this immutable trust anchor. Runtime parsing
-normalizes the PEM and verifies that its key type is Ed25519 before trusting
-it.
+normalizes LF/CRLF line endings and allows at most one trailing newline. It
+then parses and re-exports SPKI PEM, and trusts the key only when the
+canonicalized input exactly equals that one exported Ed25519 `PUBLIC KEY`
+block. Leading or trailing junk, concatenated keys, a second certificate or
+key block, duplicate PEM delimiters, private PEM, and non-SPKI PEM therefore
+fail closed rather than relying on a parser's choice of a first block.
 
 The signed payload is the canonical JSON exactly equivalent to:
 

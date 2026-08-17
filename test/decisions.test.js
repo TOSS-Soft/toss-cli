@@ -773,7 +773,42 @@ test("authority attestations only trust closed registry actors and routes",async
     .toString();
   assert.throws(
     () => buildDecisionPackage([packageKeyInjection],privateKeyRegistry),
-    /public PEM key/i,
+    /public.*PEM/i,
+  );
+});
+
+test("a trusted registry rejects ambiguous public-key bundles",async () => {
+  const [base]=await fixture("valid/blocking.json");
+  const p0={...clone(base),status:"resolved"};
+  p0.authority_resolution=signedAuthorityResolution(p0,"A3","USER");
+  const bundledRegistry=trustedAuthorityRegistry();
+  bundledRegistry.actors[0].public_key=
+    `${TRUSTED_AUTHORITY_PUBLIC_KEY}\n${TRUSTED_AUTHORITY_PUBLIC_KEY}`;
+
+  assert.throws(
+    () => buildDecisionPackage([p0],bundledRegistry),
+    /exactly one canonical Ed25519 SPKI public PEM block/i,
+  );
+  const validPackage=buildDecisionPackage([p0],trustedAuthorityRegistry());
+  assert.throws(
+    () => evaluateDecisionGate(validPackage,bundledRegistry),
+    /exactly one canonical Ed25519 SPKI public PEM block/i,
+  );
+
+  const trailingNewlineRegistry=trustedAuthorityRegistry();
+  trailingNewlineRegistry.actors[0].public_key=
+    `${TRUSTED_AUTHORITY_PUBLIC_KEY}\n`;
+  assert.equal(
+    buildDecisionPackage([p0],trailingNewlineRegistry).gate.status,
+    "CLEAR",
+  );
+
+  const trailingJunkRegistry=trustedAuthorityRegistry();
+  trailingJunkRegistry.actors[0].public_key=
+    `${TRUSTED_AUTHORITY_PUBLIC_KEY}\ntrailing-junk`;
+  assert.throws(
+    () => buildDecisionPackage([p0],trailingJunkRegistry),
+    /exactly one canonical Ed25519 SPKI public PEM block/i,
   );
 });
 
