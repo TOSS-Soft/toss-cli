@@ -16,6 +16,13 @@ const RULES=JSON.parse(fs.readFileSync(new URL(
 ),"utf8"));
 const RULE_IDS=Object.freeze(RULES.rules.map(rule => rule.id));
 const RULE_BY_ID=new Map(RULES.rules.map(rule => [rule.id,rule]));
+const DECISION_RULE_ID="PDOR-040-BLOCKING-DECISIONS";
+const DECISION_POLICY=RULE_BY_ID.get(DECISION_RULE_ID)?.policy;
+const SUPPLIED_PACKAGE_REQUIREMENTS=Object.freeze([
+  "external-authority-verification",
+  "exact-cover-all-pm-questions",
+  "exact-retained-pm-fields",
+]);
 const ALLOWED_AGGREGATE_KEYS=Object.freeze([
   "analysisState",
   "architecture",
@@ -28,8 +35,8 @@ const ALLOWED_AGGREGATE_KEYS=Object.freeze([
 const REQUIRED_AGGREGATE_KEYS=ALLOWED_AGGREGATE_KEYS.filter(
   key => key!=="decisionPackage",
 );
-const BLOCKING_SEVERITIES=new Set(["P0","P1","P2"]);
-const ASSUMPTION_SEVERITIES=new Set(["P3","P4"]);
+const BLOCKING_SEVERITIES=new Set(DECISION_POLICY?.blocking_severities ?? []);
+const ASSUMPTION_SEVERITIES=new Set(DECISION_POLICY?.warning_severities ?? []);
 const SHA256_PATTERN=/^[a-f0-9]{64}$/;
 const PM_QUESTION_FIELDS=Object.freeze([
   "meaning",
@@ -43,11 +50,33 @@ const PM_QUESTION_FIELDS=Object.freeze([
   "provenance",
 ]);
 
-if (RULES.schema_version!=="pdor-rules.v1" ||
+const RULES_ARE_CLOSED=RULES.rules.every(rule => canonicalJson(Object.keys(rule).sort())===
+  canonicalJson(rule.id===DECISION_RULE_ID ?
+    ["description","id","policy","severity"] : ["description","id","severity"]));
+const DECISION_POLICY_IS_CLOSED=isPlainObject(DECISION_POLICY) &&
+  canonicalJson(Object.keys(DECISION_POLICY).sort())===canonicalJson([
+    "blocking_severities",
+    "package_required_when",
+    "supplied_package_requires",
+    "warning_severities",
+  ]) &&
+  canonicalJson(DECISION_POLICY.blocking_severities)===canonicalJson(["P0","P1","P2"]) &&
+  canonicalJson(DECISION_POLICY.warning_severities)===canonicalJson(["P3","P4"]) &&
+  DECISION_POLICY.package_required_when==="blocking-question-present" &&
+  canonicalJson(DECISION_POLICY.supplied_package_requires)===
+    canonicalJson(SUPPLIED_PACKAGE_REQUIREMENTS);
+
+if (canonicalJson(Object.keys(RULES).sort())!==canonicalJson([
+  "document_type","rules","schema_version",
+]) ||
+    RULES.schema_version!=="pdor-rules.v1" ||
     RULES.document_type!=="pdor-rules" ||
     canonicalJson(RULE_IDS)!==canonicalJson([...RULE_IDS].sort()) ||
-    new Set(RULE_IDS).size!==RULE_IDS.length) {
-  throw new Error("PDoR rules must be versioned, unique, and ordered by stable rule ID");
+    new Set(RULE_IDS).size!==RULE_IDS.length ||
+    !RULES_ARE_CLOSED || !DECISION_POLICY_IS_CLOSED) {
+  throw new Error(
+    "PDoR rules must be closed, versioned, unique, ordered, and carry the decision policy",
+  );
 }
 
 function isPlainObject(value) {
@@ -371,6 +400,12 @@ function requiredSection(input,section,ruleId) {
   )];
 }
 
+function arrayShapeEvidence(value,key,artifact,path,label) {
+  return Array.isArray(value) ? [] : [evidence(
+    key,artifact,path,`${label} must be an array`,
+  )];
+}
+
 function projectFramingRule({input}) {
   return ["goals","summary","non_goals"].flatMap(section =>
     requiredSection(input,section,"Project framing"));
@@ -455,12 +490,25 @@ function exactDecisionCoverage(pmAnalysis,decisionPackage) {
 
 function evaluateDecisions(context) {
   if (context.decisionEvaluation!==undefined) return context.decisionEvaluation;
-  const questions=context.input.pmAnalysis?.content?.open_questions ?? [];
+  const questions=context.input.pmAnalysis?.content?.open_questions;
+  if (!Array.isArray(questions)) {
+    const result={
+      items:arrayShapeEvidence(
+        questions,"pmAnalysis",context.input.pmAnalysis,
+        "/pmAnalysis/content/open_questions","PM open questions",
+      ),
+      gate:undefined,
+      exact:false,
+    };
+    context.decisionEvaluation=result;
+    return result;
+  }
   const blocking=questions.filter(question => BLOCKING_SEVERITIES.has(question.severity));
   const supplied=context.input.decisionPackage;
-  const result={items:[],gate:undefined};
+  const result={items:[],gate:undefined,exact:false};
   if (supplied===undefined) {
-    if (blocking.length>0) {
+    if (DECISION_POLICY.package_required_when==="blocking-question-present" &&
+        blocking.length>0) {
       for (const question of blocking) {
         const index=questions.indexOf(question);
         result.items.push(evidence(
@@ -475,9 +523,11 @@ function evaluateDecisions(context) {
     context.decisionEvaluation=result;
     return result;
   }
-  result.items.push(...exactDecisionCoverage(context.input.pmAnalysis,supplied));
+  const coverageItems=exactDecisionCoverage(context.input.pmAnalysis,supplied);
+  result.items.push(...coverageItems);
   try {
     result.gate=evaluateDecisionGate(supplied,context.authorityRegistry);
+    result.exact=coverageItems.length===0;
   } catch (error) {
     result.items.push(evidence(
       "decisionPackage",
@@ -506,12 +556,26 @@ function blockingDecisionsRule(context) {
 
 function architectureQuestionsRule({input}) {
   const items=[];
-  const resolutions=new Map((input.architecture?.artifact?.content?.architecture_questions ?? [])
+  const pmQuestions=input.pmAnalysis?.content?.architecture_questions;
+  const architectureQuestions=input.architecture?.artifact?.content?.architecture_questions;
+  const adrs=input.architecture?.adrs;
+  items.push(...arrayShapeEvidence(
+    pmQuestions,"pmAnalysis",input.pmAnalysis,
+    "/pmAnalysis/content/architecture_questions","PM architecture questions",
+  ));
+  items.push(...arrayShapeEvidence(
+    architectureQuestions,"architecture.artifact",input.architecture?.artifact,
+    "/architecture/artifact/content/architecture_questions","Architecture questions",
+  ));
+  items.push(...arrayShapeEvidence(
+    adrs,"architecture.adrs",undefined,"/architecture/adrs","ADRs",
+  ));
+  if (items.length>0) return items;
+  const resolutions=new Map(architectureQuestions
     .map((question,index) => [question.id,{question,index}]));
-  const adrQuestionIds=new Set((input.architecture?.adrs ?? []).flatMap(adr =>
+  const adrQuestionIds=new Set(adrs.flatMap(adr =>
     adr?.content?.resolved_architecture_questions ?? []));
-  for (const [index,question] of
-    (input.pmAnalysis?.content?.architecture_questions ?? []).entries()) {
+  for (const [index,question] of pmQuestions.entries()) {
     const resolution=resolutions.get(question.id);
     if (resolution?.question?.status!=="resolved") {
       items.push(evidence(
@@ -566,7 +630,13 @@ function approvedAdrsRule({input}) {
 function deliveryRecordsRule({input}) {
   const items=["risks","assumptions"].flatMap(section =>
     requiredSection(input,section,"Delivery records"));
-  for (const [index,issue] of (input.issuePlan?.content?.issues ?? []).entries()) {
+  const issues=input.issuePlan?.content?.issues;
+  items.push(...arrayShapeEvidence(
+    issues,"issuePlan",input.issuePlan,
+    "/issuePlan/content/issues","Issue-plan issues",
+  ));
+  if (!Array.isArray(issues)) return items;
+  for (const [index,issue] of issues.entries()) {
     if (!Array.isArray(issue.dependencies)) {
       items.push(evidence(
         "issuePlan",
@@ -588,6 +658,11 @@ function epicMapRule({input}) {
     items.push(evidence("issuePlan",input.issuePlan,"/issuePlan/content/epics","Epic map is empty"));
     return items;
   }
+  items.push(...arrayShapeEvidence(
+    issues,"issuePlan",input.issuePlan,
+    "/issuePlan/content/issues","Issue-plan issues",
+  ));
+  if (!Array.isArray(issues)) return items;
   const epicIds=new Set(epics.map(epic => epic.id));
   const used=new Set();
   for (const [index,issue] of (issues ?? []).entries()) {
@@ -649,7 +724,56 @@ function rawCoverage(input) {
   };
 }
 
+function coverageShapeEvidence(input) {
+  const items=[];
+  for (const section of ["functional_requirements","non_functional_requirements","constraints"]) {
+    items.push(...arrayShapeEvidence(
+      input.pmAnalysis?.content?.[section],"pmAnalysis",input.pmAnalysis,
+      `/pmAnalysis/content/${section}`,`PM ${section}`,
+    ));
+  }
+  const issues=input.issuePlan?.content?.issues;
+  const criteria=input.issuePlan?.content?.acceptance_criteria;
+  items.push(...arrayShapeEvidence(
+    issues,"issuePlan",input.issuePlan,
+    "/issuePlan/content/issues","Issue-plan issues",
+  ));
+  items.push(...arrayShapeEvidence(
+    criteria,"issuePlan",input.issuePlan,
+    "/issuePlan/content/acceptance_criteria","Issue-plan acceptance criteria",
+  ));
+  if (Array.isArray(issues)) {
+    for (const [index,issue] of issues.entries()) {
+      items.push(...arrayShapeEvidence(
+        issue?.source_requirements,"issuePlan",input.issuePlan,
+        `/issuePlan/content/issues/${index}/source_requirements`,
+        `Issue ${String(issue?.id)} source requirements`,
+      ));
+      items.push(...arrayShapeEvidence(
+        issue?.acceptance_criteria,"issuePlan",input.issuePlan,
+        `/issuePlan/content/issues/${index}/acceptance_criteria`,
+        `Issue ${String(issue?.id)} acceptance criteria`,
+      ));
+    }
+  }
+  if (Array.isArray(criteria)) {
+    for (const [index,criterion] of criteria.entries()) {
+      items.push(...arrayShapeEvidence(
+        criterion?.verifies,"issuePlan",input.issuePlan,
+        `/issuePlan/content/acceptance_criteria/${index}/verifies`,
+        `Acceptance criterion ${String(criterion?.id)} verifies`,
+      ));
+    }
+  }
+  return items;
+}
+
 function coverageRule(context) {
+  const malformed=coverageShapeEvidence(context.input);
+  if (malformed.length>0) {
+    context.coverage=0;
+    return malformed;
+  }
   const direct=rawCoverage(context.input);
   if (context.rebuiltTraceGraph===undefined) {
     context.coverage=0;
@@ -699,8 +823,13 @@ function latestAuditRule(context) {
     return [evidence("specAudits",undefined,"/specAudits","No Spec Audit is available")];
   }
   const source=sourceOf(input);
-  const expectedInputs=expectedAuditInputs(input);
   const items=[];
+  const adrs=input.architecture?.adrs;
+  items.push(...arrayShapeEvidence(
+    adrs,"architecture.adrs",undefined,"/architecture/adrs","ADRs",
+  ));
+  if (!Array.isArray(adrs)) return items;
+  const expectedInputs=expectedAuditInputs(input);
   for (const [index,audit] of input.specAudits.entries()) {
     if (audit?.provenance?.source_revision!==source.source_revision ||
         audit?.provenance?.source_sha256!==source.source_sha256) {
@@ -709,7 +838,14 @@ function latestAuditRule(context) {
         "Spec Audit is stale or belongs to a different source revision",
       ));
     }
-    const actual=[...(audit?.inputs ?? [])].sort((left,right) =>
+    const auditInputs=audit?.inputs;
+    const malformedInputs=arrayShapeEvidence(
+      auditInputs,`specAudits[${index}]`,audit,
+      `/specAudits/${index}/inputs`,`Spec Audit ${index} inputs`,
+    );
+    items.push(...malformedInputs);
+    if (malformedInputs.length>0) continue;
+    const actual=[...auditInputs].sort((left,right) =>
       canonicalJson(left).localeCompare(canonicalJson(right)));
     if (canonicalJson(actual)!==canonicalJson(expectedInputs)) {
       items.push(evidence(
@@ -718,11 +854,16 @@ function latestAuditRule(context) {
       ));
     }
   }
-  const latest=[...input.specAudits].sort((left,right) =>
-    right.revision-left.revision ||
-    String(right.created_at).localeCompare(String(left.created_at)) ||
-    String(right.artifact_id).localeCompare(String(left.artifact_id)))[0];
+  const latestEntry=input.specAudits.map((audit,index) => ({audit,index}))
+    .sort((left,right) =>
+      (right.audit?.revision ?? 0)-(left.audit?.revision ?? 0) ||
+      String(right.audit?.created_at).localeCompare(String(left.audit?.created_at)) ||
+      String(right.audit?.artifact_id).localeCompare(String(left.audit?.artifact_id)) ||
+      left.index-right.index)[0];
+  const latest=latestEntry.audit;
+  const latestPath=`/specAudits/${latestEntry.index}`;
   context.latestAudit=latest;
+  context.latestAuditIndex=latestEntry.index;
   let expected;
   try {
     expected=auditSpecification({
@@ -733,20 +874,20 @@ function latestAuditRule(context) {
     context.rebuiltAudit=expected;
   } catch (error) {
     items.push(evidence(
-      "specAudits",latest,"/specAudits",
+      `specAudits[${latestEntry.index}]`,latest,latestPath,
       `Spec Audit cannot be recomputed from authoritative artifacts: ${error.message}`,
     ));
     return items;
   }
   if (canonicalJson(latest)!==canonicalJson(expected)) {
     items.push(evidence(
-      "specAudits",latest,"/specAudits",
+      `specAudits[${latestEntry.index}]`,latest,latestPath,
       "Latest Spec Audit differs from the independently recomputed audit",
     ));
   }
   if (latest?.content?.status!=="PASS") {
     items.push(evidence(
-      "specAudits",latest,"/specAudits/0/content/status",
+      `specAudits[${latestEntry.index}]`,latest,`${latestPath}/content/status`,
       `Latest exact-source Spec Audit status is ${String(latest?.content?.status)}, not PASS`,
     ));
   }
@@ -803,9 +944,15 @@ function analysisStateRule(context) {
 }
 
 function assumptionWarningsRule(context) {
-  const questions=context.input.pmAnalysis?.content?.open_questions ?? [];
+  const questions=context.input.pmAnalysis?.content?.open_questions;
+  if (!Array.isArray(questions)) {
+    return arrayShapeEvidence(
+      questions,"pmAnalysis",context.input.pmAnalysis,
+      "/pmAnalysis/content/open_questions","PM open questions",
+    );
+  }
   const evaluation=evaluateDecisions(context);
-  const unresolved=evaluation.gate===undefined ?
+  const unresolved=!evaluation.exact ?
     new Set(questions.filter(question => ASSUMPTION_SEVERITIES.has(question.severity))
       .map(question => question.id)) :
     new Set(evaluation.gate.unresolved_assumption_question_ids);

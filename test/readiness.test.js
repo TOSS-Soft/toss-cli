@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
 import test from "node:test";
 
 import {sha256Canonical} from "../src/contracts/acp.js";
@@ -136,6 +137,16 @@ function assertDeepFrozen(value) {
   if (!value || typeof value!=="object") return;
   assert.equal(Object.isFrozen(value),true);
   for (const child of Object.values(value)) assertDeepFrozen(child);
+}
+
+function p3DecisionEnrichment(overrides={}) {
+  return {
+    id:"Q-001",
+    context:"The source does not set a customer-visible response target.",
+    impact:"Support outcomes cannot be evaluated consistently without the target.",
+    reversibility:"reversible",
+    ...overrides,
+  };
 }
 
 for (const {rule_id:ruleId,mutation} of gateCases) {
@@ -344,4 +355,176 @@ test("non-JSON and exotic values return a deterministic frozen failure result",(
   assert.deepEqual(first,second);
   assert.ok(first.failures[0].evidence.length);
   assertDeepFrozen(first);
+});
+
+test("malformed authoritative collections retain exact rule-specific evidence paths",() => {
+  const cases=[
+    {
+      label:"PM questions",
+      path:"/pmAnalysis/content/open_questions",
+      rules:["PDOR-040-BLOCKING-DECISIONS"],
+      mutate(aggregate) {
+        aggregate.pmAnalysis.content.open_questions=42;
+        rehash(aggregate.pmAnalysis);
+      },
+    },
+    {
+      label:"architecture questions",
+      path:"/architecture/artifact/content/architecture_questions",
+      rules:["PDOR-050-ARCHITECTURE-QUESTIONS"],
+      mutate(aggregate) {
+        aggregate.architecture.artifact.content.architecture_questions=42;
+        rehash(aggregate.architecture.artifact);
+      },
+    },
+    {
+      label:"issue-plan issues",
+      path:"/issuePlan/content/issues",
+      rules:[
+        "PDOR-070-DELIVERY-RECORDS",
+        "PDOR-080-EPIC-MAP",
+        "PDOR-090-REQUIREMENT-AC-COVERAGE",
+      ],
+      mutate(aggregate) {
+        aggregate.issuePlan.content.issues=42;
+        rehash(aggregate.issuePlan);
+      },
+    },
+    {
+      label:"audit inputs",
+      path:"/specAudits/0/inputs",
+      rules:["PDOR-100-LATEST-SPEC-AUDIT"],
+      mutate(aggregate) {
+        aggregate.specAudits[0].inputs=42;
+      },
+    },
+  ];
+
+  for (const testCase of cases) {
+    const aggregate=passAggregate();
+    testCase.mutate(aggregate);
+    const first=evaluateProjectReadiness(aggregate);
+    const second=evaluateProjectReadiness(clone(aggregate));
+
+    assert.deepEqual(first,second,testCase.label);
+    assert.equal(validateDocument(first,"pdor-result.v1").valid,true,testCase.label);
+    assertDeepFrozen(first);
+    for (const ruleId of testCase.rules) {
+      const failure=first.failures.find(item => item.rule_id===ruleId);
+      assert.ok(failure,`${testCase.label}: ${ruleId}`);
+      assert.ok(failure.evidence.some(item => item.path===testCase.path),
+        `${testCase.label}: ${ruleId} must identify ${testCase.path}`);
+      assert.ok(failure.evidence.every(item =>
+        !(item.artifact==="pipeline-input" && item.path==="/")),
+      `${testCase.label}: ${ruleId} must not fall back to aggregate-root evidence`);
+    }
+  }
+});
+
+test("latest audit evidence retains its original index across input order permutations",() => {
+  for (const latestFirst of [false,true]) {
+    const aggregate=passAggregate();
+    const latest=clone(aggregate.specAudits[0]);
+    latest.revision=2;
+    latest.content.status="WARN";
+    latest.content.ready_for_github=true;
+    latest.content.summary={total:1,blocking:0,warnings:1};
+    rehash(latest);
+    aggregate.specAudits=latestFirst ? [latest,aggregate.specAudits[0]] :
+      [aggregate.specAudits[0],latest];
+    const latestIndex=latestFirst ? 0 : 1;
+
+    const result=evaluateProjectReadiness(aggregate);
+    const failure=result.failures.find(item =>
+      item.rule_id==="PDOR-100-LATEST-SPEC-AUDIT");
+    const latestEvidence=failure.evidence.filter(item => item.artifact.includes("@2#"));
+
+    assert.ok(latestEvidence.length>0);
+    assert.ok(latestEvidence.every(item =>
+      item.path.startsWith(`/specAudits/${latestIndex}`)));
+    assert.ok(latestEvidence.some(item =>
+      item.path===`/specAudits/${latestIndex}/content/status`));
+  }
+});
+
+test("only an exact verified resolved P3 package can suppress its authoritative warning",() => {
+  const absent=passAggregate();
+  const valid=passAggregate();
+  valid.decisionPackage=buildDecisionPackageFromPmAnalysis(
+    valid.pmAnalysis,[p3DecisionEnrichment({status:"resolved"})],
+  );
+  const invalid=passAggregate();
+  invalid.decisionPackage=clone(buildDecisionPackageFromPmAnalysis(
+    invalid.pmAnalysis,[p3DecisionEnrichment({status:"resolved"})],
+  ));
+  invalid.decisionPackage.questions[0].meaning="Forged resolved question";
+  invalid.decisionPackage.questions[0].evidence[0].meaning="Forged resolved question";
+
+  const absentResult=evaluateProjectReadiness(absent);
+  const validResult=evaluateProjectReadiness(valid);
+  const invalidResult=evaluateProjectReadiness(invalid);
+
+  assert.deepEqual(absentResult.warnings.map(item => item.rule_id),[
+    "PDOR-120-UNRESOLVED-ASSUMPTIONS",
+  ]);
+  assert.deepEqual(validResult.failures,[]);
+  assert.deepEqual(validResult.warnings,[]);
+  assert.ok(invalidResult.failures.some(item =>
+    item.rule_id==="PDOR-040-BLOCKING-DECISIONS"));
+  assert.deepEqual(invalidResult.warnings.map(item => item.rule_id),[
+    "PDOR-120-UNRESOLVED-ASSUMPTIONS",
+  ]);
+});
+
+test("the versioned closed decision rule policy agrees with runtime package behavior",() => {
+  const rules=JSON.parse(fs.readFileSync(new URL(
+    "../contracts/pipeline/pdor-rules.v1.json",import.meta.url,
+  ),"utf8"));
+  const ruleIds=rules.rules.map(rule => rule.id);
+  const decisionRule=rules.rules.find(rule =>
+    rule.id==="PDOR-040-BLOCKING-DECISIONS");
+
+  assert.deepEqual(Object.keys(rules).sort(),[
+    "document_type","rules","schema_version",
+  ]);
+  assert.equal(rules.schema_version,"pdor-rules.v1");
+  assert.equal(rules.document_type,"pdor-rules");
+  assert.deepEqual(ruleIds,[...ruleIds].sort());
+  assert.equal(new Set(ruleIds).size,ruleIds.length);
+  for (const rule of rules.rules) {
+    assert.deepEqual(Object.keys(rule).sort(),rule===decisionRule ?
+      ["description","id","policy","severity"] :
+      ["description","id","severity"]);
+  }
+  assert.deepEqual(decisionRule.policy,{
+    blocking_severities:["P0","P1","P2"],
+    warning_severities:["P3","P4"],
+    package_required_when:"blocking-question-present",
+    supplied_package_requires:[
+      "external-authority-verification",
+      "exact-cover-all-pm-questions",
+      "exact-retained-pm-fields",
+    ],
+  });
+
+  const optional=passAggregate();
+  const optionalResult=evaluateProjectReadiness(optional);
+  assert.equal(optionalResult.ready_for_issue_generation,true);
+  assert.ok(optionalResult.warnings.some(item =>
+    item.rule_id==="PDOR-120-UNRESOLVED-ASSUMPTIONS"));
+
+  const suppliedInvalid=passAggregate();
+  suppliedInvalid.decisionPackage={questions:[]};
+  const suppliedInvalidResult=evaluateProjectReadiness(suppliedInvalid);
+  assert.ok(suppliedInvalidResult.failures.some(item =>
+    item.rule_id==="PDOR-040-BLOCKING-DECISIONS"));
+  assert.ok(suppliedInvalidResult.warnings.some(item =>
+    item.rule_id==="PDOR-120-UNRESOLVED-ASSUMPTIONS"));
+
+  const blocking=passAggregate();
+  blocking.pmAnalysis.content.open_questions[0].severity="P2";
+  rehash(blocking.pmAnalysis);
+  const blockingResult=evaluateProjectReadiness(blocking);
+  assert.ok(blockingResult.failures.some(item =>
+    item.rule_id==="PDOR-040-BLOCKING-DECISIONS"));
 });

@@ -25,7 +25,17 @@
     {
       "id": "PDOR-040-BLOCKING-DECISIONS",
       "severity": "blocking",
-      "description": "The independently verified unresolved P0/P1/P2 decision count is zero."
+      "description": "The independently verified unresolved P0/P1/P2 decision count is zero.",
+      "policy": {
+        "blocking_severities": ["P0", "P1", "P2"],
+        "warning_severities": ["P3", "P4"],
+        "package_required_when": "blocking-question-present",
+        "supplied_package_requires": [
+          "external-authority-verification",
+          "exact-cover-all-pm-questions",
+          "exact-retained-pm-fields"
+        ]
+      }
     },
     {
       "id": "PDOR-050-ARCHITECTURE-QUESTIONS",
