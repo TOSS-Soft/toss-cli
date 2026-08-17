@@ -33,6 +33,35 @@
         "label": {"type": "string", "minLength": 1}
       }
     },
+    "authority_resolution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decision", "rationale", "authority", "owner", "provenance"],
+      "properties": {
+        "decision": {"type": "string", "minLength": 1},
+        "rationale": {"type": "string", "minLength": 1},
+        "authority": {"enum": ["A1", "A2", "A3"]},
+        "owner": {"enum": ["PM", "ARCHITECT", "USER"]},
+        "provenance": {
+          "$ref": "https://toss.software/schemas/common/provenance.v1.schema.json"
+        }
+      }
+    },
+    "authority_resolution_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_id", "decision", "rationale", "authority", "owner", "provenance"],
+      "properties": {
+        "source_id": {"$ref": "#/$defs/question_id"},
+        "decision": {"type": "string", "minLength": 1},
+        "rationale": {"type": "string", "minLength": 1},
+        "authority": {"enum": ["A1", "A2", "A3"]},
+        "owner": {"enum": ["PM", "ARCHITECT", "USER"]},
+        "provenance": {
+          "$ref": "https://toss.software/schemas/common/provenance.v1.schema.json"
+        }
+      }
+    },
     "evidence": {
       "type": "object",
       "additionalProperties": false,
@@ -86,7 +115,7 @@
         },
         "business_input_missing": {"type": "boolean"},
         "technical_preference": {"type": "boolean"},
-        "resolution": {"type": "string", "minLength": 1}
+        "authority_resolution": {"$ref": "#/$defs/authority_resolution"}
       },
       "allOf": [
         {
@@ -100,6 +129,21 @@
               "reversibility": {
                 "enum": ["reversible", "partially-reversible", "irreversible"]
               }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "severity": {"enum": ["P0", "P1", "P2"]},
+              "status": {"const": "resolved"}
+            },
+            "required": ["severity", "status"]
+          },
+          "then": {
+            "required": ["authority_resolution"],
+            "properties": {
+              "authority_resolution": {"$ref": "#/$defs/authority_resolution"}
             }
           }
         }
@@ -169,6 +213,12 @@
           "minItems": 1,
           "items": {"$ref": "#/$defs/evidence"}
         },
+        "authority_resolutions": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/authority_resolution_evidence"}
+        },
         "reversibility": {
           "enum": ["reversible", "partially-reversible", "irreversible"]
         },
@@ -186,6 +236,25 @@
             "properties": {
               "reversibility": {
                 "enum": ["reversible", "partially-reversible", "irreversible"]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "severity": {"enum": ["P0", "P1", "P2"]},
+              "status": {"const": "resolved"}
+            },
+            "required": ["severity", "status"]
+          },
+          "then": {
+            "required": ["authority_resolutions"],
+            "properties": {
+              "authority_resolutions": {
+                "type": "array",
+                "minItems": 1,
+                "items": {"$ref": "#/$defs/authority_resolution_evidence"}
               }
             }
           }

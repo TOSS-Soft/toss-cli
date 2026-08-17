@@ -1,0 +1,7 @@
+[
+  {
+    "id": "Q-001",
+    "context": "The product brief does not set a customer-visible response target.",
+    "impact": "Without the target, support outcomes cannot be evaluated consistently."
+  }
+]

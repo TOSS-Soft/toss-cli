@@ -13,17 +13,31 @@ verified evidence.
 
 | Severity | Authority | Decision owner | Pipeline effect | Required record |
 | --- | --- | --- | --- | --- |
-| `P0` | `A3` | `USER` | Hard stop while unresolved | Verified-authority decision record; verification is supplied by the authority-answer stage, never inferred here |
-| `P1` | `A2` | `ARCHITECT` | Stops while unresolved | Specialist/Architect evidence |
-| `P1` with `business_input_missing: true` | `A3` | `USER` | Stops while unresolved | Product/business input from verified authority |
-| `P2` | `A3` | `USER` | Stops while unresolved | Product authority decision |
+| `P0` | `A3` | `USER` | Hard stop while unresolved | A3 verified-authority resolution record |
+| `P1` | `A2` | `ARCHITECT` | Stops while unresolved | A2 Architect authority-resolution record |
+| `P1` with `business_input_missing: true` | `A3` | `USER` | Stops while unresolved | A3 User authority-resolution record |
+| `P2` | `A3` | `USER` | Stops while unresolved | A3 User authority-resolution record |
 | `P3` | `A1` | `PM` | May continue as a documented assumption | Provenance, material impact, and reversibility |
 | `P4` | `A1` | `PM` | May continue as a documented assumption | Provenance, material impact, and reversibility |
 
 `P0`, `P1`, and `P2` are blocking only when their package status is
-`unresolved`. A resolved blocking item does not block the continuation gate.
-`P3` and `P4` are never user escalations: they remain visible assumptions and
-may proceed only when their evidence fields are complete.
+`unresolved`. A resolved blocking item does not block the continuation gate,
+but `status: resolved` is not a claim that a consumer may trust. Every
+retained source evidence record for a resolved blocking decision MUST carry a
+closed `authority_resolution` record with non-blank `decision` and `rationale`,
+the exact authority and owner derived for that source by `classifyQuestion`,
+and full `provenance.v1` provenance. A package preserves those records as
+`authority_resolutions`, keyed by source ID.
+
+For `P0`, `authority: A3` and `owner: USER` is the explicit representation of
+the required verified authority; the record's provenance is the evidence of
+that verified authority answer. A bare resolution string, a status flag, or a
+different A3 delegate is insufficient. The corresponding exact routes are A2
+`ARCHITECT` for ordinary `P1`, A3 `USER` for `P1` with
+`business_input_missing: true`, and A3 `USER` for `P2`. Missing, mismatched,
+or unprovenanced records fail closed. `P3` and `P4` are never user
+escalations: they remain visible assumptions and may proceed only when their
+evidence fields are complete.
 
 `business_input_missing` is a structured boolean accepted only for `P1`. It is
 the sole route by which a technical preference may be escalated directly to
@@ -52,8 +66,26 @@ in a package includes:
 
 The package gate contains `can_continue`, a `CLEAR` or `BLOCKED` status, and
 the exact unresolved blocking and assumption question IDs. Consumers MUST
-recompute it from the canonical questions; they MUST NOT trust a supplied gate
-value.
+rebuild canonical questions from retained source evidence and recompute the
+gate; they MUST NOT trust a supplied top-level question or gate value. Evidence
+source IDs are unique and exactly equal to `source_ids`. Rebuilding verifies
+the conservative severity, P1 escalation, authority/owner, status,
+dependencies, assumption evidence, authority resolutions, and all material
+merged fields before a result can be clear.
+
+## PM-analysis adapter
+
+`buildDecisionPackageFromPmAnalysis(pmAnalysis, enrichments)` is the direct
+path from a validated `pm-analysis.v1` artifact. It first calls the existing
+`validatePmAnalysis` contract and consumes only `content.open_questions`; it
+does not alter the PM artifact or infer missing decisions. `enrichments` MUST
+contain exactly one closed entry for every PM open-question ID and no unknown
+IDs. Each entry supplies the material `context` and `impact` that
+`pm-analysis.v1` intentionally does not require, plus only the structured
+fields needed for decision routing when applicable: status, authority
+resolution, P1 `business_input_missing`, technical-preference marker,
+P3/P4 reversibility, and dependencies. Missing, duplicate, extra, or
+non-canonical enrichment data fails closed.
 
 ## Determinism and safety
 
@@ -65,8 +97,11 @@ dependency is rewritten to a canonical ID.
 
 The resulting dependency graph MUST have no dangling references, self edges,
 or cycles. Questions are emitted in deterministic topological order, with
-canonical ID as the tie breaker. Conflicting duplicate IDs, option labels, or
-classification declarations fail closed.
+canonical ID as the tie breaker. A repeated source ID is accepted only when
+its full canonical source record is identical; any disagreement in meaning,
+severity, material fields, options, dependencies, resolution, or provenance
+fails closed. Conflicting option labels or classification declarations also
+fail closed.
 
 `classifyQuestion`, `buildDecisionPackage`, and `evaluateDecisionGate` accept
 only canonical JSON values, never mutate inputs, return deeply frozen values,

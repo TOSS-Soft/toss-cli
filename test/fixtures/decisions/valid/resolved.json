@@ -5,6 +5,20 @@
     "question": "Which verified authority approves the release?",
     "severity": "P0",
     "status": "resolved",
+    "authority_resolution": {
+      "decision": "The verified release authority approved publication.",
+      "rationale": "A release is irreversible without accountable authority.",
+      "authority": "A3",
+      "owner": "USER",
+      "provenance": {
+        "source": {"file": "DECISIONS.md", "section": "Release approval", "location": "line 4"},
+        "source_revision": "decision-r1",
+        "source_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "agent": {"identity": "release-authority", "model": "human", "run_id": "run-decisions-002"},
+        "timestamp": "2026-08-17T12:05:00.000Z",
+        "confidence": 1
+      }
+    },
     "context": "The release process needs a named approval authority before publication.",
     "impact": "Publication must stop until an accountable authority is verified.",
     "options": [

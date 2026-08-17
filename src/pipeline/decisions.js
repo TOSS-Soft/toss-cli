@@ -1,5 +1,6 @@
 import {canonicalJson} from "../contracts/acp.js";
 import {validateDocument} from "../contracts/validator.js";
+import {validatePmAnalysis} from "./pm-analysis.js";
 
 const QUESTION_ID_PATTERN=/^Q-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$/;
 const ENTITY_ID_PATTERN=/^(?:REQ|NFR|BR|FLOW|ARCHQ|ADR|EPIC|ISSUE|AC|RISK|ASM|Q)-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$/;
@@ -32,8 +33,20 @@ const INPUT_FIELDS=new Set([
   "dependencies",
   "status",
   "resolved",
-  "resolution",
+  "authority_resolution",
   "reversibility",
+]);
+const ENRICHMENT_FIELDS=new Set([
+  "id",
+  "context",
+  "impact",
+  "status",
+  "resolved",
+  "authority_resolution",
+  "business_input_missing",
+  "technical_preference",
+  "reversibility",
+  "dependencies",
 ]);
 
 function isPlainObject(value) {
@@ -143,6 +156,45 @@ function parseProvenance(value) {
     );
   }
   return canonicalCopy(value);
+}
+
+function parseAuthorityResolution(value,classification,required,id) {
+  if (value===undefined) {
+    if (required) {
+      throw new TypeError(
+        `Question ${id} requires an authority resolution for a resolved ${classification.severity}`,
+      );
+    }
+    return undefined;
+  }
+  if (!isPlainObject(value)) {
+    throw new TypeError(`Question ${id} authority resolution must be a plain object`);
+  }
+  const requiredFields=["decision","rationale","authority","owner","provenance"];
+  for (const field of requiredFields) {
+    if (!Object.hasOwn(value,field)) {
+      throw new TypeError(`Question ${id} authority resolution requires ${field}`);
+    }
+  }
+  for (const field of Object.keys(value)) {
+    if (!requiredFields.includes(field)) {
+      throw new TypeError(`Question ${id} authority resolution contains unsupported field ${field}`);
+    }
+  }
+  const authority=requiredText(value.authority,`Question ${id} authority resolution authority`);
+  const owner=requiredText(value.owner,`Question ${id} authority resolution owner`);
+  if (authority!==classification.authority || owner!==classification.owner) {
+    throw new TypeError(
+      `Question ${id} authority resolution contradicts ${classification.severity} mapping`,
+    );
+  }
+  return {
+    decision:normalizeDisplayText(value.decision,`Question ${id} authority resolution decision`),
+    rationale:normalizeDisplayText(value.rationale,`Question ${id} authority resolution rationale`),
+    authority,
+    owner,
+    provenance:parseProvenance(value.provenance),
+  };
 }
 
 function parseReversibility(question,severity) {
@@ -270,17 +322,22 @@ function analyzeQuestion(question,index) {
   }
   const classification=classifyCanonicalQuestion(question);
   const severity=classification.severity;
+  const status=questionStatus(question);
   const reportedOwner=question.owner===undefined ? undefined :
     requiredText(question.owner,`Question ${id} owner`);
-  const resolution=question.resolution===undefined ? undefined :
-    normalizeDisplayText(question.resolution,`Question ${id} resolution`);
+  const authorityResolution=parseAuthorityResolution(
+    question.authority_resolution,
+    classification,
+    BLOCKING_SEVERITIES.has(severity) && status==="resolved",
+    id,
+  );
   const result={
     id,
     meaning:normalizeDisplayText(question.meaning,`Question ${id} meaning`),
     normalized_meaning:normalizeMeaning(question.meaning),
     question:normalizeDisplayText(question.question,`Question ${id} text`),
     severity,
-    status:questionStatus(question),
+    status,
     context:normalizeDisplayText(question.context,`Question ${id} context`),
     impact:normalizeDisplayText(question.impact,`Question ${id} impact`),
     options:parseOptions(question.options),
@@ -301,7 +358,7 @@ function analyzeQuestion(question,index) {
     classification,
   };
   if (reportedOwner!==undefined) result.owner=reportedOwner;
-  if (resolution!==undefined) result.resolution=resolution;
+  if (authorityResolution!==undefined) result.authority_resolution=authorityResolution;
   const reversibility=parseReversibility(question,severity);
   if (reversibility!==undefined) result.reversibility=reversibility;
   if (question.business_input_missing===true) result.business_input_missing=true;
@@ -330,7 +387,7 @@ function evidenceFor(question) {
     "reversibility",
     "business_input_missing",
     "technical_preference",
-    "resolution",
+    "authority_resolution",
   ]) {
     if (question[field]!==undefined) evidence[field]=question[field];
   }
@@ -365,6 +422,21 @@ function mergeOptions(members) {
   return [...optionsByCanonical.values()].sort(compareCanonical);
 }
 
+function assertSourceIdentityConsistency(questions) {
+  const bySourceId=new Map();
+  for (const question of questions) {
+    if (!isPlainObject(question) || typeof question.id!=="string") continue;
+    const serialized=canonicalJson(question);
+    const existing=bySourceId.get(question.id);
+    if (existing!==undefined && existing!==serialized) {
+      throw new TypeError(
+        `Duplicate source question id ${question.id} has conflicting content (duplicate question id conflict)`,
+      );
+    }
+    bySourceId.set(question.id,serialized);
+  }
+}
+
 function buildGroups(questions) {
   const bySourceId=new Map();
   const groups=new Map();
@@ -373,7 +445,7 @@ function buildGroups(questions) {
     const existing=bySourceId.get(question.id);
     if (existing!==undefined && existing!==key) {
       throw new TypeError(
-        `Duplicate question id ${question.id} has conflicting normalized meaning or affected entities`,
+        `Duplicate source question id ${question.id} has conflicting normalized meaning or affected entities`,
       );
     }
     bySourceId.set(question.id,key);
@@ -420,6 +492,28 @@ function mergeGroup(members,idBySource) {
     const evidence=evidenceFor(member);
     evidenceByCanonical.set(canonicalJson(evidence),evidence);
   }
+  const status=members.every(member => member.status==="resolved") ? "resolved" : "unresolved";
+  if (BLOCKING_SEVERITIES.has(severity) && status==="resolved") {
+    for (const member of members) {
+      if (member.authority_resolution===undefined) {
+        throw new TypeError(
+          `Resolved blocking decision ${id} requires authority resolution evidence for ${member.id}`,
+        );
+      }
+    }
+  }
+  const authorityResolutionsByCanonical=new Map();
+  for (const member of members) {
+    if (member.authority_resolution===undefined) continue;
+    const authorityResolution={
+      source_id:member.id,
+      ...member.authority_resolution,
+    };
+    authorityResolutionsByCanonical.set(
+      canonicalJson(authorityResolution),
+      authorityResolution,
+    );
+  }
   const merged={
     id,
     meaning:primary.meaning,
@@ -427,7 +521,7 @@ function mergeGroup(members,idBySource) {
     severity,
     authority:classification.authority,
     owner:classification.owner,
-    status:members.every(member => member.status==="resolved") ? "resolved" : "unresolved",
+    status,
     context:primary.context,
     impact:primary.impact,
     options:mergeOptions(members),
@@ -439,6 +533,9 @@ function mergeGroup(members,idBySource) {
     source_ids:[...new Set(members.map(member => member.id))].sort(),
     evidence:[...evidenceByCanonical.values()].sort(compareCanonical),
   };
+  if (authorityResolutionsByCanonical.size>0) {
+    merged.authority_resolutions=[...authorityResolutionsByCanonical.values()].sort(compareCanonical);
+  }
   if (ASSUMPTION_SEVERITIES.has(severity)) {
     merged.reversibility=selectReversibility(members.filter(member =>
       ASSUMPTION_SEVERITIES.has(member.severity),
@@ -521,29 +618,84 @@ function schemaError(result,label) {
   );
 }
 
-function assertPackageQuestions(packageValue) {
-  const seenKeys=new Set();
-  for (const question of packageValue.questions) {
-    const classification=classifyCanonicalQuestion(question);
-    if (question.authority!==classification.authority ||
-        question.owner!==classification.owner) {
-      throw new TypeError(`Decision ${question.id} contradicts its derived authority route`);
-    }
-    const key=canonicalJson({
-      affected_entities:question.affected_entities,
-      meaning:normalizeMeaning(question.meaning),
+function analyzedEvidence(evidence,questionIndex,evidenceIndex) {
+  const {source_id:sourceId,...sourceQuestion}=evidence;
+  return analyzeQuestion(
+    {id:sourceId,...sourceQuestion},
+    `evidence ${questionIndex}:${evidenceIndex}`,
+  );
+}
+
+function sortedSourceIds(value,label) {
+  const sorted=canonicalIds(value,label,QUESTION_ID_PATTERN);
+  if (canonicalJson(value)!==canonicalJson(sorted)) {
+    throw new TypeError(`${label} must be in canonical sorted order`);
+  }
+  return sorted;
+}
+
+function recomputeQuestionsFromEvidence(questions) {
+  const groups=[];
+  const canonicalSourceIds=new Map();
+  const normalizedKeys=new Set();
+
+  for (const [questionIndex,question] of questions.entries()) {
+    const sourceIds=sortedSourceIds(
+      question.source_ids,
+      `Decision ${question.id} source_ids`,
+    );
+    const sourceIdSet=new Set(sourceIds);
+    const seenEvidenceIds=new Set();
+    const members=question.evidence.map((evidence,evidenceIndex) => {
+      const sourceId=evidence.source_id;
+      if (seenEvidenceIds.has(sourceId)) {
+        throw new TypeError(`Decision ${question.id} evidence source IDs must be unique`);
+      }
+      seenEvidenceIds.add(sourceId);
+      if (!sourceIdSet.has(sourceId)) {
+        throw new TypeError(
+          `Decision ${question.id} evidence source ID ${sourceId} is absent from source_ids`,
+        );
+      }
+      if (canonicalSourceIds.has(sourceId)) {
+        throw new TypeError(`Decision package evidence source ID ${sourceId} occurs more than once`);
+      }
+      canonicalSourceIds.set(sourceId,question.id);
+      return analyzedEvidence(evidence,questionIndex,evidenceIndex);
     });
-    if (seenKeys.has(key)) {
+    if (members.length!==sourceIds.length ||
+        members.some(member => !sourceIdSet.has(member.id))) {
+      throw new TypeError(`Decision ${question.id} evidence source IDs must equal source_ids`);
+    }
+    const key=normalizedKey(members[0]);
+    if (members.some(member => normalizedKey(member)!==key)) {
+      throw new TypeError(`Decision ${question.id} evidence spans conflicting normalized meanings`);
+    }
+    if (normalizedKeys.has(key)) {
       throw new TypeError(`Decision package contains duplicate normalized decision ${question.id}`);
     }
-    seenKeys.add(key);
+    normalizedKeys.add(key);
+    groups.push(members);
   }
-  const ordered=stableTopologicalOrder(packageValue.questions);
-  const actual=packageValue.questions.map(question => question.id);
-  const expected=ordered.map(question => question.id);
-  if (canonicalJson(actual)!==canonicalJson(expected)) {
-    throw new TypeError("Decision package questions are not in stable topological order");
+
+  const canonicalIdBySource=new Map();
+  for (const members of groups) {
+    const canonicalId=[...new Set(members.map(member => member.id))].sort()[0];
+    for (const member of members) canonicalIdBySource.set(member.id,canonicalId);
   }
+  return stableTopologicalOrder(
+    groups.map(members => mergeGroup(members,canonicalIdBySource)),
+  );
+}
+
+function assertPackageQuestions(packageValue) {
+  const recomputedQuestions=recomputeQuestionsFromEvidence(packageValue.questions);
+  if (canonicalJson(packageValue.questions)!==canonicalJson(recomputedQuestions)) {
+    throw new TypeError(
+      "Decision package canonical questions differ from recomputed evidence",
+    );
+  }
+  return recomputedQuestions;
 }
 
 function canonicalPackage(value) {
@@ -560,7 +712,11 @@ function canonicalPackage(value) {
   }
   const shape=validateDocument(packageValue,"decision-package.v1");
   if (!shape.valid) throw schemaError(shape,"Decision package");
-  assertPackageQuestions(packageValue);
+  const recomputedQuestions=assertPackageQuestions(packageValue);
+  const recomputedGate=recomputeGate(recomputedQuestions);
+  if (canonicalJson(packageValue.gate)!==canonicalJson(recomputedGate)) {
+    throw new TypeError("Decision package gate differs from recomputed evidence gate");
+  }
   return packageValue;
 }
 
@@ -579,6 +735,7 @@ export function buildDecisionPackage(questions) {
   if (!Array.isArray(canonicalQuestions)) {
     throw new TypeError("Decision questions must be an array");
   }
+  assertSourceIdentityConsistency(canonicalQuestions);
   const analyzed=canonicalQuestions.map(analyzeQuestion);
   const groups=buildGroups(analyzed);
   const idBySource=new Map();
@@ -596,6 +753,102 @@ export function buildDecisionPackage(questions) {
   };
   canonicalPackage(packageValue);
   return deepFreeze(packageValue);
+}
+
+function canonicalPmAnalysis(value) {
+  let analysis;
+  try {
+    analysis=canonicalCopy(value);
+  } catch (error) {
+    throw new TypeError(
+      `PM analysis must be canonical JSON: ${
+        error instanceof Error ? error.message : "invalid value"
+      }`,
+      {cause:error},
+    );
+  }
+  const validation=validatePmAnalysis(analysis);
+  if (!validation.valid) {
+    throw new TypeError(
+      `PM analysis is invalid: ${validation.findings.map(finding =>
+        `${finding.type} at ${finding.path}`,
+      ).join("; ")}`,
+    );
+  }
+  return analysis;
+}
+
+function canonicalEnrichments(value) {
+  let enrichments;
+  try {
+    enrichments=canonicalCopy(value);
+  } catch (error) {
+    throw new TypeError(
+      `Decision enrichments must be canonical JSON: ${
+        error instanceof Error ? error.message : "invalid value"
+      }`,
+      {cause:error},
+    );
+  }
+  if (!Array.isArray(enrichments)) {
+    throw new TypeError("Decision enrichments must be an array");
+  }
+  const byId=new Map();
+  for (const [index,enrichment] of enrichments.entries()) {
+    if (!isPlainObject(enrichment)) {
+      throw new TypeError(`Decision enrichment at index ${index} must be a plain object`);
+    }
+    for (const field of Object.keys(enrichment)) {
+      if (!ENRICHMENT_FIELDS.has(field)) {
+        throw new TypeError(`Decision enrichment contains unsupported field ${field}`);
+      }
+    }
+    const id=requiredText(enrichment.id,`Decision enrichment ${index} id`);
+    if (!QUESTION_ID_PATTERN.test(id)) {
+      throw new TypeError(`Decision enrichment ${id} must use a Q identifier`);
+    }
+    if (byId.has(id)) {
+      throw new TypeError(`Duplicate enrichment for PM question ${id}`);
+    }
+    requiredText(enrichment.context,`Decision enrichment ${id} context`);
+    requiredText(enrichment.impact,`Decision enrichment ${id} impact`);
+    byId.set(id,enrichment);
+  }
+  return byId;
+}
+
+/**
+ * Convert validated PM-owned open questions into a decision package.  The PM
+ * artifact remains unchanged: only caller-supplied material enrichments fill
+ * fields that pm-analysis.v1 intentionally does not own.
+ */
+export function buildDecisionPackageFromPmAnalysis(pmAnalysis,enrichments) {
+  const analysis=canonicalPmAnalysis(pmAnalysis);
+  const enrichmentById=canonicalEnrichments(enrichments);
+  const pmQuestionIds=new Set();
+  const questions=analysis.content.open_questions;
+
+  for (const question of questions) {
+    if (pmQuestionIds.has(question.id)) {
+      throw new TypeError(`PM analysis contains duplicate open question id ${question.id}`);
+    }
+    pmQuestionIds.add(question.id);
+  }
+  for (const id of enrichmentById.keys()) {
+    if (!pmQuestionIds.has(id)) {
+      throw new TypeError(`Unknown enrichment for PM question ${id}`);
+    }
+  }
+  for (const id of pmQuestionIds) {
+    if (!enrichmentById.has(id)) {
+      throw new TypeError(`Missing enrichment for PM question ${id}`);
+    }
+  }
+
+  return buildDecisionPackage(questions.map(question => ({
+    ...question,
+    ...enrichmentById.get(question.id),
+  })));
 }
 
 export function evaluateDecisionGate(packageValue) {

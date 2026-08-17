@@ -6,6 +6,7 @@ import {canonicalJson} from "../src/contracts/acp.js";
 import {validateDocument} from "../src/contracts/validator.js";
 import {
   buildDecisionPackage,
+  buildDecisionPackageFromPmAnalysis,
   classifyQuestion,
   evaluateDecisionGate,
 } from "../src/pipeline/decisions.js";
@@ -19,6 +20,23 @@ async function fixture(path) {
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
+}
+
+function authorityResolution(question,authority,owner) {
+  return {
+    decision:`${question.id} was resolved by the required authority.`,
+    rationale:"The recorded decision resolves the blocking ambiguity.",
+    authority,
+    owner,
+    provenance:clone(question.provenance),
+  };
+}
+
+async function pmAnalysisFixture() {
+  return JSON.parse(await readFile(new URL(
+    "./fixtures/pm-analysis/valid/complete-artifact.json",
+    import.meta.url,
+  ),"utf8"));
 }
 
 test("severity maps deterministically to authority, owner, and stop behavior",() => {
@@ -92,10 +110,7 @@ test("a decision package is deterministic, immutable, schema-valid, and recomput
     unresolved_blocking_question_ids:[],
     unresolved_assumption_question_ids:[],
   };
-  const recomputed=evaluateDecisionGate(forged);
-  assert.equal(recomputed.can_continue,false);
-  assert.equal(Object.isFrozen(recomputed),true);
-  assert.deepEqual(recomputed.unresolved_blocking_question_ids,["Q-BLOCKING"]);
+  assert.throws(() => evaluateDecisionGate(forged),/gate/i);
 });
 
 test("resolved P0-P2 decisions do not block a package",async () => {
@@ -107,6 +122,7 @@ test("resolved P0-P2 decisions do not block a package",async () => {
     question:"Is the architecture evidence resolved?",
     severity:"P1",
   };
+  p1.authority_resolution=authorityResolution(p1,"A2","ARCHITECT");
   const p2={
     ...clone(resolved[0]),
     id:"Q-RESOLVED-P2",
@@ -114,11 +130,136 @@ test("resolved P0-P2 decisions do not block a package",async () => {
     question:"Is the product behavior resolved?",
     severity:"P2",
   };
+  p2.authority_resolution=authorityResolution(p2,"A3","USER");
   const packageResult=buildDecisionPackage([...resolved,p1,p2]);
 
   assert.equal(packageResult.gate.can_continue,true);
   assert.deepEqual(packageResult.gate.unresolved_blocking_question_ids,[]);
   assert.equal(evaluateDecisionGate(packageResult).can_continue,true);
+});
+
+test("blocking resolution records require the exact derived authority, owner, and provenance",async () => {
+  const [base]=await fixture("valid/blocking.json");
+  const variants=[
+    ["Q-RES-P0","P0",{},"A3","USER"],
+    ["Q-RES-P1","P1",{},"A2","ARCHITECT"],
+    ["Q-RES-P1-BUSINESS","P1",{business_input_missing:true},"A3","USER"],
+    ["Q-RES-P2","P2",{},"A3","USER"],
+  ];
+  for (const [id,severity,extra,authority,owner] of variants) {
+    const question={
+      ...clone(base),
+      id,
+      meaning:`Resolve ${id} authority`,
+      question:`Can ${id} be resolved?`,
+      severity,
+      status:"resolved",
+      ...extra,
+    };
+    question.authority_resolution=authorityResolution(question,authority,owner);
+    const packageResult=buildDecisionPackage([question]);
+    assert.equal(packageResult.gate.can_continue,true,id);
+    assert.equal(packageResult.questions[0].authority_resolutions[0].authority,authority,id);
+    assert.equal(packageResult.questions[0].authority_resolutions[0].owner,owner,id);
+  }
+
+  const missing={...clone(base),status:"resolved"};
+  assert.throws(() => buildDecisionPackage([missing]),/authority resolution/i);
+
+  const wrong={...clone(base),status:"resolved"};
+  wrong.authority_resolution=authorityResolution(wrong,"A2","ARCHITECT");
+  assert.throws(() => buildDecisionPackage([wrong]),/authority.*mapping/i);
+
+  const bare={...clone(base),status:"resolved",resolution:"A claimed resolution"};
+  assert.throws(() => buildDecisionPackage([bare]),/unsupported field resolution/i);
+});
+
+test("retained evidence exactly determines material fields, source identities, and blocking resolution coverage",async () => {
+  const [base]=await fixture("valid/blocking.json");
+  const p0={
+    ...clone(base),
+    id:"Q-RESOLUTION-P0",
+    meaning:"Record the merged authority decision",
+    question:"Has the merged authority decision been recorded?",
+    status:"resolved",
+  };
+  p0.authority_resolution=authorityResolution(p0,"A3","USER");
+  const p1={
+    ...clone(p0),
+    id:"Q-RESOLUTION-P1",
+    severity:"P1",
+  };
+  p1.authority_resolution=authorityResolution(p1,"A2","ARCHITECT");
+  const packageResult=buildDecisionPackage([p0,p1]);
+  assert.equal(packageResult.gate.status,"CLEAR");
+  assert.equal(packageResult.questions[0].authority_resolutions.length,2);
+
+  const materialForgery=clone(packageResult);
+  materialForgery.questions[0].context="Forged top-level context.";
+  assert.throws(() => evaluateDecisionGate(materialForgery),/canonical.*evidence/i);
+
+  const sourceIdForgery=clone(packageResult);
+  sourceIdForgery.questions[0].source_ids=["Q-RESOLUTION-P0"];
+  assert.throws(() => evaluateDecisionGate(sourceIdForgery),/source ID.*source_ids/i);
+
+  const missingResolution=clone(packageResult);
+  delete missingResolution.questions[0].evidence.find(evidence =>
+    evidence.source_id==="Q-RESOLUTION-P1",
+  ).authority_resolution;
+  assert.throws(() => evaluateDecisionGate(missingResolution),/authority_resolution|authority resolution/i);
+});
+
+test("gate evaluation rejects forged canonical routing when retained evidence remains blocking",async () => {
+  const packageResult=buildDecisionPackage(await fixture("valid/blocking.json"));
+  const forged=clone(packageResult);
+  forged.questions[0].severity="P3";
+  forged.questions[0].authority="A1";
+  forged.questions[0].owner="PM";
+  forged.questions[0].reversibility="reversible";
+  forged.gate={
+    can_continue:true,
+    status:"CLEAR",
+    unresolved_blocking_question_ids:[],
+    unresolved_assumption_question_ids:["Q-BLOCKING"],
+  };
+
+  assert.throws(() => evaluateDecisionGate(forged),/canonical|evidence|gate/i);
+});
+
+test("PM analysis adapter requires exact material enrichments and preserves PM-owned questions",async () => {
+  const pmAnalysis=await pmAnalysisFixture();
+  const enrichments=await fixture("valid/pm-enrichments.json");
+  const before=clone({pmAnalysis,enrichments});
+  const packageResult=buildDecisionPackageFromPmAnalysis(pmAnalysis,enrichments);
+
+  assert.equal(validateDocument(packageResult,"decision-package.v1").valid,true);
+  assert.equal(packageResult.questions[0].id,"Q-001");
+  assert.equal(packageResult.questions[0].severity,"P2");
+  assert.equal(packageResult.questions[0].owner,"USER");
+  assert.equal(packageResult.gate.can_continue,false);
+  assert.deepEqual({pmAnalysis,enrichments},before);
+
+  assert.throws(
+    () => buildDecisionPackageFromPmAnalysis(pmAnalysis,[]),
+    /missing enrichment/i,
+  );
+  assert.throws(
+    () => buildDecisionPackageFromPmAnalysis(pmAnalysis,[...enrichments,clone(enrichments[0])]),
+    /duplicate enrichment/i,
+  );
+  assert.throws(
+    () => buildDecisionPackageFromPmAnalysis(pmAnalysis,[{
+      ...enrichments[0],
+      id:"Q-UNKNOWN",
+    }]),
+    /unknown enrichment/i,
+  );
+  const nonCanonical=clone(enrichments);
+  nonCanonical[0].context=undefined;
+  assert.throws(
+    () => buildDecisionPackageFromPmAnalysis(pmAnalysis,nonCanonical),
+    /canonical JSON/i,
+  );
 });
 
 test("deduplication uses normalized meaning and canonical affected entities without losing evidence",async () => {
@@ -231,6 +372,12 @@ test("noncanonical values and conflicting duplicate identities fail closed",asyn
 
   const conflicting=await fixture("invalid/conflicting-duplicate-id.json");
   assert.throws(() => buildDecisionPackage(conflicting),/duplicate question id/i);
+  const duplicateSource=await fixture("valid/blocking.json");
+  duplicateSource.push({...clone(duplicateSource[0]),impact:"Different material impact."});
+  assert.throws(
+    () => buildDecisionPackage(duplicateSource),
+    /duplicate source question id/i,
+  );
   const canonicalPackage=buildDecisionPackage(clone(
     await fixture("valid/blocking.json"),
   ));
