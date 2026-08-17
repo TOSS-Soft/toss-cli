@@ -1,0 +1,40 @@
+[
+  {
+    "artifact_id": "artifact-pm-001",
+    "revision": 1,
+    "document_type": "pm-analysis",
+    "content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "content": {
+      "entities": [
+        {
+          "id": "REQ-001",
+          "kind": "requirement",
+          "meaning": "Users can prepare a traceable project plan."
+        }
+      ]
+    }
+  },
+  {
+    "artifact_id": "artifact-architecture-001",
+    "revision": 1,
+    "document_type": "architecture",
+    "content_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "inputs": [
+      {
+        "artifact_id": "artifact-pm-001",
+        "revision": 1,
+        "content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "document_type": "architecture"
+      }
+    ],
+    "content": {
+      "entities": [
+        {
+          "id": "ARCHQ-001",
+          "kind": "architecture-question",
+          "meaning": "How is the traceable plan represented?"
+        }
+      ]
+    }
+  }
+]

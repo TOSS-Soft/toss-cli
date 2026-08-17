@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://toss.software/schemas/common/reference.v1.schema.json",
+  "title": "TOSS Common Reference v1",
+  "description": "A discriminated reference. Internal references are resolved by semantic graph validation; external references are not local graph targets.",
+  "oneOf": [
+    {
+      "title": "Internal entity reference",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reference_type", "entity_id"],
+      "properties": {
+        "reference_type": {"const": "internal"},
+        "entity_id": {
+          "type": "string",
+          "pattern": "^(?:REQ|NFR|BR|FLOW|ARCHQ|ADR|EPIC|ISSUE|AC|RISK|ASM|Q)-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"
+        },
+        "relation": {"type": "string", "minLength": 1}
+      }
+    },
+    {
+      "title": "External URI reference",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reference_type", "uri", "label"],
+      "properties": {
+        "reference_type": {"const": "external"},
+        "uri": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9+.-]*:"
+        },
+        "label": {"type": "string", "minLength": 1}
+      }
+    }
+  ]
+}

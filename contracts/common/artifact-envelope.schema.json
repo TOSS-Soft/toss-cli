@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://toss.software/schemas/common/artifact-envelope.v1.schema.json",
+  "title": "TOSS ACP Artifact Envelope v1",
+  "description": "Closed ACP envelope. Document-specific content is intentionally unconstrained here and belongs to its registered schema.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "document_type",
+    "artifact_id",
+    "revision",
+    "run_id",
+    "producer",
+    "runtime_identity",
+    "created_at",
+    "provenance",
+    "parents",
+    "inputs",
+    "content_sha256",
+    "content"
+  ],
+  "properties": {
+    "schema_version": {"const": "acp.v1"},
+    "document_type": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$"
+    },
+    "artifact_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9:._-]*$"
+    },
+    "revision": {"type": "integer", "minimum": 1},
+    "run_id": {"type": "string", "minLength": 1},
+    "producer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "identity"],
+      "properties": {
+        "role": {"type": "string", "minLength": 1},
+        "identity": {"type": "string", "minLength": 1}
+      }
+    },
+    "runtime_identity": {
+      "oneOf": [
+        {"type": "string", "minLength": 1},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "name", "version"],
+          "properties": {
+            "kind": {"type": "string", "minLength": 1},
+            "name": {"type": "string", "minLength": 1},
+            "version": {"type": "string", "minLength": 1}
+          }
+        }
+      ]
+    },
+    "created_at": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$"
+    },
+    "provenance": {
+      "$ref": "https://toss.software/schemas/common/provenance.v1.schema.json"
+    },
+    "parents": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/artifact_revision_reference"}
+    },
+    "inputs": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/artifact_revision_reference"}
+    },
+    "content_sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "content": {
+      "oneOf": [
+        {"type": "object"},
+        {"type": "array"},
+        {"type": "string"},
+        {"type": "number"},
+        {"type": "boolean"},
+        {"type": "null"}
+      ]
+    }
+  },
+  "$defs": {
+    "artifact_revision_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "revision", "content_sha256"],
+      "properties": {
+        "artifact_id": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9:._-]*$"
+        },
+        "revision": {"type": "integer", "minimum": 1},
+        "content_sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "document_type": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9-]*$"
+        }
+      }
+    }
+  }
+}

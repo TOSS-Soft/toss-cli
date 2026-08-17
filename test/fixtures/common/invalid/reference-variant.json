@@ -1,0 +1,6 @@
+{
+  "reference_type": "external",
+  "uri": "https://example.test/source/123",
+  "label": "External source",
+  "entity_id": "REQ-001"
+}

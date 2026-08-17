@@ -1,0 +1,21 @@
+{
+  "id": "REQ-001",
+  "kind": "requirement",
+  "meaning": "Users can prepare a traceable project plan.",
+  "provenance": {
+    "source": {
+      "file": "docs/brief.md",
+      "section": "Scope",
+      "location": "lines 1-12"
+    },
+    "source_revision": "git:2f3a4b5c",
+    "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "agent": {
+      "identity": "pm-agent",
+      "model": "provider-neutral-test-model",
+      "run_id": "run-common-001"
+    },
+    "timestamp": "2026-08-17T12:00:00.000Z",
+    "confidence": 0.95
+  }
+}

@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://toss.software/schemas/common/question.v1.schema.json",
+  "title": "TOSS Common Blocking Question v1",
+  "description": "A closed decision question with severity, ownership, options, recommendation, rationale, affected entities, and provenance.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "question",
+    "severity",
+    "owner",
+    "options",
+    "recommendation",
+    "rationale",
+    "affected_entities",
+    "provenance"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^Q-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"
+    },
+    "question": {"type": "string", "minLength": 1},
+    "severity": {"enum": ["P0", "P1", "P2", "P3", "P4"]},
+    "owner": {"type": "string", "minLength": 1},
+    "options": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "label"],
+        "properties": {
+          "id": {
+            "type": "string",
+            "pattern": "^[A-Z][A-Z0-9_-]*$"
+          },
+          "label": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "recommendation": {"type": "string", "minLength": 1},
+    "rationale": {"type": "string", "minLength": 1},
+    "affected_entities": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^(?:REQ|NFR|BR|FLOW|ARCHQ|ADR|EPIC|ISSUE|AC|RISK|ASM|Q)-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"
+      }
+    },
+    "provenance": {
+      "$ref": "https://toss.software/schemas/common/provenance.v1.schema.json"
+    }
+  }
+}

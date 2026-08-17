@@ -1,0 +1,22 @@
+[
+  {
+    "artifact_id": "artifact-plan-001",
+    "revision": 1,
+    "content": {
+      "entities": [
+        {
+          "id": "ISSUE-001",
+          "kind": "issue",
+          "meaning": "Add common contract schemas."
+        }
+      ],
+      "references": [
+        {
+          "reference_type": "internal",
+          "entity_id": "REQ-404",
+          "relation": "implements"
+        }
+      ]
+    }
+  }
+]
