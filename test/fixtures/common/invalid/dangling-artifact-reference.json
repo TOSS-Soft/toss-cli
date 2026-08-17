@@ -1,0 +1,23 @@
+[
+  {
+    "artifact_id": "artifact-plan-001",
+    "revision": 1,
+    "content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "inputs": [
+      {
+        "artifact_id": "artifact-missing-001",
+        "revision": 1,
+        "content_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    ],
+    "content": {
+      "entities": [
+        {
+          "id": "ISSUE-001",
+          "kind": "issue",
+          "meaning": "Add common contract schemas."
+        }
+      ]
+    }
+  }
+]

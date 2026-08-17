@@ -1,0 +1,15 @@
+{
+  "strings": ["yes", "no", "null", "true", "0123", "2026-08-17", "", "~"],
+  "numbers": [0, -12.5, 0.0000001, 1e+21],
+  "null_value": null,
+  "arrays": [[], [null, "false", 42]],
+  "objects": {
+    "nested": {
+      "a": 1,
+      "b": "two"
+    }
+  },
+  "__proto__": {
+    "safe": true
+  }
+}

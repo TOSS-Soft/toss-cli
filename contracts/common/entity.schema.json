@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://toss.software/schemas/common/entity.v1.schema.json",
+  "title": "TOSS Common Entity v1",
+  "description": "Closed entity shape. Prefix-to-kind meaning is deliberately a graph-level semantic rule.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "kind", "meaning", "provenance"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^(?:REQ|NFR|BR|FLOW|ARCHQ|ADR|EPIC|ISSUE|AC|RISK|ASM|Q)-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"
+    },
+    "kind": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]*$"
+    },
+    "meaning": {"type": "string", "minLength": 1},
+    "provenance": {
+      "$ref": "https://toss.software/schemas/common/provenance.v1.schema.json"
+    }
+  }
+}

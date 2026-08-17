@@ -1,0 +1,15 @@
+[
+  {
+    "artifact_id": "artifact-risk-001",
+    "revision": 1,
+    "content": {
+      "entities": [
+        {
+          "id": "REQ-002",
+          "kind": "risk",
+          "meaning": "A risk must not use a requirement identifier."
+        }
+      ]
+    }
+  }
+]

@@ -1,0 +1,30 @@
+{
+  "id": "Q-001",
+  "question": "Which project owner approves the readiness gate?",
+  "severity": "P1",
+  "owner": "ARCHITECT",
+  "options": [
+    {
+      "id": "OPTION-A",
+      "label": "Architect approval"
+    }
+  ],
+  "rationale": "The decision is technical and needs architecture evidence.",
+  "affected_entities": ["ARCHQ-001", "REQ-001"],
+  "provenance": {
+    "source": {
+      "file": "docs/brief.md",
+      "section": "Scope",
+      "location": "lines 1-12"
+    },
+    "source_revision": "git:2f3a4b5c",
+    "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "agent": {
+      "identity": "pm-agent",
+      "model": "provider-neutral-test-model",
+      "run_id": "run-common-001"
+    },
+    "timestamp": "2026-08-17T12:00:00.000Z",
+    "confidence": 0.95
+  }
+}
