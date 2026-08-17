@@ -11,6 +11,7 @@ export const SEMANTIC_VALIDATION_BOUNDARY=Object.freeze({
     "duplicate artifact and entity identities",
     "entity prefix-to-kind meaning",
     "dangling internal entity references",
+    "question affected entity targets",
     "exact ACP artifact reference resolution",
   ],
 });
@@ -120,7 +121,7 @@ function assertEntity(entity,documentIndex,entityIndex,entities) {
   entities.set(entity.id,meaning);
 }
 
-function collectInternalReferences(value,references,ancestors=new Set()) {
+function collectEntityReferences(value,references,path,ancestors=new Set()) {
   if (value===null || typeof value!=="object") return;
   if (ancestors.has(value)) {
     throw new TypeError("Artifact graph contains a cyclic reference");
@@ -128,7 +129,9 @@ function collectInternalReferences(value,references,ancestors=new Set()) {
   ancestors.add(value);
   try {
     if (Array.isArray(value)) {
-      for (const item of value) collectInternalReferences(item,references,ancestors);
+      for (const [index,item] of value.entries()) {
+        collectEntityReferences(item,references,`${path}[${index}]`,ancestors);
+      }
       return;
     }
     if (!isPlainObject(value)) {
@@ -138,10 +141,31 @@ function collectInternalReferences(value,references,ancestors=new Set()) {
       if (typeof value.entity_id!=="string" || !ENTITY_ID_PATTERN.test(value.entity_id)) {
         throw new Error("Invalid internal entity reference");
       }
-      references.push(value.entity_id);
+      references.push({
+        kind:"internal",
+        path:`${path}.entity_id`,
+        targetId:value.entity_id,
+      });
     }
-    for (const property of Object.values(value)) {
-      collectInternalReferences(property,references,ancestors);
+    if (Object.hasOwn(value,"affected_entities")) {
+      if (!Array.isArray(value.affected_entities)) {
+        throw new Error(`Question affected_entities must be an array at ${path}`);
+      }
+      for (const [index,targetId] of value.affected_entities.entries()) {
+        if (typeof targetId!=="string" || !ENTITY_ID_PATTERN.test(targetId)) {
+          throw new Error(
+            `Invalid question affected_entities target at ${path}.affected_entities[${index}]`,
+          );
+        }
+        references.push({
+          kind:"affected_entities",
+          path:`${path}.affected_entities[${index}]`,
+          targetId,
+        });
+      }
+    }
+    for (const [property,child] of Object.entries(value)) {
+      collectEntityReferences(child,references,`${path}.${property}`,ancestors);
     }
   } finally {
     ancestors.delete(value);
@@ -156,7 +180,7 @@ export function validateArtifactGraph(documents) {
 
   const artifacts=new Map();
   const entities=new Map();
-  const internalReferences=[];
+  const entityReferences=[];
   const artifactReferences=[];
   for (const [documentIndex,document] of documents.entries()) {
     assertArtifactIdentity(document,documentIndex,artifacts);
@@ -170,11 +194,15 @@ export function validateArtifactGraph(documents) {
         assertEntity(entity,documentIndex,entityIndex,entities);
       }
     }
-    collectInternalReferences(content,internalReferences);
+    const contentPath=Object.hasOwn(document,"content") ?
+      `$[${documentIndex}].content` : `$[${documentIndex}]`;
+    collectEntityReferences(content,entityReferences,contentPath);
   }
-  for (const targetId of internalReferences) {
-    if (!entities.has(targetId)) {
-      throw new Error(`Dangling reference to entity ${targetId}`);
+  for (const reference of entityReferences) {
+    if (!entities.has(reference.targetId)) {
+      throw new Error(
+        `Dangling reference to entity ${reference.targetId} at ${reference.path}`,
+      );
     }
   }
   for (const reference of artifactReferences) {
@@ -200,6 +228,8 @@ export function validateArtifactGraph(documents) {
   return {
     valid:true,
     entity_count:entities.size,
-    internal_reference_count:internalReferences.length,
+    internal_reference_count:entityReferences.filter(reference =>
+      reference.kind==="internal",
+    ).length,
   };
 }

@@ -1,0 +1,29 @@
+[
+  {
+    "artifact_id": "artifact-question-001",
+    "revision": 1,
+    "content": {
+      "entities": [
+        {
+          "id": "ARCHQ-001",
+          "kind": "architecture-question",
+          "meaning": "Choose the decision owner."
+        }
+      ],
+      "questions": [
+        {
+          "id": "Q-001",
+          "question": "Who owns the decision?",
+          "severity": "P1",
+          "owner": "ARCHITECT",
+          "options": [
+            {"id": "OPTION-A", "label": "Architect"}
+          ],
+          "recommendation": "OPTION-A",
+          "rationale": "Architecture evidence is required.",
+          "affected_entities": ["REQ-001"]
+        }
+      ]
+    }
+  }
+]
