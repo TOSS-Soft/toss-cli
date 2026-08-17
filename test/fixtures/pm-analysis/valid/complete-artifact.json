@@ -1,0 +1,418 @@
+{
+  "schema_version": "acp.v1",
+  "document_type": "pm-analysis",
+  "artifact_id": "PM-ANALYSIS-001",
+  "revision": 1,
+  "run_id": "run-pm-analysis-001",
+  "producer": {
+    "role": "pm",
+    "identity": "toss-pm"
+  },
+  "runtime_identity": {
+    "kind": "deterministic",
+    "name": "toss-cli",
+    "version": "2.1.0"
+  },
+  "created_at": "2026-08-17T12:00:00.000Z",
+  "provenance": {
+    "source": {
+      "file": "PROJECT_BRIEF.md",
+      "section": "Customer support intake",
+      "location": "lines 1-42"
+    },
+    "source_revision": "project-brief-r1",
+    "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "agent": {
+      "identity": "toss-pm",
+      "model": "deterministic",
+      "run_id": "run-pm-analysis-001"
+    },
+    "timestamp": "2026-08-17T12:00:00.000Z",
+    "confidence": 1
+  },
+  "parents": [],
+  "inputs": [],
+  "content_sha256": "6430d36d632d4312d40e4fd91fd34db5914ccecfc95bdc6323b06382da6629cb",
+  "content": {
+    "summary": "Customers can submit and track support requests.",
+    "goals": [
+      {
+        "text": "Give customers a reliable way to request support.",
+        "provenance": {
+          "source": {
+            "file": "PROJECT_BRIEF.md",
+            "section": "Goals",
+            "location": "line 5"
+          },
+          "source_revision": "project-brief-r1",
+          "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "agent": {
+            "identity": "toss-pm",
+            "model": "deterministic",
+            "run_id": "run-pm-analysis-001"
+          },
+          "timestamp": "2026-08-17T12:00:00.000Z",
+          "confidence": 1
+        }
+      }
+    ],
+    "non_goals": [
+      {
+        "text": "Replace the existing customer relationship system.",
+        "provenance": {
+          "source": {
+            "file": "PROJECT_BRIEF.md",
+            "section": "Non-goals",
+            "location": "line 9"
+          },
+          "source_revision": "project-brief-r1",
+          "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "agent": {
+            "identity": "toss-pm",
+            "model": "deterministic",
+            "run_id": "run-pm-analysis-001"
+          },
+          "timestamp": "2026-08-17T12:00:00.000Z",
+          "confidence": 1
+        }
+      }
+    ],
+    "actors": [
+      {
+        "name": "Customer",
+        "description": "A customer requesting support.",
+        "provenance": {
+          "source": {
+            "file": "PROJECT_BRIEF.md",
+            "section": "Actors",
+            "location": "line 12"
+          },
+          "source_revision": "project-brief-r1",
+          "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "agent": {
+            "identity": "toss-pm",
+            "model": "deterministic",
+            "run_id": "run-pm-analysis-001"
+          },
+          "timestamp": "2026-08-17T12:00:00.000Z",
+          "confidence": 1
+        }
+      }
+    ],
+    "functional_requirements": [
+      {
+        "id": "REQ-001",
+        "kind": "functional-requirement",
+        "meaning": "A customer can submit a support request with a category and description.",
+        "intent_type": "business-requirement",
+        "provenance": {
+          "source": {
+            "file": "PROJECT_BRIEF.md",
+            "section": "Requirements",
+            "location": "line 16"
+          },
+          "source_revision": "project-brief-r1",
+          "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "agent": {
+            "identity": "toss-pm",
+            "model": "deterministic",
+            "run_id": "run-pm-analysis-001"
+          },
+          "timestamp": "2026-08-17T12:00:00.000Z",
+          "confidence": 1
+        }
+      }
+    ],
+    "non_functional_requirements": [
+      {
+        "id": "NFR-001",
+        "kind": "non-functional-requirement",
+        "meaning": "Customers can view the current status of their requests.",
+        "intent_type": "business-quality-attribute",
+        "provenance": {
+          "source": {
+            "file": "PROJECT_BRIEF.md",
+            "section": "Quality expectations",
+            "location": "line 20"
+          },
+          "source_revision": "project-brief-r1",
+          "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "agent": {
+            "identity": "toss-pm",
+            "model": "deterministic",
+            "run_id": "run-pm-analysis-001"
+          },
+          "timestamp": "2026-08-17T12:00:00.000Z",
+          "confidence": 1
+        }
+      }
+    ],
+    "business_rules": [
+      {
+        "id": "BR-001",
+        "kind": "business-rule",
+        "meaning": "Only the customer who opened a request can view its details.",
+        "intent_type": "business-rule",
+        "provenance": {
+          "source": {
+            "file": "PROJECT_BRIEF.md",
+            "section": "Business rules",
+            "location": "line 24"
+          },
+          "source_revision": "project-brief-r1",
+          "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "agent": {
+            "identity": "toss-pm",
+            "model": "deterministic",
+            "run_id": "run-pm-analysis-001"
+          },
+          "timestamp": "2026-08-17T12:00:00.000Z",
+          "confidence": 1
+        }
+      }
+    ],
+    "domains_modules": [
+      {
+        "name": "Support requests",
+        "description": "The product area that receives and tracks customer requests.",
+        "provenance": {
+          "source": {
+            "file": "PROJECT_BRIEF.md",
+            "section": "Domains",
+            "location": "line 28"
+          },
+          "source_revision": "project-brief-r1",
+          "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "agent": {
+            "identity": "toss-pm",
+            "model": "deterministic",
+            "run_id": "run-pm-analysis-001"
+          },
+          "timestamp": "2026-08-17T12:00:00.000Z",
+          "confidence": 1
+        }
+      }
+    ],
+    "user_flows": [
+      {
+        "id": "FLOW-001",
+        "kind": "flow",
+        "meaning": "Customer submits a support request and follows its status.",
+        "provenance": {
+          "source": {
+            "file": "PROJECT_BRIEF.md",
+            "section": "User flows",
+            "location": "line 31"
+          },
+          "source_revision": "project-brief-r1",
+          "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "agent": {
+            "identity": "toss-pm",
+            "model": "deterministic",
+            "run_id": "run-pm-analysis-001"
+          },
+          "timestamp": "2026-08-17T12:00:00.000Z",
+          "confidence": 1
+        }
+      }
+    ],
+    "integrations": [
+      {
+        "name": "Customer directory",
+        "description": "Provides the customer identity used to associate requests.",
+        "provenance": {
+          "source": {
+            "file": "PROJECT_BRIEF.md",
+            "section": "Integrations",
+            "location": "line 34"
+          },
+          "source_revision": "project-brief-r1",
+          "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "agent": {
+            "identity": "toss-pm",
+            "model": "deterministic",
+            "run_id": "run-pm-analysis-001"
+          },
+          "timestamp": "2026-08-17T12:00:00.000Z",
+          "confidence": 1
+        }
+      }
+    ],
+    "constraints": [
+      {
+        "id": "NFR-002",
+        "kind": "non-functional-requirement",
+        "meaning": "The support request flow must use the current customer identity policy.",
+        "intent_type": "business-constraint",
+        "provenance": {
+          "source": {
+            "file": "PROJECT_BRIEF.md",
+            "section": "Constraints",
+            "location": "line 37"
+          },
+          "source_revision": "project-brief-r1",
+          "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "agent": {
+            "identity": "toss-pm",
+            "model": "deterministic",
+            "run_id": "run-pm-analysis-001"
+          },
+          "timestamp": "2026-08-17T12:00:00.000Z",
+          "confidence": 1
+        }
+      }
+    ],
+    "assumptions": [
+      {
+        "id": "ASM-001",
+        "kind": "assumption",
+        "meaning": "Customers already have a verified account.",
+        "impact": "Unverified customers need a separate intake policy.",
+        "reversibility": "reversible",
+        "provenance": {
+          "source": {
+            "file": "PROJECT_BRIEF.md",
+            "section": "Assumptions",
+            "location": "line 40"
+          },
+          "source_revision": "project-brief-r1",
+          "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "agent": {
+            "identity": "toss-pm",
+            "model": "deterministic",
+            "run_id": "run-pm-analysis-001"
+          },
+          "timestamp": "2026-08-17T12:00:00.000Z",
+          "confidence": 1
+        }
+      }
+    ],
+    "open_questions": [
+      {
+        "id": "Q-001",
+        "kind": "question",
+        "meaning": "Determine the customer-visible response target.",
+        "question": "What customer-visible response target applies to a support request?",
+        "severity": "P2",
+        "owner": "PM",
+        "options": [
+          {
+            "id": "SAME_DAY",
+            "label": "Respond during the same business day"
+          }
+        ],
+        "recommendation": "Confirm the product target with the support owner.",
+        "rationale": "The project source does not set a response target.",
+        "affected_entities": [
+          "REQ-001"
+        ],
+        "provenance": {
+          "source": {
+            "file": "PROJECT_BRIEF.md",
+            "section": "Open questions",
+            "location": "line 42"
+          },
+          "source_revision": "project-brief-r1",
+          "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "agent": {
+            "identity": "toss-pm",
+            "model": "deterministic",
+            "run_id": "run-pm-analysis-001"
+          },
+          "timestamp": "2026-08-17T12:00:00.000Z",
+          "confidence": 1
+        }
+      }
+    ],
+    "risks": [
+      {
+        "id": "RISK-001",
+        "kind": "risk",
+        "meaning": "A missing response target can create inconsistent customer expectations.",
+        "impact": "Support outcomes cannot be evaluated consistently.",
+        "provenance": {
+          "source": {
+            "file": "PROJECT_BRIEF.md",
+            "section": "Risks",
+            "location": "line 43"
+          },
+          "source_revision": "project-brief-r1",
+          "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "agent": {
+            "identity": "toss-pm",
+            "model": "deterministic",
+            "run_id": "run-pm-analysis-001"
+          },
+          "timestamp": "2026-08-17T12:00:00.000Z",
+          "confidence": 1
+        }
+      }
+    ],
+    "architecture_questions": [
+      {
+        "id": "ARCHQ-001",
+        "kind": "architecture-question",
+        "meaning": "Determine how the support request state is represented.",
+        "question": "What architecture preserves request state while respecting the customer identity constraint?",
+        "affected_requirements": [
+          "REQ-001"
+        ],
+        "affected_constraints": [
+          "NFR-002"
+        ],
+        "provenance": {
+          "source": {
+            "file": "PROJECT_BRIEF.md",
+            "section": "Architecture questions",
+            "location": "line 44"
+          },
+          "source_revision": "project-brief-r1",
+          "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "agent": {
+            "identity": "toss-pm",
+            "model": "deterministic",
+            "run_id": "run-pm-analysis-001"
+          },
+          "timestamp": "2026-08-17T12:00:00.000Z",
+          "confidence": 1
+        }
+      }
+    ],
+    "epic_candidates": [
+      {
+        "id": "EPIC-001",
+        "kind": "epic",
+        "meaning": "Customer support request intake.",
+        "candidate_status": "non-authoritative",
+        "source_entities": [
+          {
+            "reference_type": "internal",
+            "entity_id": "REQ-001",
+            "relation": "delivers"
+          },
+          {
+            "reference_type": "internal",
+            "entity_id": "FLOW-001",
+            "relation": "implements"
+          }
+        ],
+        "provenance": {
+          "source": {
+            "file": "PROJECT_BRIEF.md",
+            "section": "Epic candidates",
+            "location": "line 45"
+          },
+          "source_revision": "project-brief-r1",
+          "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "agent": {
+            "identity": "toss-pm",
+            "model": "deterministic",
+            "run_id": "run-pm-analysis-001"
+          },
+          "timestamp": "2026-08-17T12:00:00.000Z",
+          "confidence": 1
+        }
+      }
+    ]
+  }
+}

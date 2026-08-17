@@ -1,0 +1,48 @@
+{
+  "schema_version": "acp.v1",
+  "document_type": "pm-analysis",
+  "artifact_id": "PM-ANALYSIS-TECHNICAL-001",
+  "revision": 1,
+  "run_id": "run-pm-analysis-invalid-002",
+  "producer": {"role": "pm", "identity": "toss-pm"},
+  "runtime_identity": "deterministic",
+  "created_at": "2026-08-17T12:00:00.000Z",
+  "provenance": {
+    "source_revision": "project-brief-r1",
+    "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "locations": ["PROJECT_BRIEF.md"]
+  },
+  "parents": [],
+  "inputs": [],
+  "content_sha256": "dc4a49360ac3d0889c2e5bc57a53d172f7ab73b08da29d123ca959229a09cd19",
+  "content": {
+    "summary": "An analysis with an out-of-bound requirement.",
+    "goals": [],
+    "non_goals": [],
+    "actors": [],
+    "functional_requirements": [
+      {
+        "id": "REQ-001",
+        "kind": "functional-requirement",
+        "meaning": "Persist support requests for customers.",
+        "intent_type": "technical-solution",
+        "provenance": {
+          "source_revision": "project-brief-r1",
+          "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "locations": ["PROJECT_BRIEF.md:Requirements"]
+        }
+      }
+    ],
+    "non_functional_requirements": [],
+    "business_rules": [],
+    "domains_modules": [],
+    "user_flows": [],
+    "integrations": [],
+    "constraints": [],
+    "assumptions": [],
+    "open_questions": [],
+    "risks": [],
+    "architecture_questions": [],
+    "epic_candidates": []
+  }
+}

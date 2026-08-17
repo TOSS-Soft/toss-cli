@@ -1,0 +1,55 @@
+{
+  "schema_version": "acp.v1",
+  "document_type": "pm-analysis",
+  "artifact_id": "PM-ANALYSIS-SELF-REFERENCE-001",
+  "revision": 1,
+  "run_id": "run-pm-analysis-invalid-005",
+  "producer": {"role": "pm", "identity": "toss-pm"},
+  "runtime_identity": "deterministic",
+  "created_at": "2026-08-17T12:00:00.000Z",
+  "provenance": {
+    "source_revision": "project-brief-r1",
+    "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "locations": ["PROJECT_BRIEF.md"]
+  },
+  "parents": [],
+  "inputs": [],
+  "content_sha256": "e6b27fe12f2bf649f08b2c94e20de418f842f5fdb262c0e11588d95f704cbf27",
+  "content": {
+    "summary": "An analysis with a circular epic candidate reference.",
+    "goals": [],
+    "non_goals": [],
+    "actors": [],
+    "functional_requirements": [],
+    "non_functional_requirements": [],
+    "business_rules": [],
+    "domains_modules": [],
+    "user_flows": [],
+    "integrations": [],
+    "constraints": [],
+    "assumptions": [],
+    "open_questions": [],
+    "risks": [],
+    "architecture_questions": [],
+    "epic_candidates": [
+      {
+        "id": "EPIC-001",
+        "kind": "epic",
+        "meaning": "Circular candidate.",
+        "candidate_status": "non-authoritative",
+        "source_entities": [
+          {
+            "reference_type": "internal",
+            "entity_id": "EPIC-001",
+            "relation": "delivers"
+          }
+        ],
+        "provenance": {
+          "source_revision": "project-brief-r1",
+          "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "locations": ["PROJECT_BRIEF.md:Epic candidates"]
+        }
+      }
+    ]
+  }
+}

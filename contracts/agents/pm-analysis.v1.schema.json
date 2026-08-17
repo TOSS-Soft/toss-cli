@@ -1,0 +1,407 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://toss.software/schemas/agents/pm-analysis.v1.schema.json",
+  "title": "TOSS PM Analysis v1",
+  "description": "A closed PM-owned ACP artifact that records business intent, evidence, and architecture questions without making technical decisions.",
+  "allOf": [
+    {
+      "$ref": "https://toss.software/schemas/common/artifact-envelope.v1.schema.json"
+    },
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {"const": "acp.v1"},
+        "document_type": {"const": "pm-analysis"},
+        "producer": {
+          "type": "object",
+          "properties": {
+            "role": {"const": "pm"}
+          }
+        },
+        "content": {"$ref": "#/$defs/content"}
+      }
+    }
+  ],
+  "$defs": {
+    "provenance": {
+      "$ref": "https://toss.software/schemas/common/provenance.v1.schema.json"
+    },
+    "internal_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reference_type", "entity_id"],
+      "properties": {
+        "reference_type": {"const": "internal"},
+        "entity_id": {
+          "type": "string",
+          "pattern": "^(?:REQ|NFR|BR|FLOW|ARCHQ|ADR|EPIC|ISSUE|AC|RISK|ASM|Q)-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"
+        },
+        "relation": {"type": "string", "minLength": 1}
+      }
+    },
+    "sourced_statement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text", "provenance"],
+      "properties": {
+        "text": {"type": "string", "minLength": 1},
+        "provenance": {"$ref": "#/$defs/provenance"}
+      }
+    },
+    "actor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "description", "provenance"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "description": {"type": "string", "minLength": 1},
+        "provenance": {"$ref": "#/$defs/provenance"}
+      }
+    },
+    "named_scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "description", "provenance"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "description": {"type": "string", "minLength": 1},
+        "provenance": {"$ref": "#/$defs/provenance"}
+      }
+    },
+    "functional_requirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "meaning", "intent_type", "provenance"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^REQ-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"
+        },
+        "kind": {"const": "functional-requirement"},
+        "meaning": {"type": "string", "minLength": 1},
+        "intent_type": {"const": "business-requirement"},
+        "provenance": {"$ref": "#/$defs/provenance"}
+      }
+    },
+    "non_functional_requirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "meaning", "intent_type", "provenance"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^NFR-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"
+        },
+        "kind": {"const": "non-functional-requirement"},
+        "meaning": {"type": "string", "minLength": 1},
+        "intent_type": {"const": "business-quality-attribute"},
+        "provenance": {"$ref": "#/$defs/provenance"}
+      }
+    },
+    "business_rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "meaning", "intent_type", "provenance"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^BR-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"
+        },
+        "kind": {"const": "business-rule"},
+        "meaning": {"type": "string", "minLength": 1},
+        "intent_type": {"const": "business-rule"},
+        "provenance": {"$ref": "#/$defs/provenance"}
+      }
+    },
+    "flow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "meaning", "provenance"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^FLOW-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"
+        },
+        "kind": {"const": "flow"},
+        "meaning": {"type": "string", "minLength": 1},
+        "provenance": {"$ref": "#/$defs/provenance"}
+      }
+    },
+    "constraint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "meaning", "intent_type", "provenance"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^NFR-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"
+        },
+        "kind": {"const": "non-functional-requirement"},
+        "meaning": {"type": "string", "minLength": 1},
+        "intent_type": {"const": "business-constraint"},
+        "provenance": {"$ref": "#/$defs/provenance"}
+      }
+    },
+    "assumption": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "meaning", "impact", "reversibility", "provenance"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^ASM-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"
+        },
+        "kind": {"const": "assumption"},
+        "meaning": {"type": "string", "minLength": 1},
+        "impact": {"type": "string", "minLength": 1},
+        "reversibility": {
+          "enum": ["reversible", "partially-reversible", "irreversible"]
+        },
+        "provenance": {"$ref": "#/$defs/provenance"}
+      }
+    },
+    "open_question": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "meaning",
+        "question",
+        "severity",
+        "owner",
+        "options",
+        "recommendation",
+        "rationale",
+        "affected_entities",
+        "provenance"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^Q-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"
+        },
+        "kind": {"const": "question"},
+        "meaning": {"type": "string", "minLength": 1},
+        "question": {"type": "string", "minLength": 1},
+        "severity": {"enum": ["P0", "P1", "P2", "P3", "P4"]},
+        "owner": {"type": "string", "minLength": 1},
+        "options": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "label"],
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[A-Z][A-Z0-9_-]*$"
+              },
+              "label": {"type": "string", "minLength": 1}
+            }
+          }
+        },
+        "recommendation": {"type": "string", "minLength": 1},
+        "rationale": {"type": "string", "minLength": 1},
+        "affected_entities": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^(?:REQ|NFR|BR|FLOW|ARCHQ|ADR|EPIC|ISSUE|AC|RISK|ASM|Q)-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"
+          }
+        },
+        "provenance": {"$ref": "#/$defs/provenance"}
+      }
+    },
+    "risk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "meaning", "impact", "provenance"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^RISK-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"
+        },
+        "kind": {"const": "risk"},
+        "meaning": {"type": "string", "minLength": 1},
+        "impact": {"type": "string", "minLength": 1},
+        "provenance": {"$ref": "#/$defs/provenance"}
+      }
+    },
+    "architecture_question": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "meaning",
+        "question",
+        "affected_requirements",
+        "affected_constraints",
+        "provenance"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^ARCHQ-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"
+        },
+        "kind": {"const": "architecture-question"},
+        "meaning": {"type": "string", "minLength": 1},
+        "question": {"type": "string", "minLength": 1},
+        "affected_requirements": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^REQ-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"
+          }
+        },
+        "affected_constraints": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^NFR-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"
+          }
+        },
+        "provenance": {"$ref": "#/$defs/provenance"}
+      }
+    },
+    "epic_candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "kind",
+        "meaning",
+        "candidate_status",
+        "source_entities",
+        "provenance"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^EPIC-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"
+        },
+        "kind": {"const": "epic"},
+        "meaning": {"type": "string", "minLength": 1},
+        "candidate_status": {"const": "non-authoritative"},
+        "source_entities": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/internal_reference"}
+        },
+        "provenance": {"$ref": "#/$defs/provenance"}
+      }
+    },
+    "content": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "summary",
+        "goals",
+        "non_goals",
+        "actors",
+        "functional_requirements",
+        "non_functional_requirements",
+        "business_rules",
+        "domains_modules",
+        "user_flows",
+        "integrations",
+        "constraints",
+        "assumptions",
+        "open_questions",
+        "risks",
+        "architecture_questions",
+        "epic_candidates"
+      ],
+      "properties": {
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": ".*\\S.*"
+        },
+        "goals": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/sourced_statement"}
+        },
+        "non_goals": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/sourced_statement"}
+        },
+        "actors": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/actor"}
+        },
+        "functional_requirements": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/functional_requirement"}
+        },
+        "non_functional_requirements": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/non_functional_requirement"}
+        },
+        "business_rules": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/business_rule"}
+        },
+        "domains_modules": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/named_scope"}
+        },
+        "user_flows": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/flow"}
+        },
+        "integrations": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/named_scope"}
+        },
+        "constraints": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/constraint"}
+        },
+        "assumptions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/assumption"}
+        },
+        "open_questions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/open_question"}
+        },
+        "risks": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/risk"}
+        },
+        "architecture_questions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/architecture_question"}
+        },
+        "epic_candidates": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/epic_candidate"}
+        }
+      }
+    }
+  }
+}
