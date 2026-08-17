@@ -20,6 +20,7 @@ const schemaDefinitions=[
   ["decision-package.v1","../../contracts/pipeline/decision-package.v1.schema.json"],
   ["trace-graph.v1","../../contracts/pipeline/trace-graph.v1.schema.json"],
   ["trace-result.v1","../../contracts/pipeline/trace-result.v1.schema.json"],
+  ["transition-event.v1","../../contracts/pipeline/transition-event.v1.schema.json"],
 ];
 
 function loadSchema(path) {

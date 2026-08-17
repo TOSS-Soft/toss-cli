@@ -60,6 +60,18 @@
         "change any input artifact",
         "change any PM-owned or architect-owned entity"
       ]
+    },
+    {
+      "document_type": "transition-event",
+      "schema_version": "acp.v1",
+      "producer": "orchestrator",
+      "consumers": ["orchestrator", "human-reviewer"],
+      "allowed_mutations": ["append the next immutable transition-event revision"],
+      "forbidden_actions": [
+        "mutate an existing revision",
+        "record an undeclared or unguarded transition",
+        "reinterpret a transition against another source revision"
+      ]
     }
   ]
 }

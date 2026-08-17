@@ -84,7 +84,14 @@ test("the registry declares role boundaries for every full-pipeline artifact",()
   assert.equal(registry.protocol_version,ACP_VERSION);
   assert.deepEqual(
     registry.documents.map(row => row.document_type),
-    ["pm-analysis","architecture","adr","issue-plan","spec-audit"],
+    [
+      "pm-analysis",
+      "architecture",
+      "adr",
+      "issue-plan",
+      "spec-audit",
+      "transition-event",
+    ],
   );
   for (const row of registry.documents) {
     assert.equal(row.schema_version,ACP_VERSION);
