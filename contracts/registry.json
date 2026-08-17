@@ -1,0 +1,65 @@
+{
+  "protocol_version": "acp.v1",
+  "documents": [
+    {
+      "document_type": "pm-analysis",
+      "schema_version": "acp.v1",
+      "producer": "pm",
+      "consumers": ["architect", "pm-finalization", "spec-auditor"],
+      "allowed_mutations": ["create a new pm-analysis revision"],
+      "forbidden_actions": [
+        "mutate an existing revision",
+        "create or modify architect-owned decisions",
+        "create or modify auditor findings"
+      ]
+    },
+    {
+      "document_type": "architecture",
+      "schema_version": "acp.v1",
+      "producer": "architect",
+      "consumers": ["pm-finalization", "spec-auditor"],
+      "allowed_mutations": ["create a new architecture revision"],
+      "forbidden_actions": [
+        "mutate an existing revision",
+        "change PM-owned requirements or business rules",
+        "create or modify auditor findings"
+      ]
+    },
+    {
+      "document_type": "adr",
+      "schema_version": "acp.v1",
+      "producer": "architect",
+      "consumers": ["pm-finalization", "spec-auditor"],
+      "allowed_mutations": ["create a new ADR revision"],
+      "forbidden_actions": [
+        "mutate an existing revision",
+        "change PM-owned requirements or business rules",
+        "create or modify auditor findings"
+      ]
+    },
+    {
+      "document_type": "issue-plan",
+      "schema_version": "acp.v1",
+      "producer": "pm-finalization",
+      "consumers": ["spec-auditor", "issue-publisher"],
+      "allowed_mutations": ["create a new issue-plan revision"],
+      "forbidden_actions": [
+        "mutate an existing revision",
+        "change PM-owned analysis inputs",
+        "change architect-owned architecture or ADR inputs"
+      ]
+    },
+    {
+      "document_type": "spec-audit",
+      "schema_version": "acp.v1",
+      "producer": "spec-auditor",
+      "consumers": ["readiness-evaluator", "human-reviewer"],
+      "allowed_mutations": ["create a new spec-audit revision containing findings"],
+      "forbidden_actions": [
+        "mutate an existing revision",
+        "change any input artifact",
+        "change any PM-owned or architect-owned entity"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,144 @@
+{
+  "protocol_version": "acp.v1",
+  "artifacts": [
+    {
+      "schema_version": "acp.v1",
+      "document_type": "pm-analysis",
+      "artifact_id": "urn:toss:artifact:pm-analysis:example-project",
+      "revision": 1,
+      "run_id": "run-example-001",
+      "producer": {"role": "pm", "identity": "fixture-pm"},
+      "runtime_identity": {"kind": "fixture", "name": "deterministic", "version": "1"},
+      "created_at": "2026-08-17T00:00:00.000Z",
+      "provenance": {
+        "source_revision": "git:0000000000000000000000000000000000000000",
+        "source_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "locations": ["docs/example-project-brief.md"]
+      },
+      "parents": [],
+      "inputs": [],
+      "content_sha256": "0c5f836d5a51386436adda5b7e51d29c62b2febd75c3c6a73d3dc148fc3d39ea",
+      "content": {
+        "entities": [
+          {"id": "REQ-001", "kind": "requirement", "meaning": "Prepare an implementation-ready project plan."},
+          {"id": "BR-001", "kind": "business-rule", "meaning": "Every downstream artifact references exact input revisions."}
+        ],
+        "summary": "The project needs a traceable, provider-neutral planning chain."
+      }
+    },
+    {
+      "schema_version": "acp.v1",
+      "document_type": "architecture",
+      "artifact_id": "urn:toss:artifact:architecture:example-project",
+      "revision": 1,
+      "run_id": "run-example-001",
+      "producer": {"role": "architect", "identity": "fixture-architect"},
+      "runtime_identity": {"kind": "fixture", "name": "deterministic", "version": "1"},
+      "created_at": "2026-08-17T00:01:00.000Z",
+      "provenance": {
+        "source_revision": "git:0000000000000000000000000000000000000000",
+        "source_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "locations": ["docs/example-project-brief.md"]
+      },
+      "parents": [],
+      "inputs": [
+        {"artifact_id": "urn:toss:artifact:pm-analysis:example-project", "revision": 1, "content_sha256": "0c5f836d5a51386436adda5b7e51d29c62b2febd75c3c6a73d3dc148fc3d39ea"}
+      ],
+      "content_sha256": "53c3cd1cff9b0c4e898da22c884022db9456e5cbfb2e5f568685e183131ff6df",
+      "content": {
+        "entities": [
+          {"id": "ARCHQ-001", "kind": "architecture-question", "meaning": "How are artifact revisions made tamper-evident?"}
+        ],
+        "components": ["contract runtime", "immutable artifact store"]
+      }
+    },
+    {
+      "schema_version": "acp.v1",
+      "document_type": "adr",
+      "artifact_id": "urn:toss:artifact:adr:example-project:001",
+      "revision": 1,
+      "run_id": "run-example-001",
+      "producer": {"role": "architect", "identity": "fixture-architect"},
+      "runtime_identity": {"kind": "fixture", "name": "deterministic", "version": "1"},
+      "created_at": "2026-08-17T00:02:00.000Z",
+      "provenance": {
+        "source_revision": "git:0000000000000000000000000000000000000000",
+        "source_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "locations": ["docs/example-project-brief.md"]
+      },
+      "parents": [],
+      "inputs": [
+        {"artifact_id": "urn:toss:artifact:pm-analysis:example-project", "revision": 1, "content_sha256": "0c5f836d5a51386436adda5b7e51d29c62b2febd75c3c6a73d3dc148fc3d39ea"},
+        {"artifact_id": "urn:toss:artifact:architecture:example-project", "revision": 1, "content_sha256": "53c3cd1cff9b0c4e898da22c884022db9456e5cbfb2e5f568685e183131ff6df"}
+      ],
+      "content_sha256": "062dc25f18f43fda764e727e0e12036aba9fc609b6ed8853396b250c9f4b3416",
+      "content": {
+        "entities": [
+          {"id": "ADR-001", "kind": "architecture-decision", "meaning": "Hash canonical JSON with SHA-256 and bind references to exact revisions."}
+        ],
+        "status": "accepted"
+      }
+    },
+    {
+      "schema_version": "acp.v1",
+      "document_type": "issue-plan",
+      "artifact_id": "urn:toss:artifact:issue-plan:example-project",
+      "revision": 1,
+      "run_id": "run-example-001",
+      "producer": {"role": "pm-finalization", "identity": "fixture-pm"},
+      "runtime_identity": {"kind": "fixture", "name": "deterministic", "version": "1"},
+      "created_at": "2026-08-17T00:03:00.000Z",
+      "provenance": {
+        "source_revision": "git:0000000000000000000000000000000000000000",
+        "source_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "locations": ["docs/example-project-brief.md"]
+      },
+      "parents": [],
+      "inputs": [
+        {"artifact_id": "urn:toss:artifact:pm-analysis:example-project", "revision": 1, "content_sha256": "0c5f836d5a51386436adda5b7e51d29c62b2febd75c3c6a73d3dc148fc3d39ea"},
+        {"artifact_id": "urn:toss:artifact:architecture:example-project", "revision": 1, "content_sha256": "53c3cd1cff9b0c4e898da22c884022db9456e5cbfb2e5f568685e183131ff6df"},
+        {"artifact_id": "urn:toss:artifact:adr:example-project:001", "revision": 1, "content_sha256": "062dc25f18f43fda764e727e0e12036aba9fc609b6ed8853396b250c9f4b3416"}
+      ],
+      "content_sha256": "87bc0b4260551998d91911ad38f791c6c0a6bff582fb74e24c34e49d946ae556",
+      "content": {
+        "entities": [
+          {"id": "EPIC-001", "kind": "epic", "meaning": "Deliver the traceable planning chain."},
+          {"id": "ISSUE-001", "kind": "issue", "meaning": "Implement the ACP runtime and registry."},
+          {"id": "AC-001", "kind": "acceptance-criterion", "meaning": "Canonical content hashes and exact revision links verify successfully."}
+        ],
+        "requirement_refs": ["REQ-001"],
+        "decision_refs": ["ADR-001"]
+      }
+    },
+    {
+      "schema_version": "acp.v1",
+      "document_type": "spec-audit",
+      "artifact_id": "urn:toss:artifact:spec-audit:example-project",
+      "revision": 1,
+      "run_id": "run-example-001",
+      "producer": {"role": "spec-auditor", "identity": "fixture-auditor"},
+      "runtime_identity": {"kind": "fixture", "name": "deterministic", "version": "1"},
+      "created_at": "2026-08-17T00:04:00.000Z",
+      "provenance": {
+        "source_revision": "git:0000000000000000000000000000000000000000",
+        "source_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "locations": ["docs/example-project-brief.md"]
+      },
+      "parents": [],
+      "inputs": [
+        {"artifact_id": "urn:toss:artifact:pm-analysis:example-project", "revision": 1, "content_sha256": "0c5f836d5a51386436adda5b7e51d29c62b2febd75c3c6a73d3dc148fc3d39ea"},
+        {"artifact_id": "urn:toss:artifact:architecture:example-project", "revision": 1, "content_sha256": "53c3cd1cff9b0c4e898da22c884022db9456e5cbfb2e5f568685e183131ff6df"},
+        {"artifact_id": "urn:toss:artifact:adr:example-project:001", "revision": 1, "content_sha256": "062dc25f18f43fda764e727e0e12036aba9fc609b6ed8853396b250c9f4b3416"},
+        {"artifact_id": "urn:toss:artifact:issue-plan:example-project", "revision": 1, "content_sha256": "87bc0b4260551998d91911ad38f791c6c0a6bff582fb74e24c34e49d946ae556"}
+      ],
+      "content_sha256": "bfe00ef0ce3c1fe53a86cef4123a395092a5e45126fa368d6301c86f5b533426",
+      "content": {
+        "entities": [
+          {"id": "Q-001", "kind": "audit-finding", "meaning": "No blocking specification findings were detected."}
+        ],
+        "result": "PASS",
+        "audited_issue_refs": ["ISSUE-001"]
+      }
+    }
+  ]
+}
