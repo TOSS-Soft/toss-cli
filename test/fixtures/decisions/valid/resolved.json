@@ -1,0 +1,49 @@
+[
+  {
+    "id": "Q-RESOLVED",
+    "meaning": "Choose release approval authority",
+    "question": "Which verified authority approves the release?",
+    "severity": "P0",
+    "status": "resolved",
+    "authority_resolution": {
+      "decision": "The verified release authority approved publication.",
+      "rationale": "A release is irreversible without accountable authority.",
+      "authority": "A3",
+      "owner": "USER",
+      "authority_attestation": {
+        "verification_kind": "A3_VERIFIED_CEO_OR_USER_AUTHORITY",
+        "actor_id": "verified-ceo",
+        "actor_role": "CEO",
+        "record_id": "AUTH-Q-RESOLVED",
+        "record_revision": 1,
+        "record_sha256": "f6331b667a3de033f0338ee6a4a1737bc4e3dc9a17da0eb0d6cb7520f19ceb66",
+        "timestamp": "2026-08-17T12:05:00.000Z",
+        "signature": "ZB119Of5dK8EQQoti4LEXQ5dvgNu3OAMplYGVvx8GTA85Oc4SdHm5bNyzz79FM0h5iwvb4Rnzm828LAT9ArBDg=="
+      },
+      "provenance": {
+        "source": {"file": "DECISIONS.md", "section": "Release approval", "location": "line 4"},
+        "source_revision": "decision-r1",
+        "source_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "agent": {"identity": "release-authority", "model": "human", "run_id": "run-decisions-002"},
+        "timestamp": "2026-08-17T12:05:00.000Z",
+        "confidence": 1
+      }
+    },
+    "context": "The release process needs a named approval authority before publication.",
+    "impact": "Publication must stop until an accountable authority is verified.",
+    "options": [
+      {"id": "CEO", "label": "Verified CEO approval"}
+    ],
+    "recommendation": "Record the verified authority decision.",
+    "rationale": "The named authority already approved this release decision.",
+    "affected_entities": ["REQ-001"],
+    "provenance": {
+      "source": {"file": "DECISIONS.md", "section": "Release", "location": "line 4"},
+      "source_revision": "decision-r1",
+      "source_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "agent": {"identity": "pm-agent", "model": "deterministic", "run_id": "run-decisions-002"},
+      "timestamp": "2026-08-17T12:05:00.000Z",
+      "confidence": 1
+    }
+  }
+]

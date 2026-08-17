@@ -1,0 +1,42 @@
+[
+  {
+    "id": "Q-CONFLICT",
+    "meaning": "Choose first business policy",
+    "question": "Which first policy applies?",
+    "severity": "P2",
+    "context": "A business policy must be selected.",
+    "impact": "The policy changes customer behavior.",
+    "options": [{"id": "FIRST", "label": "First policy"}],
+    "recommendation": "Obtain product authority approval.",
+    "rationale": "The policy is not documented.",
+    "affected_entities": ["REQ-001"],
+    "provenance": {
+      "source": {"file": "PROJECT_BRIEF.md", "section": "Policy", "location": "line 1"},
+      "source_revision": "brief-r1",
+      "source_sha256": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+      "agent": {"identity": "pm-agent", "model": "deterministic", "run_id": "run-decisions-011"},
+      "timestamp": "2026-08-17T12:50:00.000Z",
+      "confidence": 1
+    }
+  },
+  {
+    "id": "Q-CONFLICT",
+    "meaning": "Choose second business policy",
+    "question": "Which second policy applies?",
+    "severity": "P2",
+    "context": "A different business policy must be selected.",
+    "impact": "The policy changes customer behavior differently.",
+    "options": [{"id": "SECOND", "label": "Second policy"}],
+    "recommendation": "Obtain product authority approval.",
+    "rationale": "The policy is not documented.",
+    "affected_entities": ["REQ-001"],
+    "provenance": {
+      "source": {"file": "PROJECT_BRIEF.md", "section": "Policy", "location": "line 2"},
+      "source_revision": "brief-r1",
+      "source_sha256": "dededededededededededededededededededededededededededededededede",
+      "agent": {"identity": "pm-agent", "model": "deterministic", "run_id": "run-decisions-011"},
+      "timestamp": "2026-08-17T12:51:00.000Z",
+      "confidence": 1
+    }
+  }
+]

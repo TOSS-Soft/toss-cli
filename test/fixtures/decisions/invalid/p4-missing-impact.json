@@ -1,0 +1,22 @@
+[
+  {
+    "id": "Q-P4-MISSING",
+    "meaning": "Use the standard display label",
+    "question": "Which neutral display label should the interface use?",
+    "severity": "P4",
+    "context": "No product copy preference is recorded for this neutral label.",
+    "reversibility": "reversible",
+    "options": [{"id": "STANDARD", "label": "Established standard label"}],
+    "recommendation": "Use the standard label.",
+    "rationale": "This is a cosmetic default.",
+    "affected_entities": ["FLOW-001"],
+    "provenance": {
+      "source": {"file": "STYLE.md", "section": "Labels", "location": "line 5"},
+      "source_revision": "style-r1",
+      "source_sha256": "abababababababababababababababababababababababababababababababab",
+      "agent": {"identity": "pm-agent", "model": "deterministic", "run_id": "run-decisions-010"},
+      "timestamp": "2026-08-17T12:45:00.000Z",
+      "confidence": 0.8
+    }
+  }
+]

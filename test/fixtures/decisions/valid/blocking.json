@@ -1,0 +1,24 @@
+[
+  {
+    "id": "Q-BLOCKING",
+    "meaning": "Choose release approval authority",
+    "question": "Which verified authority approves the release?",
+    "severity": "P0",
+    "context": "The release process needs a named approval authority before publication.",
+    "impact": "Publication must stop until an accountable authority is verified.",
+    "options": [
+      {"id": "CEO", "label": "Verified CEO approval"}
+    ],
+    "recommendation": "Obtain a verified authority decision before release.",
+    "rationale": "Release approval is an irreversible authority decision.",
+    "affected_entities": ["REQ-001"],
+    "provenance": {
+      "source": {"file": "PROJECT_BRIEF.md", "section": "Release", "location": "line 10"},
+      "source_revision": "brief-r1",
+      "source_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "agent": {"identity": "pm-agent", "model": "deterministic", "run_id": "run-decisions-001"},
+      "timestamp": "2026-08-17T12:00:00.000Z",
+      "confidence": 1
+    }
+  }
+]

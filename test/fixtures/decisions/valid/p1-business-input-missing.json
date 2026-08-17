@@ -1,0 +1,27 @@
+[
+  {
+    "id": "Q-P1-BUSINESS",
+    "meaning": "Choose tenant isolation approach",
+    "question": "Which tenant isolation approach fits the unrecorded business policy?",
+    "severity": "P1",
+    "technical_preference": true,
+    "business_input_missing": true,
+    "context": "Architecture cannot select isolation until the business tenancy policy is known.",
+    "impact": "The architecture decision affects tenant data boundaries.",
+    "options": [
+      {"id": "SHARED", "label": "Shared tenancy"},
+      {"id": "DEDICATED", "label": "Dedicated tenancy"}
+    ],
+    "recommendation": "Ask the product authority to supply the missing tenancy policy.",
+    "rationale": "The architecture preference depends on a business input that is absent.",
+    "affected_entities": ["REQ-001", "NFR-001"],
+    "provenance": {
+      "source": {"file": "PROJECT_BRIEF.md", "section": "Tenancy", "location": "line 18"},
+      "source_revision": "brief-r1",
+      "source_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "agent": {"identity": "architect-agent", "model": "deterministic", "run_id": "run-decisions-003"},
+      "timestamp": "2026-08-17T12:10:00.000Z",
+      "confidence": 0.9
+    }
+  }
+]

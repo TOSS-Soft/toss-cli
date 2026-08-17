@@ -1,0 +1,63 @@
+[
+  {
+    "id": "Q-CHARLIE",
+    "meaning": "Approve launch sequence",
+    "question": "Can the launch sequence proceed after its prerequisites?",
+    "severity": "P2",
+    "context": "Launch depends on the product target and architecture evidence.",
+    "impact": "An incorrect sequence can release incomplete behavior.",
+    "options": [{"id": "PROCEED", "label": "Proceed after prerequisites"}],
+    "recommendation": "Resolve both prerequisite questions first.",
+    "rationale": "The launch choice depends on earlier decisions.",
+    "affected_entities": ["REQ-001"],
+    "dependencies": ["Q-BRAVO", "Q-ALPHA"],
+    "provenance": {
+      "source": {"file": "PLAN.md", "section": "Launch", "location": "line 30"},
+      "source_revision": "plan-r1",
+      "source_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+      "agent": {"identity": "pm-agent", "model": "deterministic", "run_id": "run-decisions-005"},
+      "timestamp": "2026-08-17T12:20:00.000Z",
+      "confidence": 1
+    }
+  },
+  {
+    "id": "Q-BRAVO",
+    "meaning": "Confirm architecture evidence",
+    "question": "Is the architecture evidence complete?",
+    "severity": "P1",
+    "context": "The launch needs confirmed specialist evidence.",
+    "impact": "Missing evidence can make the launch unsafe.",
+    "options": [{"id": "CONFIRM", "label": "Confirm evidence"}],
+    "recommendation": "Have the Architect confirm the evidence.",
+    "rationale": "This is an architecture-affecting decision.",
+    "affected_entities": ["NFR-001"],
+    "provenance": {
+      "source": {"file": "PLAN.md", "section": "Architecture", "location": "line 20"},
+      "source_revision": "plan-r1",
+      "source_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+      "agent": {"identity": "architect-agent", "model": "deterministic", "run_id": "run-decisions-005"},
+      "timestamp": "2026-08-17T12:19:00.000Z",
+      "confidence": 1
+    }
+  },
+  {
+    "id": "Q-ALPHA",
+    "meaning": "Confirm product target",
+    "question": "Is the product target approved?",
+    "severity": "P2",
+    "context": "The launch needs a confirmed customer outcome.",
+    "impact": "An unapproved target can ship the wrong behavior.",
+    "options": [{"id": "APPROVE", "label": "Approve target"}],
+    "recommendation": "Have the product authority approve the target.",
+    "rationale": "This is a product-behavior decision.",
+    "affected_entities": ["REQ-001"],
+    "provenance": {
+      "source": {"file": "PLAN.md", "section": "Product", "location": "line 10"},
+      "source_revision": "plan-r1",
+      "source_sha256": "3333333333333333333333333333333333333333333333333333333333333333",
+      "agent": {"identity": "pm-agent", "model": "deterministic", "run_id": "run-decisions-005"},
+      "timestamp": "2026-08-17T12:18:00.000Z",
+      "confidence": 1
+    }
+  }
+]
