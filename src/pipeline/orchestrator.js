@@ -111,6 +111,25 @@ function artifactsForTransition(inputs,decisionPackage) {
   return artifacts;
 }
 
+function sortReferences(references) {
+  return [...references].sort((left,right) => canonicalJson(left).localeCompare(canonicalJson(right)));
+}
+
+async function historicalStaleReferences(store,events,source) {
+  const references=new Map();
+  for (const event of events) {
+    for (const reference of event.inputs) {
+      references.set(canonicalJson(reference),reference);
+    }
+  }
+  const stale=[];
+  for (const reference of references.values()) {
+    const artifact=await store.verify(reference);
+    if (!sameSource(artifact,source)) stale.push(exactReference(artifact));
+  }
+  return sortReferences(stale);
+}
+
 async function verifyTransitionChain(store,transitions) {
   const ordered=[...transitions].sort((left,right) => left.revision-right.revision);
   const verified=[];
@@ -143,13 +162,51 @@ async function verifyTransitionChain(store,transitions) {
     if (!sameReference(current.parents,expectedParents)) {
       throw new TypeError("Transition parent chain is broken");
     }
-    if (previous!==undefined && current.content.previous_state!==previous.content.state) {
-      throw new TypeError("Transition predecessor-state continuity is broken");
+    const sourceChanged=previous!==undefined &&
+      (current.content.source_revision!==previous.content.source_revision ||
+       current.content.source_sha256!==previous.content.source_sha256);
+    if (previous===undefined && current.content.event==="SOURCE_RESTARTED") {
+      throw new TypeError("A source generation boundary requires a verified predecessor");
     }
-    if (previous!==undefined &&
-        (current.content.source_revision!==previous.content.source_revision ||
-         current.content.source_sha256!==previous.content.source_sha256)) {
-      throw new TypeError("Transition source continuity is broken");
+    if (sourceChanged) {
+      if (current.content.previous_state!=="ANALYZING" ||
+          current.content.event!=="SOURCE_RESTARTED" ||
+          current.content.state!=="ANALYZING") {
+        throw new TypeError("Source changes require an explicit ANALYZING generation boundary");
+      }
+      const expectedStale=await historicalStaleReferences(store,verified,{
+        source_revision:current.content.source_revision,
+        source_sha256:current.content.source_sha256,
+      });
+      if (current.content.source_boundary?.previous_source_revision!==
+            previous.content.source_revision ||
+          current.content.source_boundary?.previous_source_sha256!==
+            previous.content.source_sha256 ||
+          !sameReference(current.content.source_boundary?.stale_artifacts,expectedStale) ||
+          !sameReference(current.inputs,expectedStale)) {
+        throw new TypeError("Source generation boundary has a missing or stale relationship");
+      }
+    } else {
+      if (current.content.event==="SOURCE_RESTARTED" ||
+          current.content.source_boundary!==undefined) {
+        throw new TypeError("SOURCE_RESTARTED requires a changed source revision");
+      }
+      if (previous!==undefined && current.content.previous_state!==previous.content.state) {
+        throw new TypeError("Transition predecessor-state continuity is broken");
+      }
+      const requiresPendingPackage=previous!==undefined && (
+        (previous.content.state==="QUESTIONS_PENDING" &&
+         current.content.event==="DECISION_STARTED") ||
+        (previous.content.state==="ADR_PENDING_APPROVAL" &&
+         current.content.event==="ADR_APPROVED")
+      );
+      if (requiresPendingPackage &&
+          (current.content.decision_package===undefined ||
+           previous.content.decision_package===undefined ||
+           canonicalJson(current.content.decision_package)!==
+             canonicalJson(previous.content.decision_package))) {
+        throw new TypeError("Pending decision package continuity is broken");
+      }
     }
     const inputArtifacts=[];
     for (const reference of current.inputs) {
@@ -166,6 +223,7 @@ async function verifyTransitionChain(store,transitions) {
       next_action:current.content.next_action,
       failure:current.content.failure,
       resume_state:current.content.resume_state,
+      source_boundary:current.content.source_boundary,
     });
     if (canonicalJson(reconstructed)!==canonicalJson(current.content)) {
       throw new TypeError("Transition event content contradicts its verified inputs");
@@ -210,14 +268,13 @@ export async function resumeAnalysis(store,sourceRevision) {
   return deepFreeze(canonicalCopy(result,"Resume result"));
 }
 
-async function lastTransition(store,analysisId) {
+async function transitionHistory(store,analysisId) {
   const artifacts=await store.list({
     document_type:"transition-event",
     artifact_id:analysisId,
   });
   if (!Array.isArray(artifacts)) throw new TypeError("Artifact store list must return an array");
-  const verified=await verifyTransitionChain(store,artifacts);
-  return verified.at(-1);
+  return verifyTransitionChain(store,artifacts);
 }
 
 function exactAdrApprovalPackage(adrs) {
@@ -343,25 +400,57 @@ export async function runNextStage(context={}) {
   const analysisId=typeof context.analysis_id==="string" &&
       context.analysis_id.length>0 ? context.analysis_id : undefined;
   if (!analysisId) throw new TypeError("runNextStage requires analysis_id");
-  const previous=await lastTransition(context.store,analysisId);
+  const history=await transitionHistory(context.store,analysisId);
+  const previous=history.at(-1);
+  let derived;
   if (previous!==undefined) {
-    if (context.state!==previous.content.state) {
-      throw new TypeError("Caller state does not match the verified predecessor state");
-    }
-    if (context.source_revision!==previous.content.source_revision ||
-        context.source_sha256!==previous.content.source_sha256) {
-      throw new TypeError("Caller source does not match verified predecessor continuity");
-    }
-    if (["QUESTIONS_PENDING","ADR_PENDING_APPROVAL"].includes(context.state)) {
-      const supplied=context.artifacts?.decision_package;
-      if (supplied===undefined || previous.content.decision_package===undefined ||
-          canonicalJson(supplied)!==canonicalJson(previous.content.decision_package)) {
-        throw new TypeError("Pending decision package must match the verified predecessor");
+    const sourceChanged=context.source_revision!==previous.content.source_revision ||
+      context.source_sha256!==previous.content.source_sha256;
+    if (sourceChanged) {
+      if (context.state!=="ANALYZING" || context.event!==undefined ||
+          context.source_boundary!==undefined) {
+        throw new TypeError(
+          "A changed source can only auto-derive a new ANALYZING generation boundary",
+        );
       }
+      if (history.some(item =>
+        item.content.source_revision===context.source_revision &&
+        item.content.source_sha256===context.source_sha256)) {
+        throw new TypeError("A source generation cannot reuse an earlier source identity");
+      }
+      const staleArtifacts=await historicalStaleReferences(context.store,history,{
+        source_revision:context.source_revision,
+        source_sha256:context.source_sha256,
+      });
+      derived={
+        event:"SOURCE_RESTARTED",
+        context:{
+          ...context,
+          artifacts:{},
+          source_boundary:{
+            previous_source_revision:previous.content.source_revision,
+            previous_source_sha256:previous.content.source_sha256,
+            stale_artifacts:staleArtifacts,
+          },
+        },
+      };
+    } else {
+      if (context.state!==previous.content.state) {
+        throw new TypeError("Caller state does not match the verified predecessor state");
+      }
+      if (["QUESTIONS_PENDING","ADR_PENDING_APPROVAL"].includes(context.state)) {
+        const supplied=context.artifacts?.decision_package;
+        if (supplied===undefined || previous.content.decision_package===undefined ||
+            canonicalJson(supplied)!==canonicalJson(previous.content.decision_package)) {
+          throw new TypeError("Pending decision package must match the verified predecessor");
+        }
+      }
+      derived=deriveEvent(context);
     }
+  } else {
+    derived=deriveEvent(context);
   }
 
-  const derived=deriveEvent(context);
   const event=transition(context.state,derived.event,derived.context);
   const effectiveContext=derived.context;
   const provenance=canonicalCopy(effectiveContext.provenance,"Transition provenance");

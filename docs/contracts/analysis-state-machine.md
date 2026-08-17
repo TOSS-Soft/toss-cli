@@ -41,13 +41,14 @@ an earlier event.
 
 | From | Event | To | Required evidence and guard |
 | --- | --- | --- | --- |
+| `ANALYZING` | `SOURCE_RESTARTED` | `ANALYZING` | Auto-derived only after verified history proves a new source identity; exact prior source and historically consumed stale revisions are bound in both event content and envelope inputs |
 | `ANALYZING` | `QUESTIONS_FOUND` | `QUESTIONS_PENDING` | Exact PM analysis and a canonical blocked `decision-package.v1` |
 | `ANALYZING` | `ANALYSIS_COMPLETED` | `ARCHITECTURE_PENDING` | Exact validated PM analysis |
 | `QUESTIONS_PENDING` | `DECISION_STARTED` | `USER_DECISION` | Exact PM analysis and the same blocked decision package |
 | `USER_DECISION` | `DECISIONS_RESOLVED` | `ARCHITECTURE_PENDING` | Exact PM analysis; decision package gate is exactly `CLEAR` and `can_continue=true` |
 | `ARCHITECTURE_PENDING` | `ADR_APPROVAL_REQUIRED` | `ADR_PENDING_APPROVAL` | Exact PM, architecture, and ADR revisions plus a USER-owned package containing exactly the pending ADR revisions |
 | `ARCHITECTURE_PENDING` | `ARCHITECTURE_COMPLETED` | `PM_FINALIZATION` | Exact PM, architecture, and ADR revisions; architecture validation is complete |
-| `ADR_PENDING_APPROVAL` | `ADR_APPROVED` | `PM_FINALIZATION` | Exact PM, architecture, and ADR revisions; architecture validation is complete and approvals are current |
+| `ADR_PENDING_APPROVAL` | `ADR_APPROVED` | `PM_FINALIZATION` | Exact PM, architecture, and ADR revisions; architecture validation is complete, approvals are current, and the persisted approval package exactly matches the pending predecessor |
 | `PM_FINALIZATION` | `FINALIZATION_COMPLETED` | `SPEC_AUDIT` | Exact PM, architecture, ADR, and issue-plan revisions; issue-plan validation is complete |
 | `SPEC_AUDIT` | `AUDIT_PASSED` | `READY_FOR_ISSUES` | Exact PM, architecture, ADR, issue-plan, and spec-audit revisions; audit says ready |
 | `SPEC_AUDIT` | `AUDIT_BLOCKED` | `BLOCKED` | Exact PM, architecture, ADR, issue-plan, and deterministically reproduced spec-audit revisions; remediation owner is the first blocking finding's actual owner |
@@ -75,6 +76,12 @@ question, USER is the blocking owner.
 whose approval state is not `approved`. Already-approved ADRs remain pipeline
 inputs but are not repeated as pending decisions. A missing, extra, stale, or
 hash-mismatched ADR reference rejects the transition.
+
+The exact pending decision package is immutable history, not merely caller
+state. Replay compares `QUESTIONS_PENDING → DECISION_STARTED` and
+`ADR_PENDING_APPROVAL → ADR_APPROVED` package content with the verified
+predecessor. A replaced or omitted package invalidates the event chain even if
+each event independently satisfies its schema.
 
 Spec-audit remediation preserves the owner of the first deterministically
 ordered blocking finding. The complete finding-owner set is `PM`, `ARCHITECT`,
@@ -147,6 +154,32 @@ Resume performs these steps in order:
 5. Report every PM, architecture, ADR, issue-plan, and spec-audit artifact whose
    source revision or source hash differs. Sort stale references by document
    type, artifact ID, and revision.
+
+When the requested source differs from the latest verified transition,
+`resumeAnalysis` returns `ANALYZING`. The next `runNextStage` call may create a
+new generation in the same analysis stream only when all of these conditions
+hold:
+
+- verified history exists and the supplied source identity has never appeared
+  in that stream;
+- the caller uses `state: ANALYZING` and does not supply an event or
+  `source_boundary`;
+- the orchestrator auto-derives exactly
+  `ANALYZING + SOURCE_RESTARTED → ANALYZING`;
+- revision remains contiguous and the parent is the exact latest transition
+  from the prior generation; and
+- `source_boundary` records the exact prior source plus the canonical set of
+  stale artifact revisions consumed by earlier transition history. That exact
+  set is also the event's `input_artifacts` and envelope `inputs`.
+
+Replay permits a source change only at that boundary and recomputes its stale
+relationship from verified historical inputs. A missing stale reference,
+wrong tuple, repeated source identity, caller-injected boundary, mid-stream
+source switch, or broken parent/revision chain fails closed. Once the boundary
+is appended, ordinary same-source state and package continuity resumes. The
+broader `resumeAnalysis.stale_artifacts` result continues to report every
+downstream artifact in the store whose source differs, including artifacts not
+previously consumed by an event.
 
 Any integrity error from `list` or `verify` fails closed. Resume never falls
 back to raw filesystem scanning and never treats an unverified revision as a

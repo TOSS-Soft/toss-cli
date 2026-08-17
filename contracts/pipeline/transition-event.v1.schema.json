@@ -87,6 +87,24 @@
         "message": {"type": "string", "minLength": 1}
       }
     },
+    "source_boundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "previous_source_revision",
+        "previous_source_sha256",
+        "stale_artifacts"
+      ],
+      "properties": {
+        "previous_source_revision": {"type": "string", "minLength": 1},
+        "previous_source_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "stale_artifacts": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/artifact_reference"}
+        }
+      }
+    },
     "content": {
       "type": "object",
       "additionalProperties": false,
@@ -102,6 +120,7 @@
         "previous_state": {"$ref": "#/$defs/state"},
         "event": {
           "enum": [
+            "SOURCE_RESTARTED",
             "QUESTIONS_FOUND",
             "ANALYSIS_COMPLETED",
             "DECISION_STARTED",
@@ -133,6 +152,7 @@
             {"$ref": "#/$defs/adr_approval_package"}
           ]
         },
+        "source_boundary": {"$ref": "#/$defs/source_boundary"},
         "next_action": {"$ref": "#/$defs/next_action"},
         "failure": {"$ref": "#/$defs/failure"},
         "resume_state": {"$ref": "#/$defs/state"}

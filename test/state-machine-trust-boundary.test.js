@@ -55,9 +55,13 @@ function replaceProvenance(value,provenance) {
   return result;
 }
 
-async function validPm({severity="P3"}={}) {
+async function validPm({
+  severity="P3",
+  sourceRevision="project-brief-r1",
+  sourceSha256="a".repeat(64),
+}={}) {
   const source=await fixture("pm-analysis/valid/complete-artifact.json");
-  const provenance=recordedProvenance();
+  const provenance=recordedProvenance({revision:sourceRevision,sha256:sourceSha256});
   const pm=replaceProvenance(source,provenance);
   pm.provenance=clone(provenance);
   pm.content.open_questions[0].severity=severity;
@@ -475,6 +479,224 @@ test("public ADR approval packages are closed across extra and non-plain JSON fi
       },
     ),/canonical|approval package|unsupported|invalid/i);
   }
+});
+
+test("resume rejects replaced or missing pending packages in question and ADR histories",async () => {
+  const pm=await validPm({severity:"P2"});
+  const firstPackage=blockingPackage(pm);
+  const replacementPackage=buildDecisionPackageFromPmAnalysis(pm,[{
+    id:pm.content.open_questions[0].id,
+    context:"A replay-time replacement that was never the pending decision.",
+    impact:"Immutable decision history would be rewritten.",
+  }]);
+  const pendingContent=transition("ANALYZING","QUESTIONS_FOUND",{
+    ...transitionMetadata(pm),
+    artifacts:{pm_analysis:pm,decision_package:firstPackage},
+  });
+  const pending=eventArtifact({
+    source:pm,
+    previous_state:"ANALYZING",
+    event:"QUESTIONS_FOUND",
+    state:"QUESTIONS_PENDING",
+    inputs:[pm],
+    extraContent:{
+      next_action:pendingContent.next_action,
+      decision_package:firstPackage,
+    },
+  });
+  const startedContent=transition("QUESTIONS_PENDING","DECISION_STARTED",{
+    ...transitionMetadata(pm),
+    artifacts:{pm_analysis:pm,decision_package:replacementPackage},
+  });
+  const started=eventArtifact({
+    source:pm,
+    revision:2,
+    previous_state:"QUESTIONS_PENDING",
+    event:"DECISION_STARTED",
+    state:"USER_DECISION",
+    inputs:[pm],
+    parents:[pending],
+    extraContent:{
+      next_action:startedContent.next_action,
+      decision_package:replacementPackage,
+    },
+  });
+  await assert.rejects(resumeAnalysis(fakeStore([pm,pending,started]),{
+    ...transitionMetadata(pm),
+  }),/decision package|pending|continuity/i);
+
+  const pendingGraph=await architectureGraph({pending:true});
+  const approvalPackage={
+    schema_version:"adr-approval-package.v1",
+    document_type:"adr-approval-package",
+    owner:"USER",
+    adr_references:pendingGraph.adrs.map(reference),
+  };
+  const approvalContent=transition("ARCHITECTURE_PENDING","ADR_APPROVAL_REQUIRED",{
+    ...transitionMetadata(pendingGraph.pm_analysis),
+    artifacts:{...pendingGraph,decision_package:approvalPackage},
+  });
+  const approvalPending=eventArtifact({
+    source:pendingGraph.pm_analysis,
+    previous_state:"ARCHITECTURE_PENDING",
+    event:"ADR_APPROVAL_REQUIRED",
+    state:"ADR_PENDING_APPROVAL",
+    inputs:[pendingGraph.pm_analysis,pendingGraph.architecture,...pendingGraph.adrs],
+    extraContent:{
+      next_action:approvalContent.next_action,
+      decision_package:approvalPackage,
+    },
+  });
+  const approvedGraph=await architectureGraph();
+  approvedGraph.adrs[0]=rehash({
+    ...clone(approvedGraph.adrs[0]),
+    revision:2,
+    parents:[reference(pendingGraph.adrs[0])],
+  });
+  const replacementApprovalPackage={
+    ...approvalPackage,
+    adr_references:approvedGraph.adrs.map(reference),
+  };
+  const approvedContent=transition("ADR_PENDING_APPROVAL","ADR_APPROVED",{
+    ...transitionMetadata(approvedGraph.pm_analysis),
+    artifacts:{...approvedGraph,decision_package:replacementApprovalPackage},
+  });
+  const approved=eventArtifact({
+    source:approvedGraph.pm_analysis,
+    revision:2,
+    previous_state:"ADR_PENDING_APPROVAL",
+    event:"ADR_APPROVED",
+    state:"PM_FINALIZATION",
+    inputs:[approvedGraph.pm_analysis,approvedGraph.architecture,...approvedGraph.adrs],
+    parents:[approvalPending],
+    extraContent:approvedContent,
+  });
+  await assert.rejects(resumeAnalysis(fakeStore([
+    pendingGraph.pm_analysis,
+    pendingGraph.architecture,
+    ...pendingGraph.adrs,
+    ...approvedGraph.adrs,
+    approvalPending,
+    approved,
+  ]),{
+    ...transitionMetadata(pendingGraph.pm_analysis),
+  }),/decision package|pending|continuity/i);
+});
+
+test("a changed source restarts the same analysis stream as an explicit generation",async () => {
+  const oldPm=await validPm();
+  const firstContent=transition("ANALYZING","ANALYSIS_COMPLETED",{
+    ...transitionMetadata(oldPm),
+    artifacts:{pm_analysis:oldPm},
+  });
+  const first=eventArtifact({source:oldPm,inputs:[oldPm],extraContent:firstContent});
+  const store=fakeStore([oldPm,first]);
+  const newSource={
+    sourceRevision:"project-brief-r2",
+    sourceSha256:"b".repeat(64),
+  };
+  const resumedOld=await resumeAnalysis(store,{
+    analysis_id:first.artifact_id,
+    source_revision:newSource.sourceRevision,
+    source_sha256:newSource.sourceSha256,
+  });
+  assert.equal(resumedOld.state,"ANALYZING");
+  assert.deepEqual(resumedOld.stale_artifacts.map(item => item.artifact_id),[oldPm.artifact_id]);
+
+  const boundary=await runNextStage({
+    ...transitionMetadata(oldPm),
+    source_revision:newSource.sourceRevision,
+    source_sha256:newSource.sourceSha256,
+    provenance:recordedProvenance({
+      revision:newSource.sourceRevision,
+      sha256:newSource.sourceSha256,
+    }),
+    state:"ANALYZING",
+    artifacts:{},
+    store,
+  });
+  assert.equal(boundary.revision,2);
+  assert.equal(boundary.content.event,"SOURCE_RESTARTED");
+  assert.equal(boundary.content.state,"ANALYZING");
+  assert.deepEqual(boundary.parents,[reference(first)]);
+  assert.deepEqual(boundary.content.source_boundary.stale_artifacts,[{
+    ...reference(oldPm),
+  }]);
+  assert.deepEqual(boundary.inputs,boundary.content.source_boundary.stale_artifacts);
+
+  const resumedNew=await resumeAnalysis(store,{
+    analysis_id:first.artifact_id,
+    source_revision:newSource.sourceRevision,
+    source_sha256:newSource.sourceSha256,
+  });
+  assert.equal(resumedNew.state,"ANALYZING");
+  assert.equal(resumedNew.revision,2);
+  assert.deepEqual(
+    resumedNew.stale_artifacts.map(({source_revision,source_sha256,...item}) => item),
+    boundary.content.source_boundary.stale_artifacts,
+  );
+});
+
+test("tampered or caller-injected source generation boundaries fail closed",async () => {
+  const oldPm=await validPm();
+  const firstContent=transition("ANALYZING","ANALYSIS_COMPLETED",{
+    ...transitionMetadata(oldPm),
+    artifacts:{pm_analysis:oldPm},
+  });
+  const first=eventArtifact({source:oldPm,inputs:[oldPm],extraContent:firstContent});
+  const sourceRevision="project-brief-r2";
+  const sourceSha256="b".repeat(64);
+  const metadata={
+    ...transitionMetadata(oldPm),
+    source_revision:sourceRevision,
+    source_sha256:sourceSha256,
+    provenance:recordedProvenance({revision:sourceRevision,sha256:sourceSha256}),
+    state:"ANALYZING",
+    artifacts:{},
+  };
+  const generatingStore=fakeStore([oldPm,first]);
+  const boundary=await runNextStage({...metadata,store:generatingStore});
+
+  const wrongTuple=clone(boundary);
+  wrongTuple.content.event="ANALYSIS_COMPLETED";
+  wrongTuple.content.state="ARCHITECTURE_PENDING";
+  rehash(wrongTuple);
+  const missingStale=clone(boundary);
+  missingStale.inputs=[];
+  missingStale.content.input_artifacts=[];
+  missingStale.content.source_boundary.stale_artifacts=[];
+  rehash(missingStale);
+  const wrongParent=clone(boundary);
+  wrongParent.parents=[];
+  const skippedRevision=clone(boundary);
+  skippedRevision.revision=3;
+
+  for (const tampered of [wrongTuple,missingStale,wrongParent,skippedRevision]) {
+    await assert.rejects(resumeAnalysis(fakeStore([oldPm,first,tampered]),{
+      analysis_id:first.artifact_id,
+      source_revision:sourceRevision,
+      source_sha256:sourceSha256,
+    }),/source|generation|stale|parent|revision|chain/i);
+  }
+
+  const injectedStore=fakeStore([oldPm,first]);
+  await assert.rejects(runNextStage({
+    ...metadata,
+    event:"SOURCE_RESTARTED",
+    source_boundary:boundary.content.source_boundary,
+    store:injectedStore,
+  }),/auto.derive|generation|source/i);
+  assert.equal(injectedStore.appends.length,0);
+
+  const midStreamStore=fakeStore([oldPm,first]);
+  await assert.rejects(runNextStage({
+    ...metadata,
+    state:"ARCHITECTURE_PENDING",
+    event:"FAIL_RETRYABLE",
+    failure:{code:"FORGED_SWITCH",message:"Do not cross a source mid-stream"},
+    store:midStreamStore,
+  }),/auto.derive|generation|source/i);
+  assert.equal(midStreamStore.appends.length,0);
 });
 
 test("review fixtures remain canonical and independently derived",async () => {

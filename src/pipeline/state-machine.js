@@ -26,6 +26,7 @@ const TERMINAL_STATES=new Set(["READY_FOR_ISSUES","FAILED_TERMINAL"]);
 
 const DECLARED_TRANSITIONS=Object.freeze({
   ANALYZING:Object.freeze({
+    SOURCE_RESTARTED:"ANALYZING",
     QUESTIONS_FOUND:"QUESTIONS_PENDING",
     ANALYSIS_COMPLETED:"ARCHITECTURE_PENDING",
   }),
@@ -73,6 +74,7 @@ const REQUIRED_ARTIFACT_KEYS=Object.freeze({
     "pm_analysis",
     "architecture",
     "adrs",
+    "decision_package",
   ]),
   "ARCHITECTURE_PENDING\u0000BLOCK":Object.freeze([
     "pm_analysis",
@@ -165,6 +167,23 @@ function artifactReference(value) {
     revision:value.revision,
     content_sha256:value.content_sha256,
   };
+}
+
+function canonicalArtifactReferences(value,label) {
+  if (!Array.isArray(value)) throw new TypeError(`${label} must be an array`);
+  const references=value.map((item,index) => {
+    const reference=artifactReference(item);
+    if (!reference) throw new TypeError(`${label}[${index}] must be an exact artifact reference`);
+    return reference;
+  });
+  const canonical=referenceSet(references);
+  if (new Set(canonical.map(reference => canonicalJson(reference))).size!==canonical.length) {
+    throw new TypeError(`${label} must not contain duplicate references`);
+  }
+  if (canonicalJson(references)!==canonicalJson(canonical)) {
+    throw new TypeError(`${label} must use canonical reference order`);
+  }
+  return canonical;
 }
 
 function referencesFor(value,references=[]) {
@@ -375,7 +394,7 @@ function questionNextAction(decisionPackage) {
   };
 }
 
-function adrNextAction(decisionPackage,adrs) {
+function assertAdrApprovalPackage(decisionPackage) {
   const expectedKeys=["adr_references","document_type","owner","schema_version"];
   if (!isPlainObject(decisionPackage) ||
       canonicalJson(Object.keys(decisionPackage).sort())!==canonicalJson(expectedKeys) ||
@@ -390,6 +409,12 @@ function adrNextAction(decisionPackage,adrs) {
       "ADR approval package must be USER-owned and contain exact ADR references",
     );
   }
+  canonicalArtifactReferences(decisionPackage.adr_references,"ADR approval references");
+  return decisionPackage;
+}
+
+function adrNextAction(decisionPackage,adrs) {
+  assertAdrApprovalPackage(decisionPackage);
   const pendingAdrs=adrs.filter(adr => adr.content?.approval?.state!=="approved");
   const suppliedReferences=canonicalReferences({adrs:pendingAdrs},["adrs"]);
   const packagedReferences=[...decisionPackage.adr_references].sort((left,right) =>
@@ -398,6 +423,25 @@ function adrNextAction(decisionPackage,adrs) {
     throw new TypeError("ADR approval package must bind the exact supplied ADR revisions");
   }
   return {action:"APPROVE_ADRS",owner:"USER",decision_package:decisionPackage};
+}
+
+function canonicalSourceBoundary(value,source) {
+  const boundary=canonicalCopy(value,"source_boundary");
+  const keys=["previous_source_revision","previous_source_sha256","stale_artifacts"];
+  if (!isPlainObject(boundary) ||
+      canonicalJson(Object.keys(boundary).sort())!==canonicalJson(keys) ||
+      typeof boundary.previous_source_revision!=="string" ||
+      boundary.previous_source_revision.length===0 ||
+      !SHA256_PATTERN.test(boundary.previous_source_sha256) ||
+      (boundary.previous_source_revision===source.source_revision &&
+       boundary.previous_source_sha256===source.source_sha256)) {
+    throw new TypeError("SOURCE_RESTARTED requires an exact prior source boundary");
+  }
+  boundary.stale_artifacts=canonicalArtifactReferences(
+    boundary.stale_artifacts,
+    "source_boundary stale_artifacts",
+  );
+  return boundary;
 }
 
 function canonicalNextAction(value) {
@@ -457,13 +501,18 @@ export function transition(state,event,context={}) {
   if (!isPlainObject(artifacts)) throw new TypeError("Transition artifacts must be an object");
   const requiredKeys=assertRequiredArtifacts(state,event,artifacts);
   assertGraphEvidence(state,event,artifacts,requiredKeys,source);
+  const sourceBoundary=event==="SOURCE_RESTARTED" ?
+    canonicalSourceBoundary(context.source_boundary,source) : undefined;
   const result={
     previous_state:state,
     event,
     state:target,
     ...source,
-    input_artifacts:canonicalReferences(artifacts,requiredKeys),
+    input_artifacts:sourceBoundary?.stale_artifacts ??
+      canonicalReferences(artifacts,requiredKeys),
   };
+
+  if (sourceBoundary!==undefined) result.source_boundary=sourceBoundary;
 
   if (event==="QUESTIONS_FOUND" ||
       (state==="QUESTIONS_PENDING" && event==="DECISION_STARTED")) {
@@ -480,6 +529,10 @@ export function transition(state,event,context={}) {
   }
   if (event==="ADR_APPROVAL_REQUIRED") {
     result.next_action=adrNextAction(artifacts.decision_package,artifacts.adrs);
+    result.decision_package=artifacts.decision_package;
+  }
+  if (event==="ADR_APPROVED") {
+    assertAdrApprovalPackage(artifacts.decision_package);
     result.decision_package=artifacts.decision_package;
   }
   if (event==="AUDIT_BLOCKED") {
