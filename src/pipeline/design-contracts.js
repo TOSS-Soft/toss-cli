@@ -38,6 +38,11 @@ function compareText(left,right) {
   return left<right ? -1 : left>right ? 1 : 0;
 }
 
+function sameStringSet(left,right) {
+  return Array.isArray(left) && Array.isArray(right) &&
+    canonicalJson([...left].sort(compareText))===canonicalJson([...right].sort(compareText));
+}
+
 function sortedResult(findings,extra={}) {
   findings.sort((left,right) =>
     compareText(left.type,right.type) ||
@@ -85,14 +90,14 @@ function entityDefinitions(artifact,index) {
   const content=artifact.content;
   if (!content || typeof content!=="object" || Array.isArray(content)) return [];
   const definitions=[];
-  const add=(id,path) => {
-    if (typeof id==="string") definitions.push({id,path,artifact});
+  const add=(id,path,value=id) => {
+    if (typeof id==="string") definitions.push({id,path,value,artifact});
   };
   const addArray=(rows,field,path) => {
     if (!Array.isArray(rows)) return;
     for (const [rowIndex,row] of rows.entries()) {
       if (row && typeof row==="object" && !Array.isArray(row)) {
-        add(row[field],`${path}/${rowIndex}/${field}`);
+        add(row[field],`${path}/${rowIndex}/${field}`,row);
       }
     }
   };
@@ -149,6 +154,27 @@ function entityDefinitions(artifact,index) {
   return definitions;
 }
 
+function exactDesignSystemPredecessor(older,newer) {
+  return older.document_type==="design-system" &&
+    newer.document_type==="design-system" &&
+    older.artifact_id===newer.artifact_id && newer.revision===older.revision+1 &&
+    artifactSource(older)===artifactSource(newer) &&
+    canonicalJson(older.provenance)===canonicalJson(newer.provenance) &&
+    newer.parents.length===1 &&
+    newer.parents[0].artifact_id===older.artifact_id &&
+    newer.parents[0].revision===older.revision &&
+    newer.parents[0].content_sha256===older.content_sha256 &&
+    newer.parents[0].document_type===older.document_type;
+}
+
+function sharedLineageEntity(left,right) {
+  const [older,newer]=left.artifact.revision<right.artifact.revision ?
+    [left,right] : [right,left];
+  return left.artifact.revision!==right.artifact.revision &&
+    exactDesignSystemPredecessor(older.artifact,newer.artifact) &&
+    canonicalJson(older.value)===canonicalJson(newer.value);
+}
+
 function collectArtifactReferences(value,path,references) {
   if (!value || typeof value!=="object") return;
   if (Array.isArray(value)) {
@@ -172,6 +198,7 @@ function graphIndexes(graph,validIndexes=new Set(graph.keys())) {
   const artifacts=new Map();
   const latestRevision=new Map();
   const entities=new Map();
+  const entityGroups=new Map();
   const findings=[];
   for (const [index,artifact] of graph.entries()) {
     if (!artifact || typeof artifact!=="object" || Array.isArray(artifact)) {
@@ -202,15 +229,27 @@ function graphIndexes(graph,validIndexes=new Set(graph.keys())) {
     );
     if (!validIndexes.has(index)) continue;
     for (const definition of entityDefinitions(artifact,index)) {
-      if (entities.has(definition.id)) {
+      const group=entityGroups.get(definition.id) ?? [];
+      group.push(definition);
+      entityGroups.set(definition.id,group);
+    }
+  }
+  for (const [entityId,definitions] of entityGroups) {
+    definitions.sort((left,right) =>
+      compareText(left.artifact.artifact_id,right.artifact.artifact_id) ||
+      left.artifact.revision-right.artifact.revision ||
+      compareText(left.path,right.path));
+    let previous;
+    for (const definition of definitions) {
+      if (previous && !sharedLineageEntity(previous,definition)) {
         findings.push(finding(
           "DUPLICATE_ENTITY_IDENTITY",definition.path,
-          `Duplicate design entity identity ${definition.id}`,
+          `Duplicate design entity identity ${entityId}`,
         ));
-      } else {
-        entities.set(definition.id,definition);
       }
+      previous=definition;
     }
+    entities.set(entityId,definitions.at(-1));
   }
   return {artifacts,latestRevision,entities,findings};
 }
@@ -246,7 +285,11 @@ function referenceFindings(graph,indexes,validIndexes) {
           "Reference document_type does not match the target artifact",
         ));
       }
-      if ((indexes.latestRevision.get(reference.artifact_id) ?? 0)>reference.revision) {
+      const exactPredecessorParent=artifact.document_type==="design-system" &&
+        path.startsWith(`/${index}/parents/`) &&
+        exactDesignSystemPredecessor(target.artifact,artifact);
+      if (!exactPredecessorParent &&
+          (indexes.latestRevision.get(reference.artifact_id) ?? 0)>reference.revision) {
         findings.push(finding(
           "STALE_ARTIFACT_REFERENCE",`${path}/revision`,
           `Reference does not select the latest ${reference.artifact_id} revision`,
@@ -379,8 +422,24 @@ function linkedEntityFindings(graph,indexes,validIndexes) {
         const screen=exactEntity(wireframe.screen_ref,"screen-spec",
           `/${artifactIndex}/content/wireframes/${wireIndex}/screen_ref`);
         for (const [flowIndex,flowRef] of wireframe.flow_refs.entries()) {
-          exactEntity(flowRef,"user-flow",
+          const flow=exactEntity(flowRef,"user-flow",
             `/${artifactIndex}/content/wireframes/${wireIndex}/flow_refs/${flowIndex}`);
+          if (screen && flow) {
+            const reverseLinked=screen.artifact.content.flow_refs.some(reference =>
+              reference.artifact_id===flow.artifact.artifact_id &&
+              reference.revision===flow.artifact.revision &&
+              reference.content_sha256===flow.artifact.content_sha256 &&
+              reference.document_type===flow.artifact.document_type &&
+              reference.entity_id===flowRef.entity_id);
+            const traversedStates=new Set(flow.artifact.content.steps.filter(step =>
+              step.screen_id===wireframe.screen_ref.entity_id).map(step => step.state_id));
+            if (!reverseLinked || !wireframe.state_ids.every(stateId =>
+              traversedStates.has(stateId))) findings.push(finding(
+              "WIREFRAME_FLOW_SCREEN_MISMATCH",
+              `/${artifactIndex}/content/wireframes/${wireIndex}/flow_refs/${flowIndex}`,
+              "Wireframe flow must traverse every selected state on the exact reverse-linked screen",
+            ));
+          }
         }
         for (const [stateIndex,stateId] of wireframe.state_ids.entries()) {
           if (!screen?.artifact.content.states.some(state => state.state_id===stateId)) {
@@ -407,13 +466,17 @@ function linkedEntityFindings(graph,indexes,validIndexes) {
     }
     if (artifact.document_type==="screen-spec") {
       const componentRefs=new Map(content.component_refs.map(reference =>
-        [reference.entity_id,exactEntity(reference,"design-system",
-          `/${artifactIndex}/content/component_refs/${reference.entity_id}`)]));
+        [reference.entity_id,{
+          reference,
+          target:exactEntity(reference,"design-system",
+            `/${artifactIndex}/content/component_refs/${reference.entity_id}`),
+        }]));
+      const statesById=new Map(content.states.map(state => [state.state_id,state]));
       const responsiveIds=new Set(content.responsive.map(row => row.target_id));
       const accessibilityIds=new Set(content.accessibility.map(row => row.criterion_id));
       for (const [stateIndex,state] of asArray(content.states).entries()) {
         for (const [componentIndex,componentId] of state.component_ids.entries()) {
-          if (!componentRefs.get(componentId)) findings.push(finding(
+          if (!componentRefs.get(componentId)?.target) findings.push(finding(
             "SCREEN_COMPONENT_NOT_DECLARED",
             `/${artifactIndex}/content/states/${stateIndex}/component_ids/${componentIndex}`,
             `Screen state component ${componentId} is not one of this screen's exact component references`,
@@ -435,8 +498,31 @@ function linkedEntityFindings(graph,indexes,validIndexes) {
         }
       }
       for (const [ruleIndex,application] of asArray(content.rule_applications).entries()) {
-        exactEntity(application.rule_ref,"design-system",
-          `/${artifactIndex}/content/rule_applications/${ruleIndex}/rule_ref`);
+        const path=`/${artifactIndex}/content/rule_applications/${ruleIndex}`;
+        const ruleTarget=exactEntity(application.rule_ref,"design-system",`${path}/rule_ref`);
+        for (const [componentIndex,componentId] of application.component_ids.entries()) {
+          const componentLink=componentRefs.get(componentId);
+          const component=componentLink?.target?.artifact.content.components.find(candidate =>
+            candidate.component_id===componentId);
+          const sameSystem=ruleTarget && componentLink?.target &&
+            ruleTarget.artifact.artifact_id===componentLink.target.artifact.artifact_id &&
+            ruleTarget.artifact.revision===componentLink.target.artifact.revision &&
+            ruleTarget.artifact.content_sha256===componentLink.target.artifact.content_sha256;
+          if (!sameSystem || !component?.rule_ids.includes(application.rule_ref.entity_id)) {
+            findings.push(finding(
+              "RULE_APPLICATION_SCOPE_INVALID",`${path}/component_ids/${componentIndex}`,
+              `Rule application component ${componentId} must resolve to the exact rule-bearing design-system revision`,
+            ));
+          }
+        }
+        for (const [stateIndex,stateId] of application.state_ids.entries()) {
+          const state=statesById.get(stateId);
+          if (!state || !application.component_ids.every(componentId =>
+            state.component_ids.includes(componentId))) findings.push(finding(
+            "RULE_APPLICATION_SCOPE_INVALID",`${path}/state_ids/${stateIndex}`,
+            `Rule application state ${stateId} must use every affected component`,
+          ));
+        }
       }
     }
   }
@@ -463,20 +549,127 @@ function sortArtifactReferences(references) {
   return [...references].sort((left,right) => compareText(canonicalJson(left),canonicalJson(right)));
 }
 
-function authoritativeApprovalManifest(graph,indexes,validIndexes) {
-  return sortArtifactReferences(graph.filter((artifact,index) =>
-    validIndexes.has(index) && artifact.document_type!=="design-approval" &&
-    artifact.revision===indexes.latestRevision.get(artifact.artifact_id)).map(artifactReference => ({
-    document_type:artifactReference.document_type,
-    artifact_id:artifactReference.artifact_id,
-    revision:artifactReference.revision,
-    content_sha256:artifactReference.content_sha256,
+function designSystemLineageFindings(systems) {
+  const findings=[];
+  const byArtifactId=new Map();
+  for (const system of systems) {
+    const group=byArtifactId.get(system.artifact_id) ?? [];
+    group.push(system);
+    byArtifactId.set(system.artifact_id,group);
+  }
+  for (const revisions of byArtifactId.values()) {
+    revisions.sort((left,right) => left.revision-right.revision);
+    const byRevision=new Map();
+    for (const system of revisions) {
+      const sameRevision=byRevision.get(system.revision) ?? [];
+      sameRevision.push(system);
+      byRevision.set(system.revision,sameRevision);
+    }
+    for (const [revision,members] of byRevision) {
+      if (members.length>1) findings.push(finding(
+        "DESIGN_SYSTEM_LINEAGE_FORK",
+        `/design-system/${members[0].artifact_id}@${revision}`,
+        `Design-system lineage has ${members.length} artifacts at revision ${revision}`,
+      ));
+    }
+    for (const current of revisions) {
+      if (current.revision===1) continue;
+      const priorMembers=byRevision.get(current.revision-1) ?? [];
+      if (priorMembers.length!==1) {
+        const hasEarlier=revisions.some(candidate => candidate.revision<current.revision);
+        findings.push(finding(
+          hasEarlier ? "DESIGN_SYSTEM_LINEAGE_NONCONTIGUOUS" :
+            "DESIGN_SYSTEM_LINEAGE_MISSING",
+          `/design-system/${current.artifact_id}@${current.revision}`,
+          `Design-system revision ${current.revision} requires exactly one revision ${current.revision-1}`,
+        ));
+        continue;
+      }
+      const previous=priorMembers[0];
+      if (!exactDesignSystemPredecessor(previous,current)) findings.push(finding(
+        "DESIGN_SYSTEM_LINEAGE_PARENT_INVALID",
+        `/design-system/${current.artifact_id}@${current.revision}/parents`,
+        "Design-system revision must have its exact immediate predecessor as its sole parent",
+      ));
+      if (previous.content.verified===true && (current.content.verified!==true ||
+          current.content.system_id!==previous.content.system_id)) findings.push(finding(
+        "VERIFIED_SYSTEM_DOWNGRADE",
+        `/design-system/${current.artifact_id}@${current.revision}`,
+        "A verified design-system identity cannot be removed or downgraded",
+      ));
+      const currentRules=new Map(current.content.rules.map(rule => [rule.rule_id,rule]));
+      for (const old of previous.content.rules) {
+        if (previous.content.verified!==true || old.origin!=="company_system" ||
+            old.binding!==true) continue;
+        const next=currentRules.get(old.rule_id);
+        if (!next) findings.push(finding(
+          "VERIFIED_RULE_DELETION",
+          `/design-system/${current.artifact_id}@${current.revision}/rules/${old.rule_id}`,
+          `Verified company rule ${old.rule_id} was deleted`,
+        ));
+        else if (canonicalJson(next)!==canonicalJson(old)) findings.push(finding(
+          "VERIFIED_RULE_MUTATION",
+          `/design-system/${current.artifact_id}@${current.revision}/rules/${old.rule_id}`,
+          `Verified company rule ${old.rule_id} or its verification metadata changed`,
+        ));
+      }
+    }
+  }
+  return findings;
+}
+
+function approvalClosure(graph,validIndexes) {
+  const latest=[];
+  const issues=[];
+  for (const documentType of Object.keys(SCHEMA_BY_DOCUMENT_TYPE)) {
+    const members=graph.filter((artifact,index) => validIndexes.has(index) &&
+      artifact.document_type===documentType);
+    if (members.length===0) {
+      issues.push({
+        type:"APPROVAL_REQUIRED_TYPE_MISSING",
+        message:`Approval graph requires exactly one latest ${documentType} artifact`,
+      });
+      continue;
+    }
+    if (documentType==="design-system") {
+      const artifactIds=new Set(members.map(artifact => artifact.artifact_id));
+      const revisions=new Set(members.map(artifact => artifact.revision));
+      if (artifactIds.size!==1 || revisions.size!==members.length) {
+        issues.push({
+          type:"APPROVAL_TYPE_MULTIPLICITY",
+          message:"Approval graph permits one unambiguous design-system lineage only",
+        });
+        continue;
+      }
+      latest.push(members.reduce((left,right) => left.revision>right.revision ? left : right));
+      continue;
+    }
+    if (members.length!==1) {
+      issues.push({
+        type:"APPROVAL_TYPE_MULTIPLICITY",
+        message:`Approval graph contains ${members.length} ${documentType} artifacts`,
+      });
+      continue;
+    }
+    latest.push(members[0]);
+  }
+  return {issues,latest};
+}
+
+function authoritativeApprovalManifest(closure) {
+  return sortArtifactReferences(closure.latest.filter(artifact =>
+    artifact.document_type!=="design-approval").map(artifact => ({
+    document_type:artifact.document_type,
+    artifact_id:artifact.artifact_id,
+    revision:artifact.revision,
+    content_sha256:artifact.content_sha256,
   })));
 }
 
-function approvalGraphFindings(graph,indexes,validIndexes) {
+function approvalGraphFindings(graph,validIndexes) {
   const findings=[];
-  const expected=authoritativeApprovalManifest(graph,indexes,validIndexes);
+  const closure=approvalClosure(graph,validIndexes);
+  const expected=authoritativeApprovalManifest(closure);
   const expectedByIdentity=new Map(expected.map(reference =>
     [artifactReferenceIdentity(reference),reference]));
   const briefs=graph.filter((artifact,index) => validIndexes.has(index) &&
@@ -487,6 +680,13 @@ function approvalGraphFindings(graph,indexes,validIndexes) {
   for (const [index,approval] of graph.entries()) {
     if (!validIndexes.has(index) || approval.document_type!=="design-approval") continue;
     const prefix=`/${index}/content`;
+    for (const issue of closure.issues) findings.push(finding(
+      issue.type,`${prefix}/graph_manifest`,issue.message,
+    ));
+    if (closure.issues.length>0) findings.push(finding(
+      "APPROVAL_GRAPH_INCOMPLETE",`${prefix}/graph_manifest`,
+      "Approval graph cannot form the exact required twelve-type closure",
+    ));
     const manifest=approval.content.graph_manifest;
     const seen=new Set();
     for (const [manifestIndex,reference] of manifest.entries()) {
@@ -612,7 +812,9 @@ function graphFindings(graph) {
     ...sourceFindings(graph,schemaState.validIndexes),
     ...referenceFindings(graph,indexes,schemaState.validIndexes),
     ...linkedEntityFindings(graph,indexes,schemaState.validIndexes),
-    ...approvalGraphFindings(graph,indexes,schemaState.validIndexes),
+    ...designSystemLineageFindings(graph.filter((artifact,index) =>
+      schemaState.validIndexes.has(index) && artifact.document_type==="design-system")),
+    ...approvalGraphFindings(graph,schemaState.validIndexes),
   ];
 }
 
@@ -642,7 +844,7 @@ function bindingFindings(graph) {
     artifact.document_type==="screen-spec");
   const approvals=graph.filter((artifact,index) => schemaState.validIndexes.has(index) &&
     artifact.document_type==="design-approval");
-  const approvalIssues=approvalGraphFindings(graph,indexes,schemaState.validIndexes);
+  const approvalIssues=approvalGraphFindings(graph,schemaState.validIndexes);
   const graphTime=Math.max(...graph.filter((artifact,index) =>
     schemaState.validIndexes.has(index)).map(artifact => Date.parse(artifact.created_at)));
   const exactEntityRef=(reference,artifact,entityId) => reference &&
@@ -721,12 +923,27 @@ function bindingFindings(graph) {
             }
           }
         }
-        const componentIds=new Set(screen.content.component_refs.map(reference =>
-          reference.entity_id));
+        const componentRefs=new Map(screen.content.component_refs.map(reference =>
+          [reference.entity_id,reference]));
+        const states=new Map(screen.content.states.map(state => [state.state_id,state]));
         const authorization=grants.length===1 ? grants[0] : undefined;
+        const exactComponents=exception?.scope.component_ids.every(componentId => {
+          const reference=componentRefs.get(componentId);
+          const component=system.content.components.find(candidate =>
+            candidate.component_id===componentId);
+          return exactEntityRef(reference,system,componentId) &&
+            component?.rule_ids.includes(rule.rule_id);
+        });
+        const exactStates=exception?.scope.state_ids.every(stateId => {
+          const state=states.get(stateId);
+          return state && exception.scope.component_ids.every(componentId =>
+            state.component_ids.includes(componentId));
+        });
         const valid=authorization!==undefined && exception?.exact_rule_id===rule.rule_id &&
-          exception.scope.screen_ids.includes(screen.content.screen_id) &&
-          exception.scope.component_ids.every(componentId => componentIds.has(componentId)) &&
+          sameStringSet(exception.scope.screen_ids,[screen.content.screen_id]) &&
+          sameStringSet(exception.scope.state_ids,application.state_ids) &&
+          sameStringSet(exception.scope.component_ids,application.component_ids) &&
+          exactComponents && exactStates &&
           canonicalJson(exception.scope)===canonicalJson(authorization.grant.scope) &&
           canonicalJson(exception.provenance)===canonicalJson(system.provenance) &&
           Date.parse(exception.valid_until)>=graphTime &&
@@ -734,75 +951,6 @@ function bindingFindings(graph) {
         if (!valid) findings.push(finding(
           "APPROVED_EXCEPTION_INVALID",`${path}/exception_id`,
           `Exception ${application.exception_id} is not exact, scoped, authority-approved, and provenance-bound`,
-        ));
-      }
-    }
-  }
-  const byArtifactId=new Map();
-  for (const system of systems) {
-    const group=byArtifactId.get(system.artifact_id) ?? [];
-    group.push(system);
-    byArtifactId.set(system.artifact_id,group);
-  }
-  for (const revisions of byArtifactId.values()) {
-    revisions.sort((left,right) => left.revision-right.revision);
-    const byRevision=new Map();
-    for (const system of revisions) {
-      const sameRevision=byRevision.get(system.revision) ?? [];
-      sameRevision.push(system);
-      byRevision.set(system.revision,sameRevision);
-    }
-    for (const [revision,members] of byRevision) {
-      if (members.length>1) findings.push(finding(
-        "DESIGN_SYSTEM_LINEAGE_FORK",
-        `/design-system/${members[0].artifact_id}@${revision}`,
-        `Design-system lineage has ${members.length} artifacts at revision ${revision}`,
-      ));
-    }
-    for (const current of revisions) {
-      if (current.revision===1) continue;
-      const priorMembers=byRevision.get(current.revision-1) ?? [];
-      if (priorMembers.length!==1) {
-        const hasEarlier=revisions.some(candidate => candidate.revision<current.revision);
-        findings.push(finding(
-          hasEarlier ? "DESIGN_SYSTEM_LINEAGE_NONCONTIGUOUS" :
-            "DESIGN_SYSTEM_LINEAGE_MISSING",
-          `/design-system/${current.artifact_id}@${current.revision}`,
-          `Design-system revision ${current.revision} requires exactly one revision ${current.revision-1}`,
-        ));
-        continue;
-      }
-      const previous=priorMembers[0];
-      const exactParents=asArray(current.parents).filter(parent =>
-        parent.artifact_id===previous.artifact_id &&
-        parent.revision===previous.revision &&
-        parent.document_type===previous.document_type &&
-        parent.content_sha256===previous.content_sha256);
-      if (exactParents.length!==1 || current.parents.length!==1) findings.push(finding(
-        "DESIGN_SYSTEM_LINEAGE_PARENT_INVALID",
-        `/design-system/${current.artifact_id}@${current.revision}/parents`,
-        "Design-system revision must have its exact immediate predecessor as its sole parent",
-      ));
-      if (previous.content.verified===true && (current.content.verified!==true ||
-          current.content.system_id!==previous.content.system_id)) findings.push(finding(
-        "VERIFIED_SYSTEM_DOWNGRADE",
-        `/design-system/${current.artifact_id}@${current.revision}`,
-        "A verified design-system identity cannot be removed or downgraded",
-      ));
-      const currentRules=new Map(current.content.rules.map(rule => [rule.rule_id,rule]));
-      for (const old of previous.content.rules) {
-        if (previous.content.verified!==true || old.origin!=="company_system" ||
-            old.binding!==true) continue;
-        const next=currentRules.get(old.rule_id);
-        if (!next) findings.push(finding(
-          "VERIFIED_RULE_DELETION",
-          `/design-system/${current.artifact_id}@${current.revision}/rules/${old.rule_id}`,
-          `Verified company rule ${old.rule_id} was deleted`,
-        ));
-        else if (canonicalJson(next)!==canonicalJson(old)) findings.push(finding(
-          "VERIFIED_RULE_MUTATION",
-          `/design-system/${current.artifact_id}@${current.revision}/rules/${old.rule_id}`,
-          `Verified company rule ${old.rule_id} or its verification metadata changed`,
         ));
       }
     }
@@ -939,15 +1087,13 @@ export function resolveDesignAsset(entry) {
       parsed=undefined;
     }
     const encodedAmbiguity=typeof location.uri==="string" &&
-      /%(?:[0-1][0-9a-f]|7f|25|2e|2f|5c)/i.test(location.uri);
-    const secretQuery=parsed && [...parsed.searchParams.keys()].some(key =>
-      /(?:access[_-]?token|api[_-]?key|auth|credential|password|secret|signature|sig)/i.test(key));
+      /%[0-9a-f]{2}/i.test(location.uri);
     const unsafe=canonicalJson(uriKeys)!==canonicalJson(["kind","uri"]) ||
       typeof location.uri!=="string" || /[\u0000-\u0020\u007f]/.test(location.uri) ||
       encodedAmbiguity ||
       !parsed || !new Set(["https:","figma:","pencil:"]).has(parsed.protocol) ||
       parsed.username!=="" || parsed.password!=="" ||
-      parsed.hash!=="" || secretQuery || parsed.href!==location.uri ||
+      parsed.search!=="" || parsed.hash!=="" || parsed.href!==location.uri ||
       (parsed.protocol==="https:" && parsed.hostname.length===0);
     if (unsafe) findings.push(finding(
       "ASSET_URI_UNSAFE","/location/uri",

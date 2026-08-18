@@ -115,6 +115,28 @@ function replaceReferences(value,byArtifactId) {
   ]));
 }
 
+function latestManifest(graph) {
+  const latestByType=new Map();
+  for (const artifact of graph) {
+    if (artifact.document_type==="design-approval") continue;
+    const previous=latestByType.get(artifact.document_type);
+    if (!previous || artifact.revision>previous.revision) {
+      latestByType.set(artifact.document_type,artifact);
+    }
+  }
+  return [...latestByType.values()].map(artifactReference).sort((left,right) =>
+    canonicalJson(left)<canonicalJson(right) ? -1 :
+      canonicalJson(left)>canonicalJson(right) ? 1 : 0);
+}
+
+function synchronizeApproval(graph) {
+  const approval=graph.find(artifact => artifact.document_type==="design-approval");
+  approval.content.graph_manifest=latestManifest(graph);
+  approval.content.graph_root_sha256=sha256Canonical(approval.content.graph_manifest);
+  rehash(approval);
+  return graph;
+}
+
 function rebuildGraph(input) {
   const graph=[];
   const byArtifactId=new Map();
@@ -124,9 +146,7 @@ function rebuildGraph(input) {
     artifact.inputs=replaceReferences(artifact.inputs,byArtifactId);
     artifact.content=replaceReferences(artifact.content,byArtifactId);
     if (artifact.document_type==="design-approval") {
-      artifact.content.graph_manifest=graph.map(artifactReference).sort((left,right) =>
-        canonicalJson(left)<canonicalJson(right) ? -1 :
-          canonicalJson(left)>canonicalJson(right) ? 1 : 0);
+      artifact.content.graph_manifest=latestManifest(graph);
       artifact.content.graph_root_sha256=sha256Canonical(artifact.content.graph_manifest);
     }
     rehash(artifact);
@@ -464,7 +484,11 @@ function approvedExceptionGraph() {
   const system=graph.find(artifact => artifact.document_type==="design-system");
   const screen=graph.find(artifact => artifact.document_type==="screen-spec");
   const approval=graph.find(artifact => artifact.document_type==="design-approval");
-  const scope={screen_ids:[screen.content.screen_id],component_ids:["COMP-BUTTON"]};
+  const scope={
+    screen_ids:[screen.content.screen_id],
+    state_ids:["STATE-DEFAULT"],
+    component_ids:["COMP-BUTTON"],
+  };
   system.content.exceptions=[{
     exception_id:"EXCEPTION-CHECKOUT-COLOR",
     exact_rule_id:"RULE-COLOR-PRIMARY",
@@ -475,6 +499,8 @@ function approvedExceptionGraph() {
   }];
   screen.content.rule_applications[0]={
     rule_ref:entityReference(system,"RULE-COLOR-PRIMARY"),
+    state_ids:["STATE-DEFAULT"],
+    component_ids:["COMP-BUTTON"],
     value:{token:"color.checkout.primary"},
     exception_id:"EXCEPTION-CHECKOUT-COLOR",
   };
@@ -536,10 +562,11 @@ test("rejected, wrong-authority, expired, wrong-scope, wrong-revision and replay
 
 function designSystemRevision(graph,revision) {
   const prior=graph.find(artifact => artifact.document_type==="design-system");
+  const brief=graph.find(artifact => artifact.document_type==="design-brief");
   const next=clone(prior);
   next.revision=revision;
   next.parents=[artifactReference(prior)];
-  next.inputs=[artifactReference(prior)];
+  next.inputs=[artifactReference(brief)];
   next.content.system_version=`3.2.${revision}`;
   return next;
 }
@@ -803,5 +830,296 @@ test("design approval binds the complete exact latest graph manifest and root",a
     assert.ok(findingTypes(validateDesignArtifact(approval,graph)).includes(
       "DUPLICATE_ARTIFACT_IDENTITY",
     ));
+  });
+});
+
+test("approved exception component and state scope is exact and rule-bearing",async t => {
+  const {validateDesignSystemRules}=await import("../src/pipeline/design-contracts.js");
+  const setScope=(graph,componentId,stateId="STATE-DEFAULT") => {
+    const system=graph.find(artifact => artifact.document_type==="design-system");
+    const screen=graph.find(artifact => artifact.document_type==="screen-spec");
+    const approval=graph.find(artifact => artifact.document_type==="design-approval");
+    const scope={
+      screen_ids:[screen.content.screen_id],state_ids:[stateId],component_ids:[componentId],
+    };
+    system.content.exceptions[0].scope=clone(scope);
+    screen.content.rule_applications[0].state_ids=[stateId];
+    screen.content.rule_applications[0].component_ids=[componentId];
+    approval.content.exception_grants[0].scope=clone(scope);
+    return {system,screen};
+  };
+
+  await t.test("valid exact scope",() => {
+    const graph=approvedExceptionGraph();
+    assert.equal(validateDesignSystemRules(graph).valid,true,
+      JSON.stringify(validateDesignSystemRules(graph).findings));
+  });
+  await t.test("unused component",() => {
+    let graph=approvedExceptionGraph();
+    const {system,screen}=setScope(graph,"COMP-UNUSED");
+    system.content.components.push({
+      component_id:"COMP-UNUSED",name:"Unused",states:["default"],
+      rule_ids:["RULE-COLOR-PRIMARY"],
+    });
+    screen.content.component_refs.push(entityReference(system,"COMP-UNUSED"));
+    graph=rebuildGraph(graph);
+    assert.ok(findingTypes(validateDesignSystemRules(graph)).includes(
+      "APPROVED_EXCEPTION_INVALID",
+    ));
+  });
+  await t.test("component without protected rule",() => {
+    let graph=approvedExceptionGraph();
+    const {system,screen}=setScope(graph,"COMP-NO-RULE");
+    system.content.components.push({
+      component_id:"COMP-NO-RULE",name:"No rule",states:["default"],rule_ids:[],
+    });
+    screen.content.component_refs.push(entityReference(system,"COMP-NO-RULE"));
+    screen.content.states[0].component_ids.push("COMP-NO-RULE");
+    graph=rebuildGraph(graph);
+    assert.ok(findingTypes(validateDesignSystemRules(graph)).includes(
+      "APPROVED_EXCEPTION_INVALID",
+    ));
+  });
+  await t.test("affected state does not use scoped component",() => {
+    let graph=approvedExceptionGraph();
+    const {system,screen}=setScope(graph,"COMP-BUTTON","STATE-SUCCESS");
+    system.content.components.push({
+      component_id:"COMP-LINK",name:"Link",states:["default"],
+      rule_ids:["RULE-COLOR-PRIMARY"],
+    });
+    screen.content.component_refs.push(entityReference(system,"COMP-LINK"));
+    screen.content.states.find(state => state.state_id==="STATE-SUCCESS").component_ids=[
+      "COMP-LINK",
+    ];
+    graph=rebuildGraph(graph);
+    assert.ok(findingTypes(validateDesignSystemRules(graph)).includes(
+      "APPROVED_EXCEPTION_INVALID",
+    ));
+  });
+  await t.test("component reference from wrong system revision",() => {
+    let graph=approvedExceptionGraph();
+    const prior=graph.find(artifact => artifact.document_type==="design-system");
+    const next=designSystemRevision(graph,2);
+    graph.splice(graph.indexOf(prior)+1,0,next);
+    graph=rebuildGraph(graph);
+    const screen=graph.find(artifact => artifact.document_type==="screen-spec");
+    screen.content.component_refs[0]=entityReference(prior,"COMP-BUTTON");
+    rehash(screen);
+    synchronizeApproval(graph);
+    assert.ok(findingTypes(validateDesignSystemRules(graph)).includes(
+      "APPROVED_EXCEPTION_INVALID",
+    ));
+  });
+});
+
+function designSystemRevisionGraph(mutate=() => {}) {
+  const graph=buildGraph();
+  const prior=graph.find(artifact => artifact.document_type==="design-system");
+  const next=designSystemRevision(graph,2);
+  mutate(next,prior,graph);
+  graph.splice(graph.indexOf(prior)+1,0,next);
+  return rebuildGraph(graph);
+}
+
+function designSystemThreeRevisionGraph() {
+  let graph=designSystemRevisionGraph();
+  const prior=graph.find(artifact =>
+    artifact.document_type==="design-system" && artifact.revision===2);
+  const brief=graph.find(artifact => artifact.document_type==="design-brief");
+  const next=clone(prior);
+  next.revision=3;
+  next.parents=[artifactReference(prior)];
+  next.inputs=[artifactReference(brief)];
+  next.content.system_version="3.2.3";
+  graph.splice(graph.indexOf(prior)+1,0,next);
+  return rebuildGraph(graph);
+}
+
+test("design-system history accepts one exact stable lineage and rejects impostors",async t => {
+  const {validateDesignSystemRules}=await import("../src/pipeline/design-contracts.js");
+  await t.test("valid unchanged revision two",() => {
+    const graph=designSystemRevisionGraph();
+    assert.equal(validateDesignSystemRules(graph).valid,true,
+      JSON.stringify(validateDesignSystemRules(graph).findings));
+  });
+  await t.test("valid lineage is independent of graph member order",() => {
+    const graph=designSystemThreeRevisionGraph();
+    const systems=graph.filter(artifact => artifact.document_type==="design-system").reverse();
+    const reordered=graph.filter(artifact => artifact.document_type!=="design-system");
+    reordered.splice(graph.findIndex(artifact => artifact.document_type==="design-system"),
+      0,...systems);
+    assert.equal(validateDesignSystemRules(reordered).valid,true,
+      JSON.stringify(validateDesignSystemRules(reordered).findings));
+  });
+  await t.test("deletion still fails",() => {
+    const graph=designSystemRevisionGraph(next => { next.content.rules=[]; });
+    assert.ok(findingTypes(validateDesignSystemRules(graph)).includes(
+      "VERIFIED_RULE_DELETION",
+    ));
+  });
+  await t.test("metadata downgrade still fails",() => {
+    const graph=designSystemRevisionGraph(next => { next.content.rules[0].binding=false; });
+    assert.ok(findingTypes(validateDesignSystemRules(graph)).includes(
+      "VERIFIED_RULE_MUTATION",
+    ));
+  });
+  await t.test("wrong parent fails",() => {
+    const graph=designSystemRevisionGraph((next,prior,all) => {
+      next.parents=[artifactReference(all[0])];
+    });
+    assert.ok(findingTypes(validateDesignSystemRules(graph)).includes(
+      "DESIGN_SYSTEM_LINEAGE_PARENT_INVALID",
+    ));
+  });
+  await t.test("cross-source revision fails",() => {
+    const graph=designSystemRevisionGraph(next => { next.content.source="new_system"; });
+    const types=findingTypes(validateDesignSystemRules(graph));
+    assert.ok(types.includes("SOURCE_MISMATCH") || types.includes("CROSS_SOURCE_REFERENCE"));
+  });
+  await t.test("unrelated artifact cannot reuse stable entities",() => {
+    const graph=buildGraph();
+    const foreign=clone(graph.find(artifact => artifact.document_type==="design-system"));
+    foreign.artifact_id="design-system:FOREIGN";
+    foreign.content.system_version="foreign";
+    rehash(foreign);
+    graph.splice(-1,0,foreign);
+    synchronizeApproval(graph);
+    assert.ok(findingTypes(validateDesignSystemRules(graph)).includes(
+      "DUPLICATE_ENTITY_IDENTITY",
+    ));
+  });
+});
+
+test("wireframe flow references must traverse the exact selected screen",async t => {
+  const {validateDesignArtifact}=await import("../src/pipeline/design-contracts.js");
+  await t.test("selected flow traverses another screen",() => {
+    let graph=buildGraph();
+    const flow=graph.find(artifact => artifact.document_type==="user-flow");
+    for (const step of flow.content.steps) step.screen_id="SCREEN-OTHER";
+    graph=rebuildGraph(graph);
+    const wireframe=graph.find(artifact => artifact.document_type==="wireframe-plan");
+    assert.ok(findingTypes(validateDesignArtifact(wireframe,graph)).includes(
+      "WIREFRAME_FLOW_SCREEN_MISMATCH",
+    ));
+  });
+  await t.test("colliding screen and state ids do not replace reverse linkage",() => {
+    const graph=buildGraph();
+    const flow=graph.find(artifact => artifact.document_type==="user-flow");
+    const foreign=clone(flow);
+    foreign.artifact_id="user-flow:FOREIGN";
+    foreign.content.flow_id="FLOW-FOREIGN";
+    rehash(foreign);
+    graph.splice(-1,0,foreign);
+    const wireframe=graph.find(artifact => artifact.document_type==="wireframe-plan");
+    wireframe.content.wireframes[0].flow_refs=[entityReference(foreign,"FLOW-FOREIGN")];
+    rehash(wireframe);
+    const result=validateDesignArtifact(wireframe,graph);
+    assert.ok(findingTypes(result).includes(
+      "WIREFRAME_FLOW_SCREEN_MISMATCH",
+    ),JSON.stringify(result.findings));
+  });
+});
+
+test("remote asset URIs reject every query, fragment, and encoded credential ambiguity",async () => {
+  const {resolveDesignAsset}=await import("../src/pipeline/design-contracts.js");
+  const base={
+    asset_id:"ASSET-REMOTE",tool:"figma",version:"1",
+    integrity:{algorithm:"sha256",value:"c".repeat(64)},
+  };
+  for (const uri of [
+    "https://example.com/file?node-id=1",
+    "https://example.com/file?token=secret",
+    "https://example.com/file?session=secret",
+    "https://example.com/file?bearer=secret",
+    "https://example.com/file?key=secret",
+    "https://example.com/file?signature=secret",
+    "https://example.com/file?auth=secret",
+    "https://example.com/file%3ftoken%3dsecret",
+    "https://example.com/file%253ftoken%253dsecret",
+    "https://example.com/file#session",
+  ]) assert.equal(resolveDesignAsset({
+    ...base,location:{kind:"uri",uri},
+  }).valid,false,uri);
+  assert.equal(resolveDesignAsset({
+    ...base,location:{kind:"uri",uri:"https://example.com/assets/file"},
+  }).valid,true);
+});
+
+test("approval closure is independent of synchronized caller omissions and extras",async t => {
+  const {validateDesignArtifact}=await import("../src/pipeline/design-contracts.js");
+  await t.test("complete exact twelve-type graph",() => {
+    const graph=approvalGraph();
+    assert.equal(new Set(graph.map(artifact => artifact.document_type)).size,12);
+    assert.equal(validateDesignArtifact(graph.at(-1),graph).valid,true);
+  });
+  await t.test("synchronized omission",() => {
+    const graph=approvalGraph();
+    graph.splice(graph.findIndex(artifact => artifact.document_type==="visual-direction"),1);
+    synchronizeApproval(graph);
+    const approval=graph.find(artifact => artifact.document_type==="design-approval");
+    assert.ok(findingTypes(validateDesignArtifact(approval,graph)).includes(
+      "APPROVAL_REQUIRED_TYPE_MISSING",
+    ));
+  });
+  await t.test("synchronized extra member",() => {
+    const graph=approvalGraph();
+    const extra=clone(graph.find(artifact => artifact.document_type==="visual-direction"));
+    extra.artifact_id="visual-direction:EXTRA";
+    extra.content.direction_id="VDIR-EXTRA";
+    rehash(extra);
+    graph.splice(-1,0,extra);
+    synchronizeApproval(graph);
+    const approval=graph.find(artifact => artifact.document_type==="design-approval");
+    assert.ok(findingTypes(validateDesignArtifact(approval,graph)).includes(
+      "APPROVAL_TYPE_MULTIPLICITY",
+    ));
+  });
+  await t.test("synchronized duplicate member",() => {
+    const graph=approvalGraph();
+    graph.splice(-1,0,clone(graph.find(
+      artifact => artifact.document_type==="visual-direction",
+    )));
+    synchronizeApproval(graph);
+    const approval=graph.find(artifact => artifact.document_type==="design-approval");
+    const types=findingTypes(validateDesignArtifact(approval,graph));
+    assert.ok(types.includes("APPROVAL_TYPE_MULTIPLICITY"));
+    assert.ok(types.includes("DUPLICATE_ARTIFACT_IDENTITY"));
+  });
+  await t.test("synchronized forked latest lineage",() => {
+    const graph=designSystemRevisionGraph();
+    const latest=graph.find(artifact =>
+      artifact.document_type==="design-system" && artifact.revision===2);
+    const fork=clone(latest);
+    fork.content.system_version="3.2.fork";
+    rehash(fork);
+    graph.splice(-1,0,fork);
+    synchronizeApproval(graph);
+    const approval=graph.find(artifact => artifact.document_type==="design-approval");
+    const types=findingTypes(validateDesignArtifact(approval,graph));
+    assert.ok(types.includes("DESIGN_SYSTEM_LINEAGE_FORK"));
+    assert.ok(types.includes("APPROVAL_TYPE_MULTIPLICITY"));
+  });
+  await t.test("latest manifest cannot be synchronized to a stale predecessor",() => {
+    const graph=designSystemRevisionGraph();
+    const approval=graph.find(artifact => artifact.document_type==="design-approval");
+    const stale=graph.find(artifact =>
+      artifact.document_type==="design-system" && artifact.revision===1);
+    approval.content.graph_manifest=approval.content.graph_manifest.map(reference =>
+      reference.document_type==="design-system" ? artifactReference(stale) : reference);
+    approval.content.graph_root_sha256=sha256Canonical(approval.content.graph_manifest);
+    rehash(approval);
+    assert.ok(findingTypes(validateDesignArtifact(approval,graph)).includes(
+      "APPROVAL_GRAPH_STALE",
+    ));
+  });
+  await t.test("historical predecessor is outside latest manifest",() => {
+    const graph=designSystemRevisionGraph();
+    const approval=graph.find(artifact => artifact.document_type==="design-approval");
+    assert.equal(approval.content.graph_manifest.filter(reference =>
+      reference.document_type==="design-system").length,1);
+    assert.equal(approval.content.graph_manifest.find(reference =>
+      reference.document_type==="design-system").revision,2);
+    assert.equal(validateDesignArtifact(approval,graph).valid,true,
+      JSON.stringify(validateDesignArtifact(approval,graph).findings));
   });
 });
