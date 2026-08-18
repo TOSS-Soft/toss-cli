@@ -1,4 +1,5 @@
 import {validateIssuePlan} from "../pipeline/issue-plan.js";
+import {verifiedGateEvidence} from "./evidence.js";
 import {
   commandCatalog,
   deepFreeze,
@@ -12,15 +13,22 @@ export async function runPlanCommand(command,serviceInput) {
   if (command.name!=="plan.show") {
     throw new TypeError(`Unsupported plan command ${String(command.name)}`);
   }
-  const services=gateCommandServices(serviceInput,{allowed:["artifactStore"]});
+  const services=gateCommandServices(serviceInput,{
+    allowed:["artifactStore","authorityRegistry"],
+  });
   const catalog=await commandCatalog(services.store);
   const bundle=await resolveGateBundle(catalog,{
-    requirePlan:true,requireState:true,current:true,
+    requirePlan:true,requireState:true,requireTrace:false,current:true,
   });
+  const evidence=await verifiedGateEvidence(catalog,bundle,services.authorityRegistry);
   const validation=validateIssuePlan({
     pmAnalysis:bundle.pmAnalysis,
     architecture:bundle.architecture.artifact,
     adrs:bundle.architecture.adrs,
+    approvals:evidence.adrApprovals,
+    ...(evidence.decisionPackage===undefined ? {} : {
+      decisionPackage:evidence.decisionPackage,
+    }),
     issuePlan:bundle.issuePlan,
   });
   if (!validation.valid) {

@@ -1,5 +1,6 @@
 import {canonicalJson} from "../contracts/acp.js";
 import {auditSpecification} from "../pipeline/spec-auditor.js";
+import {verifiedGateEvidence} from "./evidence.js";
 import {
   commandCatalog,
   deepFreeze,
@@ -13,16 +14,24 @@ export async function runAuditCommand(command,serviceInput) {
   if (command.name!=="audit.run") {
     throw new TypeError(`Unsupported audit command ${String(command.name)}`);
   }
-  const services=gateCommandServices(serviceInput,{allowed:["artifactStore"]});
+  const services=gateCommandServices(serviceInput,{
+    allowed:["artifactStore","authorityRegistry"],
+  });
   const catalog=await commandCatalog(services.store);
   const bundle=await resolveGateBundle(catalog,{
     requirePlan:true,
     requireTrace:false,
     current:true,
   });
+  const evidence=await verifiedGateEvidence(catalog,bundle,services.authorityRegistry);
   const result=auditSpecification({
     pmAnalysis:bundle.pmAnalysis,
     architecture:bundle.architecture,
+    approvals:evidence.adrApprovals,
+    ...(evidence.decisionPackage===undefined ? {} : {
+      decisionPackage:evidence.decisionPackage,
+    }),
+    decisionAnswers:evidence.decisionAnswers,
     issuePlan:bundle.issuePlan,
   });
   validationError(result.artifact,"spec-audit.v1","Spec Audit");

@@ -12,10 +12,25 @@ import {
 } from "../pipeline/project-input.js";
 import {buildTraceGraph} from "../pipeline/traceability.js";
 
-const STORE_METHODS=Object.freeze(["append","get","list","verify"]);
+const REQUIRED_STORE_METHODS=Object.freeze(["append","get","list","verify"]);
+const STORE_METHODS=Object.freeze([...REQUIRED_STORE_METHODS,"recover"]);
 const REFERENCE_TYPES=new Set([
   "pm-analysis","architecture","adr","issue-plan","spec-audit","transition-event",
+  "decision-answer","adr-approval",
 ]);
+
+function ownCallable(value,label) {
+  if (typeof value!=="function" || utilTypes.isProxy(value)) {
+    throw new OrchestrationError(
+      "COMMAND_CONTEXT_INVALID",`${label} must be a non-proxy own data-function`,3,
+    );
+  }
+  return value;
+}
+
+function bindCallable(value,receiver) {
+  return Reflect.apply(Function.prototype.bind,value,[receiver]);
+}
 
 function plainDataRecord(value,label,allowed,{required=[]}={}) {
   if (!value || typeof value!=="object" || Array.isArray(value) || utilTypes.isProxy(value)) {
@@ -63,16 +78,14 @@ function plainDataRecord(value,label,allowed,{required=[]}={}) {
 
 function safeStore(value) {
   const record=plainDataRecord(
-    value,"artifactStore",new Set(STORE_METHODS),{required:STORE_METHODS},
+    value,"artifactStore",new Set(STORE_METHODS),{required:REQUIRED_STORE_METHODS},
   );
   const store=Object.create(null);
   for (const method of STORE_METHODS) {
-    if (typeof record[method]!=="function") {
-      throw new OrchestrationError(
-        "COMMAND_CONTEXT_INVALID",`artifactStore.${method} must be an own data-function`,3,
-      );
-    }
-    store[method]=record[method].bind(value);
+    if (!Object.hasOwn(record,method)) continue;
+    store[method]=bindCallable(
+      ownCallable(record[method],`artifactStore.${method}`),value,
+    );
   }
   return Object.freeze(store);
 }
@@ -83,15 +96,11 @@ function safeWriter(value) {
     {required:["preview","publish"]},
   );
   for (const method of ["preview","publish"]) {
-    if (typeof record[method]!=="function") {
-      throw new OrchestrationError(
-        "COMMAND_CONTEXT_INVALID",`GitHub writer.${method} must be an own data-function`,3,
-      );
-    }
+    ownCallable(record[method],`GitHub writer.${method}`);
   }
   return Object.freeze({
-    preview:record.preview.bind(value),
-    publish:record.publish.bind(value),
+    preview:bindCallable(record.preview,value),
+    publish:bindCallable(record.publish,value),
   });
 }
 
@@ -103,12 +112,7 @@ export function gateCommandServices(value,{allowed,required=["artifactStore"]}) 
   for (const key of keys) {
     if (key==="artifactStore" || !Object.hasOwn(record,key)) continue;
     if (["readInput","prompt"].includes(key)) {
-      if (record[key]!==undefined && typeof record[key]!=="function") {
-        throw new OrchestrationError(
-          "COMMAND_CONTEXT_INVALID",`${key} must be an own data-function`,3,
-        );
-      }
-      normalized[key]=record[key];
+      normalized[key]=record[key]===undefined ? undefined : ownCallable(record[key],key);
     } else if (key==="writer") {
       normalized.writer=safeWriter(record.writer);
     } else if (key==="repository") {

@@ -57,8 +57,12 @@ const DECLARED_TRANSITIONS=Object.freeze({
 const REQUIRED_ARTIFACT_KEYS=Object.freeze({
   "ANALYZING\u0000QUESTIONS_FOUND":Object.freeze(["pm_analysis","decision_package"]),
   "ANALYZING\u0000ANALYSIS_COMPLETED":Object.freeze(["pm_analysis"]),
-  "QUESTIONS_PENDING\u0000DECISION_STARTED":Object.freeze(["pm_analysis","decision_package"]),
-  "USER_DECISION\u0000DECISIONS_RESOLVED":Object.freeze(["pm_analysis","decision_package"]),
+  "QUESTIONS_PENDING\u0000DECISION_STARTED":Object.freeze([
+    "pm_analysis","decision_package",
+  ]),
+  "USER_DECISION\u0000DECISIONS_RESOLVED":Object.freeze([
+    "pm_analysis","decision_package",
+  ]),
   "ARCHITECTURE_PENDING\u0000ADR_APPROVAL_REQUIRED":Object.freeze([
     "pm_analysis",
     "architecture",
@@ -115,6 +119,12 @@ const ARTIFACT_CONTRACTS=Object.freeze({
   adrs:Object.freeze({documentType:"adr",schemaId:"adr.v1",array:true}),
   issue_plan:Object.freeze({documentType:"issue-plan",schemaId:"issue-plan.v1"}),
   spec_audit:Object.freeze({documentType:"spec-audit",schemaId:"spec-audit.v1"}),
+  decision_answers:Object.freeze({
+    documentType:"decision-answer",schemaId:"decision-answer.v1",array:true,
+  }),
+  adr_approvals:Object.freeze({
+    documentType:"adr-approval",schemaId:"adr-approval.v1",array:true,
+  }),
 });
 
 function isPlainObject(value) {
@@ -274,7 +284,11 @@ function assertDecisionSource(decisionPackage,pmAnalysis,source) {
 }
 
 function assertGraphEvidence(state,event,artifacts,requiredKeys,source) {
-  for (const key of requiredKeys) {
+  const evidenceKeys=[...requiredKeys];
+  for (const key of ["decision_answers","adr_approvals"]) {
+    if (artifacts[key]!==undefined && !evidenceKeys.includes(key)) evidenceKeys.push(key);
+  }
+  for (const key of evidenceKeys) {
     const contract=ARTIFACT_CONTRACTS[key];
     if (!contract) continue;
     const value=artifacts[key];
@@ -302,6 +316,12 @@ function assertGraphEvidence(state,event,artifacts,requiredKeys,source) {
         pmAnalysis:artifacts.pm_analysis,
         architecture:artifacts.architecture,
         adrs:artifacts.adrs,
+        ...(artifacts.adr_approvals===undefined ? {} : {
+          approvals:artifacts.adr_approvals,
+        }),
+        ...(artifacts.decision_package?.document_type!=="decision-package" ? {} : {
+          decisionPackage:artifacts.decision_package,
+        }),
       });
       if (!validation.valid) throw new TypeError("Architecture evidence is not semantically valid");
       if (["ARCHITECTURE_COMPLETED","ADR_APPROVED"].includes(event) && !validation.complete) {
@@ -320,6 +340,12 @@ function assertGraphEvidence(state,event,artifacts,requiredKeys,source) {
         pmAnalysis:artifacts.pm_analysis,
         architecture:artifacts.architecture,
         adrs:artifacts.adrs,
+        ...(artifacts.adr_approvals===undefined ? {} : {
+          approvals:artifacts.adr_approvals,
+        }),
+        ...(artifacts.decision_package?.document_type!=="decision-package" ? {} : {
+          decisionPackage:artifacts.decision_package,
+        }),
         issuePlan:artifacts.issue_plan,
       });
       if (!validation.valid) throw new TypeError("Issue-plan evidence is not semantically valid");
@@ -331,12 +357,25 @@ function assertGraphEvidence(state,event,artifacts,requiredKeys,source) {
   if (requiredKeys.includes("spec_audit")) {
     assertExactInputs(
       artifacts.spec_audit,
-      [artifacts.pm_analysis,artifacts.architecture,...artifacts.adrs,artifacts.issue_plan],
+      [
+        artifacts.pm_analysis,artifacts.architecture,...artifacts.adrs,
+        ...(artifacts.adr_approvals ?? []),...(artifacts.decision_answers ?? []),
+        artifacts.issue_plan,
+      ],
       "spec audit",
     );
     const expected=auditSpecification({
       pmAnalysis:artifacts.pm_analysis,
       architecture:{artifact:artifacts.architecture,adrs:artifacts.adrs},
+      ...(artifacts.adr_approvals===undefined ? {} : {
+        approvals:artifacts.adr_approvals,
+      }),
+      ...(artifacts.decision_package?.document_type!=="decision-package" ? {} : {
+        decisionPackage:artifacts.decision_package,
+      }),
+      ...(artifacts.decision_answers===undefined ? {} : {
+        decisionAnswers:artifacts.decision_answers,
+      }),
       issuePlan:artifacts.issue_plan,
     }).artifact;
     if (canonicalJson(artifacts.spec_audit)!==canonicalJson(expected)) {
@@ -501,6 +540,10 @@ export function transition(state,event,context={}) {
   if (!isPlainObject(artifacts)) throw new TypeError("Transition artifacts must be an object");
   const requiredKeys=assertRequiredArtifacts(state,event,artifacts);
   assertGraphEvidence(state,event,artifacts,requiredKeys,source);
+  const inputKeys=[...requiredKeys];
+  for (const key of ["decision_answers","adr_approvals"]) {
+    if (artifacts[key]!==undefined && !inputKeys.includes(key)) inputKeys.push(key);
+  }
   const sourceBoundary=event==="SOURCE_RESTARTED" ?
     canonicalSourceBoundary(context.source_boundary,source) : undefined;
   const result={
@@ -509,7 +552,7 @@ export function transition(state,event,context={}) {
     state:target,
     ...source,
     input_artifacts:sourceBoundary?.stale_artifacts ??
-      canonicalReferences(artifacts,requiredKeys),
+      canonicalReferences(artifacts,inputKeys),
   };
 
   if (sourceBoundary!==undefined) result.source_boundary=sourceBoundary;
@@ -533,6 +576,13 @@ export function transition(state,event,context={}) {
   }
   if (event==="ADR_APPROVED") {
     assertAdrApprovalPackage(artifacts.decision_package);
+    result.decision_package=artifacts.decision_package;
+  }
+  if ((artifacts.decision_answers?.length ?? 0)>0 &&
+      artifacts.decision_package?.document_type==="decision-package" &&
+      result.decision_package===undefined) {
+    assertDecisionPackage(artifacts.decision_package);
+    assertDecisionSource(artifacts.decision_package,artifacts.pm_analysis,source);
     result.decision_package=artifacts.decision_package;
   }
   if (event==="AUDIT_BLOCKED") {

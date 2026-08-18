@@ -20,6 +20,13 @@ import {
   parsedCommand,
   projectCommandInput,
 } from "./support/command-fixture.js";
+import {
+  captureWriterContext as captureRound1WriterContext,
+  countingAdapter as round1CountingAdapter,
+  prepareStore as prepareRound1Store,
+  publicationAuthorityRegistry as round1PublicationRegistry,
+  signedPublicationApproval as signedRound1PublicationApproval,
+} from "./support/gate-command-round1-fixture.js";
 
 const modules=await Promise.all([
   "decisions","architecture","plan","audit","readiness","issues",
@@ -626,29 +633,30 @@ test("issues publish apply acquires approval before and delegates exactly once",
 test("every apply gate remains nonzero and records zero adapter mutation",{
   skip:!gateAvailable,
 },async () => {
-  const {store}=await preparedStore();
+  const {store}=await prepareRound1Store(projectCommandInput());
+  const ready=await captureRound1WriterContext(store);
+  const approval=signedRound1PublicationApproval({
+    repository:ready.repository,
+    source_revision:ready.artifacts.issuePlan.provenance.source_revision,
+    source_sha256:ready.artifacts.issuePlan.provenance.source_sha256,
+    plan_ref:reference(ready.artifacts.issuePlan),
+  });
   for (const row of gateMatrix) {
-    let adapterMutations=0;
-    const writer={
-      preview:async () => { throw new Error("preview is not expected"); },
-      publish:async () => {
-        const error=new Error(`Blocked by ${row.name}`);
-        error.code=`${row.gate.toUpperCase()}_GATE_FAILED`;
-        error.exitCode=row.expected_exit;
-        throw error;
-      },
-    };
-    const dispatched=await dispatchCommand(
-      command("issues.publish",["--apply","--from","approval.json","--non-interactive","--json"]),
-      {services:{
-        artifactStore:store,
-        repository:"TOSS-Soft/toss-cli",
-        writer,
-        readInput:async () => JSON.stringify({approval_kind:"GITHUB_ISSUE_PUBLICATION"}),
-      }},
+    const adapter=round1CountingAdapter();
+    const writer=createGitHubWriter({
+      adapter,
+      store,
+      authorityRegistry:round1PublicationRegistry(),
+    });
+    const blocked=clone(ready);
+    blocked.artifacts.analysisState.content.state="PM_FINALIZATION";
+    rehash(blocked.artifacts.analysisState);
+    const authority=row.name==="missing publication approval" ? undefined : approval;
+    await assert.rejects(
+      writer.publish(blocked,{apply:true,authority}),undefined,row.name,
     );
-    assert.equal(dispatched.exitCode,row.expected_exit,row.name);
-    assert.equal(adapterMutations,0,row.name);
+    assert.equal(adapter.calls.some(([method]) =>
+      method==="createIssue" || method==="updateIssue"),false,row.name);
   }
 });
 

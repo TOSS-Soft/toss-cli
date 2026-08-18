@@ -40,13 +40,24 @@
         }
       ]
     },
+    "source_authority_resolution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_id", "authority_resolution"],
+      "properties": {
+        "source_id": {"type": "string", "pattern": "^Q-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"},
+        "authority_resolution": {
+          "$ref": "https://toss.software/schemas/pipeline/decision-package.v1.schema.json#/$defs/blocking_authority_resolution"
+        }
+      }
+    },
     "content": {
       "type": "object",
       "additionalProperties": false,
       "required": [
         "question_id", "source_transition", "source_decision_package_hash",
         "source_decision_package", "source_question", "answer",
-        "authority_resolution", "authority_registry", "resolved_decision_package"
+        "authority_resolutions", "authority_registry", "resolved_decision_package"
       ],
       "properties": {
         "question_id": {"type": "string", "pattern": "^Q-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"},
@@ -56,6 +67,12 @@
         "source_question": {"$ref": "https://toss.software/schemas/pipeline/decision-package.v1.schema.json#/$defs/question"},
         "answer": {"$ref": "#/$defs/answer"},
         "authority_resolution": {"$ref": "https://toss.software/schemas/pipeline/decision-package.v1.schema.json#/$defs/blocking_authority_resolution"},
+        "authority_resolutions": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/source_authority_resolution"}
+        },
         "authority_registry": {
           "type": "object",
           "additionalProperties": false,

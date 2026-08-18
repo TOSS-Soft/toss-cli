@@ -107,6 +107,8 @@ function artifactsForTransition(inputs,decisionPackage) {
     if (values[0]!==undefined) artifacts[key]=values[0];
   }
   if (byType.has("adr")) artifacts.adrs=byType.get("adr");
+  if (byType.has("decision-answer")) artifacts.decision_answers=byType.get("decision-answer");
+  if (byType.has("adr-approval")) artifacts.adr_approvals=byType.get("adr-approval");
   if (decisionPackage!==undefined) artifacts.decision_package=decisionPackage;
   return artifacts;
 }
@@ -341,6 +343,10 @@ function deriveEvent(context) {
       pmAnalysis:artifacts.pm_analysis,
       architecture:artifacts.architecture,
       adrs:artifacts.adrs,
+      approvals:artifacts.adr_approvals,
+      ...(artifacts.decision_package?.document_type==="decision-package" ? {
+        decisionPackage:artifacts.decision_package,
+      } : {}),
     });
     if (!validation.valid) throw new TypeError("Cannot transition from invalid architecture inputs");
     if (validation.complete) {
@@ -374,6 +380,12 @@ function deriveEvent(context) {
       pmAnalysis:artifacts.pm_analysis,
       architecture:artifacts.architecture,
       adrs:artifacts.adrs,
+      ...(artifacts.adr_approvals===undefined ? {} : {
+        approvals:artifacts.adr_approvals,
+      }),
+      ...(artifacts.decision_package?.document_type!=="decision-package" ? {} : {
+        decisionPackage:artifacts.decision_package,
+      }),
       issuePlan:artifacts.issue_plan,
     });
     return validation.complete ? {event:"FINALIZATION_COMPLETED",context} : {
@@ -385,6 +397,15 @@ function deriveEvent(context) {
     const audit=auditSpecification({
       pmAnalysis:artifacts.pm_analysis,
       architecture:{artifact:artifacts.architecture,adrs:artifacts.adrs},
+      ...(artifacts.adr_approvals===undefined ? {} : {
+        approvals:artifacts.adr_approvals,
+      }),
+      ...(artifacts.decision_package?.document_type!=="decision-package" ? {} : {
+        decisionPackage:artifacts.decision_package,
+      }),
+      ...(artifacts.decision_answers===undefined ? {} : {
+        decisionAnswers:artifacts.decision_answers,
+      }),
       issuePlan:artifacts.issue_plan,
     });
     if (canonicalJson(artifacts.spec_audit)!==canonicalJson(audit.artifact)) {

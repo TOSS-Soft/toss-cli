@@ -145,6 +145,10 @@ function assertIndependentGates(context,registry) {
     pmAnalysis:artifacts.pmAnalysis,
     architecture:artifacts.architecture?.artifact,
     adrs:artifacts.architecture?.adrs,
+    ...(artifacts.adrApprovals===undefined ? {} : {approvals:artifacts.adrApprovals}),
+    ...(artifacts.decisionPackage===undefined ? {} : {
+      decisionPackage:artifacts.decisionPackage,
+    }),
     issuePlan:artifacts.issuePlan,
   });
   if (!issuePlanValidation.valid || !issuePlanValidation.complete ||
@@ -156,6 +160,13 @@ function assertIndependentGates(context,registry) {
   const rebuilt=auditSpecification({
     pmAnalysis:artifacts.pmAnalysis,
     architecture:artifacts.architecture,
+    ...(artifacts.adrApprovals===undefined ? {} : {approvals:artifacts.adrApprovals}),
+    ...(artifacts.decisionPackage===undefined ? {} : {
+      decisionPackage:artifacts.decisionPackage,
+    }),
+    ...(artifacts.decisionAnswers===undefined ? {} : {
+      decisionAnswers:artifacts.decisionAnswers,
+    }),
     issuePlan:artifacts.issuePlan,
   }).artifact;
   if (!same(audit,rebuilt) || audit.content?.status!=="PASS" ||
@@ -172,6 +183,15 @@ function assertIndependentGates(context,registry) {
     issue_plan:artifacts.issuePlan,
     spec_audit:audit,
   };
+  if ((artifacts.adrApprovals?.length ?? 0)>0) {
+    stateArtifacts.adr_approvals=artifacts.adrApprovals;
+  }
+  if ((artifacts.decisionAnswers?.length ?? 0)>0) {
+    stateArtifacts.decision_answers=artifacts.decisionAnswers;
+  }
+  if ((artifacts.decisionAnswers?.length ?? 0)>0 && artifacts.decisionPackage!==undefined) {
+    stateArtifacts.decision_package=artifacts.decisionPackage;
+  }
   const rebuiltState=transition("SPEC_AUDIT","AUDIT_PASSED",{
     source_revision:artifacts.pmAnalysis.provenance.source_revision,
     source_sha256:artifacts.pmAnalysis.provenance.source_sha256,

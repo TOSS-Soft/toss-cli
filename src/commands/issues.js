@@ -1,4 +1,6 @@
 import {canonicalJson} from "../contracts/acp.js";
+import {buildTraceGraph} from "../pipeline/traceability.js";
+import {verifiedGateEvidence} from "./evidence.js";
 import {
   acquireGateInput,
   commandCatalog,
@@ -66,9 +68,16 @@ export async function runIssuesCommand(command,serviceInput) {
     throw new TypeError(`Unsupported issues command ${String(command.name)}`);
   }
   const services=gateCommandServices(serviceInput,{
-    allowed:["artifactStore","repository","writer","readInput","prompt"],
-    required:["artifactStore","repository","writer"],
+    allowed:[
+      "artifactStore","repository","writer","readInput","prompt","authorityRegistry",
+    ],
   });
+  if (services.repository===undefined || services.writer===undefined) {
+    throw new OrchestrationError(
+      "GITHUB_WRITER_REQUIRED",
+      "Issue publication requires an independently configured repository and GitHub writer",4,
+    );
+  }
   let authority;
   if (command.name==="issues.publish" && command.options.apply) {
     authority=await acquireGateInput(command,services,{
@@ -77,9 +86,23 @@ export async function runIssuesCommand(command,serviceInput) {
   }
   const catalog=await commandCatalog(services.store);
   const bundle=await resolveGateBundle(catalog,{
-    requirePlan:true,requireAudit:true,requireState:true,current:true,
+    requirePlan:true,requireAudit:true,requireState:true,requireTrace:false,current:true,
   });
-  const context=publicationContext(services.repository,bundle);
+  const evidence=await verifiedGateEvidence(catalog,bundle,services.authorityRegistry);
+  const context=publicationContext(services.repository,{
+    ...bundle,
+    ...evidence,
+    traceGraph:buildTraceGraph({
+      pmAnalysis:bundle.pmAnalysis,
+      architecture:bundle.architecture,
+      approvals:evidence.adrApprovals,
+      ...(evidence.decisionPackage===undefined ? {} : {
+        decisionPackage:evidence.decisionPackage,
+      }),
+      decisionAnswers:evidence.decisionAnswers,
+      issuePlan:bundle.issuePlan,
+    }),
+  });
   try {
     if (command.name==="issues.publish" && command.options.apply) {
       return deepFreeze(JSON.parse(canonicalJson(await services.writer.publish(

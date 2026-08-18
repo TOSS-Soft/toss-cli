@@ -24,6 +24,8 @@ import {
 import {evaluateProjectReadiness} from "../pipeline/readiness.js";
 import {auditSpecification} from "../pipeline/spec-auditor.js";
 import {buildTraceGraph} from "../pipeline/traceability.js";
+import {reduceDecisionAnswers} from "./decisions.js";
+import {verifiedGateEvidence} from "./evidence.js";
 
 const PROJECT_COMMANDS=new Set([
   "project.create","project.analyze","project.prepare","project.status","project.resume",
@@ -206,7 +208,9 @@ async function recoverProject(store,input,resume) {
 }
 
 async function prepareProject(
-  command,store,input,{analyzeOnly=false,inputArtifact,reused=[]}={},
+  command,store,input,{
+    analyzeOnly=false,inputArtifact,reused=[],authorityRegistry,
+  }={},
 ) {
   const source={
     analysis_id:input.analysis_id,
@@ -218,10 +222,12 @@ async function prepareProject(
   const supplied=input.artifacts;
   let pm;
   let decisions;
+  let decisionAnswers=[];
   let architecture;
   let adrs=[];
   let issuePlan;
   let specAudit;
+  let adrApprovals=[];
 
   if (["BLOCKED","FAILED_RETRYABLE"].includes(state)) {
     if (command.name!=="project.resume") {
@@ -262,6 +268,11 @@ async function prepareProject(
   pm=pm ?? await verifiedExact(store,exactReference(supplied.pm_analysis));
   decisions=pm.content.open_questions.length>0 ?
     buildDecisionPackageFromPmAnalysis(pm,supplied.decision_enrichments) : undefined;
+  if (decisions) {
+    const reduced=await reduceDecisionAnswers(store,decisions,authorityRegistry);
+    decisions=reduced.package;
+    decisionAnswers=reduced.answers;
+  }
 
   if (state==="ARCHITECTURE_PENDING") {
     architecture=await persistStage(store,supplied.architecture,reused);
@@ -269,6 +280,7 @@ async function prepareProject(
     for (const adr of supplied.adrs) adrs.push(await persistStage(store,adr,reused));
     const artifacts={pm_analysis:pm,architecture,adrs};
     if (decisions) artifacts.decision_package=decisions;
+    if (decisionAnswers.length>0) artifacts.decision_answers=decisionAnswers;
     await advance(store,input,state,artifacts);
     resume=await resumeAnalysis(verifiedOrchestrationStore(store),source);
     state=resume.state;
@@ -286,10 +298,24 @@ async function prepareProject(
     for (const adr of supplied.adrs) adrs.push(await verifiedExact(store,exactReference(adr)));
   }
 
+  if (["PM_FINALIZATION","SPEC_AUDIT","READY_FOR_ISSUES"].includes(state)) {
+    const stateEvent=await verifiedExact(store,resume.last_verified_revision);
+    const evidence=await verifiedGateEvidence(store,{
+      pmAnalysis:pm,
+      architecture:{artifact:architecture,adrs},
+      analysisState:stateEvent,
+    },authorityRegistry);
+    adrApprovals=evidence.adrApprovals;
+    decisionAnswers=evidence.decisionAnswers;
+    decisions=evidence.decisionPackage ?? decisions;
+  }
+
   if (state==="PM_FINALIZATION") {
     issuePlan=await persistStage(store,supplied.issue_plan,reused);
     const artifacts={pm_analysis:pm,architecture,adrs,issue_plan:issuePlan};
     if (decisions) artifacts.decision_package=decisions;
+    if (decisionAnswers.length>0) artifacts.decision_answers=decisionAnswers;
+    if (adrApprovals.length>0) artifacts.adr_approvals=adrApprovals;
     await advance(store,input,state,artifacts);
     resume=await resumeAnalysis(verifiedOrchestrationStore(store),source);
     state=resume.state;
@@ -304,6 +330,9 @@ async function prepareProject(
     const audited=auditSpecification({
       pmAnalysis:pm,
       architecture:{artifact:architecture,adrs},
+      approvals:adrApprovals,
+      ...(decisions===undefined ? {} : {decisionPackage:decisions}),
+      decisionAnswers,
       issuePlan,
     });
     specAudit=await persistStage(store,audited.artifact,reused);
@@ -311,6 +340,8 @@ async function prepareProject(
       pm_analysis:pm,architecture,adrs,issue_plan:issuePlan,spec_audit:specAudit,
     };
     if (decisions) artifacts.decision_package=decisions;
+    if (decisionAnswers.length>0) artifacts.decision_answers=decisionAnswers;
+    if (adrApprovals.length>0) artifacts.adr_approvals=adrApprovals;
     await advance(store,input,state,artifacts);
     resume=await resumeAnalysis(verifiedOrchestrationStore(store),source);
     state=resume.state;
@@ -348,6 +379,9 @@ async function prepareProject(
   const traceGraph=buildTraceGraph({
     pmAnalysis:pm,
     architecture:{artifact:architecture,adrs},
+    approvals:adrApprovals,
+    ...(decisions===undefined ? {} : {decisionPackage:decisions}),
+    decisionAnswers,
     issuePlan,
   });
   const aggregate={
@@ -357,9 +391,12 @@ async function prepareProject(
     specAudits:[specAudit],
     traceGraph,
     analysisState:latestEvent,
+    adrApprovals,
+    decisionAnswers,
   };
   if (decisions) aggregate.decisionPackage=decisions;
-  const readiness=evaluateProjectReadiness(aggregate);
+  const readiness=evaluateProjectReadiness(aggregate,
+    authorityRegistry===undefined ? {} : {authorityRegistry});
   if (!readiness.ready_for_issue_generation) {
     throw new OrchestrationError(
       "ORCHESTRATION_VALIDATION_FAILED","READY state failed deterministic readiness evaluation",5,
@@ -394,6 +431,7 @@ export async function runProjectCommand(command,serviceInput) {
       analyzeOnly:normalized.name==="project.analyze",
       inputArtifact:resolved.artifact,
       reused,
+      authorityRegistry:services.authorityRegistry,
     });
   }
   if (store.hasChanges()) await store.refresh();

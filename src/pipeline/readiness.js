@@ -25,7 +25,9 @@ const SUPPLIED_PACKAGE_REQUIREMENTS=Object.freeze([
 ]);
 const ALLOWED_AGGREGATE_KEYS=Object.freeze([
   "analysisState",
+  "adrApprovals",
   "architecture",
+  "decisionAnswers",
   "decisionPackage",
   "issuePlan",
   "pmAnalysis",
@@ -33,7 +35,7 @@ const ALLOWED_AGGREGATE_KEYS=Object.freeze([
   "traceGraph",
 ]);
 const REQUIRED_AGGREGATE_KEYS=ALLOWED_AGGREGATE_KEYS.filter(
-  key => key!=="decisionPackage",
+  key => !["adrApprovals","decisionAnswers","decisionPackage"].includes(key),
 );
 const BLOCKING_SEVERITIES=new Set(DECISION_POLICY?.blocking_severities ?? []);
 const ASSUMPTION_SEVERITIES=new Set(DECISION_POLICY?.warning_severities ?? []);
@@ -257,6 +259,12 @@ function artifactEntries(input) {
       artifact,
       path:`/architecture/adrs/${index}`,
     })) : []),
+    ...(Array.isArray(input.adrApprovals) ? input.adrApprovals.map((artifact,index) => ({
+      key:`adrApprovals[${index}]`,artifact,path:`/adrApprovals/${index}`,
+    })) : []),
+    ...(Array.isArray(input.decisionAnswers) ? input.decisionAnswers.map((artifact,index) => ({
+      key:`decisionAnswers[${index}]`,artifact,path:`/decisionAnswers/${index}`,
+    })) : []),
     {key:"issuePlan",artifact:input.issuePlan,path:"/issuePlan"},
     ...(Array.isArray(input.specAudits) ? input.specAudits.map((artifact,index) => ({
       key:`specAudits[${index}]`,
@@ -308,6 +316,12 @@ function integrityRule(context) {
     ["architecture.artifact",input.architecture?.artifact,"architecture.v1","/architecture/artifact",true],
     ...(Array.isArray(input.architecture?.adrs) ? input.architecture.adrs.map((adr,index) => [
       `architecture.adrs[${index}]`,adr,"adr.v1",`/architecture/adrs/${index}`,true,
+    ]) : []),
+    ...(Array.isArray(input.adrApprovals) ? input.adrApprovals.map((approval,index) => [
+      `adrApprovals[${index}]`,approval,"adr-approval.v1",`/adrApprovals/${index}`,true,
+    ]) : []),
+    ...(Array.isArray(input.decisionAnswers) ? input.decisionAnswers.map((answer,index) => [
+      `decisionAnswers[${index}]`,answer,"decision-answer.v1",`/decisionAnswers/${index}`,true,
     ]) : []),
     ["issuePlan",input.issuePlan,"issue-plan.v1","/issuePlan",true],
     ...(Array.isArray(input.specAudits) ? input.specAudits.map((audit,index) => [
@@ -375,6 +389,8 @@ function integrityRule(context) {
       pmAnalysis:input.pmAnalysis,
       architecture:input.architecture?.artifact,
       adrs:input.architecture?.adrs,
+      approvals:input.adrApprovals,
+      decisionPackage:input.decisionPackage,
     });
     if (!architectureResult.valid) {
       for (const finding of architectureResult.findings) {
@@ -395,6 +411,10 @@ function integrityRule(context) {
       pmAnalysis:input.pmAnalysis,
       architecture:input.architecture?.artifact,
       adrs:input.architecture?.adrs,
+      ...(input.adrApprovals===undefined ? {} : {approvals:input.adrApprovals}),
+      ...(input.decisionPackage===undefined ? {} : {
+        decisionPackage:input.decisionPackage,
+      }),
       issuePlan:input.issuePlan,
     });
     for (const finding of issueResult.findings) {
@@ -413,6 +433,13 @@ function integrityRule(context) {
     const rebuilt=buildTraceGraph({
       pmAnalysis:input.pmAnalysis,
       architecture:input.architecture,
+      ...(input.adrApprovals===undefined ? {} : {approvals:input.adrApprovals}),
+      ...(input.decisionPackage===undefined ? {} : {
+        decisionPackage:input.decisionPackage,
+      }),
+      ...(input.decisionAnswers===undefined ? {} : {
+        decisionAnswers:input.decisionAnswers,
+      }),
       issuePlan:input.issuePlan,
     });
     context.rebuiltTraceGraph=rebuilt;
@@ -654,8 +681,11 @@ function approvedAdrsRule({input}) {
     return [evidence("architecture.adrs",undefined,"/architecture/adrs","At least one ADR is required")];
   }
   const items=[];
+  const approved=new Set((input.adrApprovals ?? []).map(approval =>
+    canonicalJson(approval.content?.adr)));
   for (const [index,adr] of adrs.entries()) {
-    if (adr?.content?.status!=="accepted") {
+    const externallyApproved=approved.has(canonicalJson(exactReference(adr)));
+    if (adr?.content?.status!=="accepted" && !externallyApproved) {
       items.push(evidence(
         `architecture.adrs[${index}]`,adr,
         `/architecture/adrs/${index}/content/status`,
@@ -663,7 +693,7 @@ function approvedAdrsRule({input}) {
         adr?.content?.id ?? null,
       ));
     }
-    if (adr?.content?.approval?.state!=="approved") {
+    if (adr?.content?.approval?.state!=="approved" && !externallyApproved) {
       items.push(evidence(
         `architecture.adrs[${index}]`,adr,
         `/architecture/adrs/${index}/content/approval/state`,
@@ -860,6 +890,8 @@ function expectedAuditInputs(input) {
     input.pmAnalysis,
     input.architecture?.artifact,
     ...(input.architecture?.adrs ?? []),
+    ...(input.adrApprovals ?? []),
+    ...(input.decisionAnswers ?? []),
     input.issuePlan,
   ].map(exactReference).filter(Boolean).sort((left,right) =>
     canonicalJson(left).localeCompare(canonicalJson(right)));
@@ -917,6 +949,13 @@ function latestAuditRule(context) {
     expected=auditSpecification({
       pmAnalysis:input.pmAnalysis,
       architecture:input.architecture,
+      ...(input.adrApprovals===undefined ? {} : {approvals:input.adrApprovals}),
+      ...(input.decisionPackage===undefined ? {} : {
+        decisionPackage:input.decisionPackage,
+      }),
+      ...(input.decisionAnswers===undefined ? {} : {
+        decisionAnswers:input.decisionAnswers,
+      }),
       issuePlan:input.issuePlan,
     }).artifact;
     context.rebuiltAudit=expected;
@@ -962,6 +1001,11 @@ function analysisStateRule(context) {
     issue_plan:input.issuePlan,
     spec_audit:latest,
   };
+  if ((input.adrApprovals?.length ?? 0)>0) artifacts.adr_approvals=input.adrApprovals;
+  if ((input.decisionAnswers?.length ?? 0)>0) artifacts.decision_answers=input.decisionAnswers;
+  if ((input.decisionAnswers?.length ?? 0)>0 && input.decisionPackage!==undefined) {
+    artifacts.decision_package=input.decisionPackage;
+  }
   let reconstructed;
   try {
     reconstructed=transition("SPEC_AUDIT","AUDIT_PASSED",{

@@ -270,15 +270,17 @@ function assertEntityReference(reference,entities,kind,path) {
   }
 }
 
-function requiredApprovedAdrs(issue,adrs) {
+function requiredApprovedAdrs(issue,adrs,approvedReferences) {
   const sourceRequirementIds=new Set((issue.source_requirements ?? []).map(
     reference => reference.id,
   ));
   const required=new Map();
   for (const adr of adrs) {
     const content=adr?.content;
-    if (!isPlainObject(content) || content.status!=="accepted" ||
-        content.approval?.state!=="approved" ||
+    const externallyApproved=approvedReferences.has(canonicalJson(artifactReference(adr)));
+    if (!isPlainObject(content) ||
+        ((content.status!=="accepted" || content.approval?.state!=="approved") &&
+         !externallyApproved) ||
         !Array.isArray(content.affected_requirements)) {
       continue;
     }
@@ -289,9 +291,9 @@ function requiredApprovedAdrs(issue,adrs) {
   return required;
 }
 
-function issueAdrTraceabilityFindings(issue,issueIndex,adrs) {
+function issueAdrTraceabilityFindings(issue,issueIndex,adrs,approvedReferences) {
   const findings=[];
-  const required=requiredApprovedAdrs(issue,adrs);
+  const required=requiredApprovedAdrs(issue,adrs,approvedReferences);
   const declaredIds=new Set(issue.adr_refs.map(reference => reference.id));
   const basePath=`/content/issues/${issueIndex}`;
 
@@ -355,7 +357,7 @@ function dependencyCycle(issues) {
   for (const issue of issues.values()) visit(issue);
 }
 
-function semanticFindings({pmAnalysis,adrs,issuePlan}) {
+function semanticFindings({pmAnalysis,adrs,approvals=[],issuePlan}) {
   const content=issuePlan.content;
   const findings=[
     ...duplicateIdentityFindings(content),
@@ -366,6 +368,9 @@ function semanticFindings({pmAnalysis,adrs,issuePlan}) {
   const issues=mapById(content.issues);
   const criteria=mapById(content.acceptance_criteria);
   const adrById=mapById(adrs.map(adr => adr.content));
+  const adrArtifactsById=new Map(adrs.map(adr => [adr.content.id,adr]));
+  const approvedReferences=new Set(approvals.map(approval =>
+    canonicalJson(approval.content.adr)));
 
   for (const [index,epic] of content.epics.entries()) {
     for (const [referenceIndex,reference] of epic.source_requirements.entries()) {
@@ -408,7 +413,11 @@ function semanticFindings({pmAnalysis,adrs,issuePlan}) {
     for (const [referenceIndex,reference] of issue.adr_refs.entries()) {
       assertEntityReference(reference,adrById,"adr",`/content/issues/${index}/adr_refs/${referenceIndex}`);
       const adr=adrById.get(reference.id);
-      if (adr.status!=="accepted" || adr.approval.state!=="approved") {
+      const externallyApproved=approvedReferences.has(canonicalJson(
+        artifactReference(adrArtifactsById.get(reference.id)),
+      ));
+      if ((adr.status!=="accepted" || adr.approval.state!=="approved") &&
+          !externallyApproved) {
         findings.push(freezeFinding({
           type:"ISSUE_ADR_NOT_APPROVED",
           path:`/content/issues/${index}/adr_refs/${referenceIndex}`,
@@ -417,7 +426,9 @@ function semanticFindings({pmAnalysis,adrs,issuePlan}) {
         }));
       }
     }
-    findings.push(...issueAdrTraceabilityFindings(issue,index,adrs));
+    findings.push(...issueAdrTraceabilityFindings(
+      issue,index,adrs,approvedReferences,
+    ));
     for (const [referenceIndex,reference] of issue.dependencies.entries()) {
       assertEntityReference(reference,issues,"issue",`/content/issues/${index}/dependencies/${referenceIndex}`);
     }
@@ -498,7 +509,7 @@ function coverageFindings(issuePlan,coverage,hasIntegrity) {
   return findings;
 }
 
-function upstreamFindings(pmAnalysis,architecture,adrs) {
+function upstreamFindings(pmAnalysis,architecture,adrs,approvals,decisionPackage) {
   const findings=[];
   const pmResult=validatePmAnalysis(pmAnalysis);
   if (!pmResult.valid) {
@@ -512,7 +523,9 @@ function upstreamFindings(pmAnalysis,architecture,adrs) {
   }
   let architectureResult;
   try {
-    architectureResult=validateArchitecture({pmAnalysis,architecture,adrs});
+    architectureResult=validateArchitecture({
+      pmAnalysis,architecture,adrs,approvals,decisionPackage,
+    });
   } catch (error) {
     findings.push(freezeFinding({
       type:"UPSTREAM_ARCHITECTURE_INTEGRITY",
@@ -688,6 +701,8 @@ export function validateIssuePlan(graph={}) {
     pmAnalysis,
     architecture,
     adrs,
+    approvals,
+    decisionPackage,
     issuePlan,
   }=normalized;
   const issuePlanFindings=schemaAndIntegrityFindings(issuePlan,"issue-plan.v1");
@@ -716,10 +731,10 @@ export function validateIssuePlan(graph={}) {
         ...adrs.map(adr => ({artifact:adr,label:"ADR"})),
       ],
     ),
-    ...upstreamFindings(pmAnalysis,architecture,adrs),
+    ...upstreamFindings(pmAnalysis,architecture,adrs,approvals,decisionPackage),
   ];
   const hasInputIntegrity=findings.length===0;
-  findings.push(...semanticFindings({pmAnalysis,adrs,issuePlan}));
+  findings.push(...semanticFindings({pmAnalysis,adrs,approvals,issuePlan}));
   findings.push(...coverageFindings(
     issuePlan,
     coverage,

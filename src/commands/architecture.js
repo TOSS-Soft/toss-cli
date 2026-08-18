@@ -2,6 +2,8 @@ import {createPublicKey,verify as verifyDetached} from "node:crypto";
 
 import {canonicalJson,sha256Canonical} from "../contracts/acp.js";
 import {validateArchitecture} from "../pipeline/architecture.js";
+import {runNextStage} from "../pipeline/orchestrator.js";
+import {currentDecisionAnswerEvidence} from "./decisions.js";
 import {
   acquireGateInput,
   approvalPackageFromTransition,
@@ -164,39 +166,123 @@ function verifyApproval(value,registry,{adr,packageValue}) {
   return input;
 }
 
-async function approvalHistory(catalog) {
+async function approvalHistory(catalog,registry) {
   const rows=await catalog.list({document_type:"adr-approval"});
+  if (rows.length>0 && registry===undefined) {
+    throw new OrchestrationError(
+      "ADR_AUTHORITY_REQUIRED","ADR approval history requires independent authority registry",4,
+    );
+  }
   const byAdr=new Map();
+  const byIdentity=new Map();
   const records=new Map();
-  for (const row of rows) {
+  const ordered=[...rows].sort((left,right) =>
+    left.artifact_id.localeCompare(right.artifact_id) || left.revision-right.revision);
+  for (const row of ordered) {
     validationError(row,"adr-approval.v1","ADR approval");
-    const adrKey=canonicalJson(row.content.adr);
-    const prior=byAdr.get(adrKey);
-    if (prior && !same(prior,row)) {
+    if (row.content.authority_registry.content_sha256!==sha256Canonical(registry)) {
       throw new OrchestrationError(
-        "ADR_APPROVAL_CONFLICT","ADR approval history conflicts",6,
+        "ADR_AUTHORITY_INVALID","ADR approval registry binding is stale",6,
       );
     }
-    byAdr.set(adrKey,row);
+    const adr=await catalog.get(row.content.adr);
+    verifyApproval({
+      schema_version:"adr-approval-input.v1",
+      ...row.content.approval_record,
+    },registry,{adr,packageValue:row.content.approval_package});
+    const identity=byIdentity.get(row.artifact_id) ?? [];
+    const previous=identity.at(-1);
+    if (row.revision!==identity.length+1 || !same(row.parents,
+      previous ? [exactReference(previous)] : [])) {
+      throw new OrchestrationError(
+        "ADR_APPROVAL_CONFLICT","ADR approval revision lineage is invalid",6,
+      );
+    }
+    identity.push(row);
+    byIdentity.set(row.artifact_id,identity);
+    const adrKey=canonicalJson(row.content.adr);
+    const adrRows=byAdr.get(adrKey) ?? [];
+    adrRows.push(row);
+    byAdr.set(adrKey,adrRows);
     const record=row.content.approval_record;
     const recordKey=canonicalJson({
       record_id:record.record_id,record_revision:record.record_revision,
     });
     const claim=records.get(recordKey);
-    if (claim && claim!==adrKey) {
+    const claimedBy=canonicalJson({artifact_id:row.artifact_id,revision:row.revision,adr:adrKey});
+    if (claim && claim!==claimedBy) {
       throw new OrchestrationError("ADR_APPROVAL_REPLAY","ADR approval record was replayed",6);
     }
-    records.set(recordKey,adrKey);
+    records.set(recordKey,claimedBy);
   }
-  return {byAdr,records};
+  return {byAdr,byIdentity,records,rows:ordered};
 }
 
-async function reviewArchitecture(catalog) {
-  const bundle=await resolveGateBundle(catalog,{requireState:true,current:true});
+export async function reduceAdrApprovals(catalog,packageValue,registry) {
+  const history=await approvalHistory(catalog,registry);
+  const approvals=[];
+  for (const adrReference of packageValue.adr_references) {
+    const candidates=(history.byAdr.get(canonicalJson(adrReference)) ?? []).filter(row =>
+      same(row.content.approval_package,packageValue));
+    if (candidates.length>1) {
+      throw new OrchestrationError(
+        "ADR_APPROVAL_CONFLICT","Current ADR approval package has conflicting approvals",6,
+      );
+    }
+    if (candidates.length===1) approvals.push(candidates[0]);
+  }
+  return deepFreeze({approvals,history});
+}
+
+export async function currentAdrApprovalEvidence(catalog,adrs,registry) {
+  const history=await approvalHistory(catalog,registry);
+  const currentReferences=adrs.map(exactReference);
+  const candidates=new Map();
+  for (const row of history.rows) {
+    const candidate=row.content.approval_package;
+    if (same(candidate.adr_references,currentReferences)) {
+      candidates.set(canonicalJson(candidate),candidate);
+    }
+  }
+  if (candidates.size>1) {
+    throw new OrchestrationError(
+      "ADR_APPROVAL_CONFLICT","Current ADR revisions have conflicting approval packages",6,
+    );
+  }
+  const packageValue=[...candidates.values()][0];
+  if (!packageValue) return deepFreeze({approvals:[],package:undefined});
+  const reduced=await reduceAdrApprovals(catalog,packageValue,registry);
+  return deepFreeze({approvals:reduced.approvals,package:packageValue});
+}
+
+async function reviewArchitecture(catalog,registry) {
+  const bundle=await resolveGateBundle(catalog,{
+    requireState:true,requireTrace:false,current:true,
+  });
+  const transition=await latestTransition(catalog);
+  let packageValue;
+  const transitionPackage=transition?.content?.decision_package ??
+    transition?.content?.next_action?.decision_package;
+  if (transitionPackage?.document_type==="adr-approval-package") {
+    packageValue=approvalPackageFromTransition(transition);
+  } else {
+    const current=await currentAdrApprovalEvidence(
+      catalog,bundle.architecture.adrs,registry,
+    );
+    packageValue=current.package;
+  }
+  const approvals=packageValue ?
+    (await reduceAdrApprovals(catalog,packageValue,registry)).approvals : [];
+  const decisions=await currentDecisionAnswerEvidence(
+    catalog,bundle.pmAnalysis,registry,
+  );
+  const approved=new Set(approvals.map(approval => canonicalJson(approval.content.adr)));
   const result=validateArchitecture({
     pmAnalysis:bundle.pmAnalysis,
     architecture:bundle.architecture.artifact,
     adrs:bundle.architecture.adrs,
+    approvals,
+    ...(decisions.package===undefined ? {} : {decisionPackage:decisions.package}),
   });
   return deepFreeze({
     valid:result.valid,
@@ -205,8 +291,10 @@ async function reviewArchitecture(catalog) {
     findings:result.findings,
     architecture:exactReference(bundle.architecture.artifact),
     adrs:bundle.architecture.adrs.map(exactReference),
+    approvals:approvals.map(exactReference),
     pending_adrs:bundle.architecture.adrs.filter(adr =>
-      adr.content.status!=="accepted" || adr.content.approval.state!=="approved"
+      !approved.has(canonicalJson(exactReference(adr))) &&
+      (adr.content.status!=="accepted" || adr.content.approval.state!=="approved")
     ).map(adr => ({
       id:adr.content.id,
       meaning:adr.content.meaning,
@@ -244,17 +332,25 @@ async function approveArchitecture(command,catalog,services) {
   const input=verifyApproval(await acquireGateInput(command,services,{
     kind:"ADR approval",code:"ADR_APPROVAL_REQUIRED",
   }),services.authorityRegistry,{adr,packageValue});
-  const history=await approvalHistory(catalog);
+  const history=await approvalHistory(catalog,services.authorityRegistry);
   const adrKey=canonicalJson(exactReference(adr));
   const recordKey=canonicalJson({
     record_id:input.record_id,record_revision:input.record_revision,
   });
-  const claim=history.records.get(recordKey);
-  if (claim && claim!==adrKey) {
-    throw new OrchestrationError("ADR_APPROVAL_REPLAY","ADR approval record was replayed",6);
-  }
   const {schema_version:ignored,...approvalRecord}=input;
   void ignored;
+  const claim=history.records.get(recordKey);
+  if (claim) {
+    const parsed=JSON.parse(claim);
+    const reused=history.rows.find(row => row.artifact_id===parsed.artifact_id &&
+      row.revision===parsed.revision);
+    if (reused && same(reused.content.adr,exactReference(adr)) &&
+        same(reused.content.approval_package,packageValue) &&
+        same(reused.content.approval_record,approvalRecord)) {
+      return deepFreeze({adr_id:adr.content.id,artifact:reused,reused:true});
+    }
+    throw new OrchestrationError("ADR_APPROVAL_REPLAY","ADR approval record was replayed",6);
+  }
   const content={
     adr:exactReference(adr),
     source_transition:exactReference(transition),
@@ -262,11 +358,19 @@ async function approveArchitecture(command,catalog,services) {
     approval_record:approvalRecord,
     authority_registry:{content_sha256:sha256Canonical(services.authorityRegistry)},
   };
+  const identity=`adr-approval:${adr.content.id}`;
+  const identityRows=history.byIdentity.get(identity) ?? [];
+  const previous=identityRows.at(-1);
+  const sameSource=(history.byAdr.get(adrKey) ?? []).find(row =>
+    same(row.content.approval_package,packageValue));
+  if (sameSource) {
+    throw new OrchestrationError("ADR_APPROVAL_CONFLICT","ADR approval conflicts",6);
+  }
   const draft={
     schema_version:"acp.v1",
     document_type:"adr-approval",
-    artifact_id:`adr-approval:${adr.content.id}`,
-    revision:1,
+    artifact_id:identity,
+    revision:(previous?.revision ?? 0)+1,
     run_id:`${transition.run_id}:adr-approval:${adr.content.id}`,
     producer:{role:"human-authority",identity:input.actor_id},
     runtime_identity:"external-human-authority",
@@ -276,29 +380,52 @@ async function approveArchitecture(command,catalog,services) {
       source_sha256:adr.provenance.source_sha256,
       locations:[`adr:${adr.artifact_id}@${adr.revision}#${adr.content_sha256}`],
     },
-    parents:[],
+    parents:previous ? [exactReference(previous)] : [],
     inputs:[exactReference(transition),exactReference(adr)],
     content_sha256:sha256Canonical(content),
     content,
   };
   validationError(draft,"adr-approval.v1","ADR approval");
-  const previous=history.byAdr.get(adrKey);
-  if (previous && !same(previous,draft)) {
-    throw new OrchestrationError("ADR_APPROVAL_CONFLICT","ADR approval conflicts",6);
-  }
   const artifact=await catalog.append(draft);
+  const reduced=await reduceAdrApprovals(catalog,packageValue,services.authorityRegistry);
+  if (reduced.approvals.length===packageValue.adr_references.length) {
+    const bundle=await resolveGateBundle(catalog,{
+      requireState:true,requireTrace:false,current:true,
+    });
+    await runNextStage({
+      store:catalog,
+      analysis_id:transition.artifact_id,
+      state:transition.content.state,
+      event:"ADR_APPROVED",
+      source_revision:transition.provenance.source_revision,
+      source_sha256:transition.provenance.source_sha256,
+      artifacts:{
+        pm_analysis:bundle.pmAnalysis,
+        architecture:bundle.architecture.artifact,
+        adrs:bundle.architecture.adrs,
+        decision_package:packageValue,
+        adr_approvals:reduced.approvals,
+      },
+      provenance:transition.provenance,
+      run_id:`${transition.run_id}:adr-state`,
+      producer:{role:"orchestrator",identity:"toss-project-orchestrator"},
+      runtime_identity:transition.runtime_identity,
+      created_at:artifact.created_at,
+    });
+  }
   if (catalog.hasChanges()) await catalog.refresh();
-  return deepFreeze({adr_id:adr.content.id,artifact,reused:Boolean(previous)});
+  return deepFreeze({adr_id:adr.content.id,artifact,reused:false});
 }
 
 export async function runArchitectureCommand(command,serviceInput) {
   if (!["architecture.review","architecture.approve"].includes(command.name)) {
     throw new TypeError(`Unsupported architecture command ${String(command.name)}`);
   }
-  const allowed=command.name==="architecture.review" ? ["artifactStore"] :
+  const allowed=command.name==="architecture.review" ? ["artifactStore","authorityRegistry"] :
     ["artifactStore","readInput","prompt","authorityRegistry"];
   const services=gateCommandServices(serviceInput,{allowed});
   const catalog=await commandCatalog(services.store);
-  return command.name==="architecture.review" ? reviewArchitecture(catalog) :
+  return command.name==="architecture.review" ?
+    reviewArchitecture(catalog,services.authorityRegistry) :
     approveArchitecture(command,catalog,services);
 }

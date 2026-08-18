@@ -9,7 +9,8 @@ contracts without changing ownership of PM, architecture, or issue-plan
 artifacts.
 
 All handlers accept a closed own-data service object and an injected artifact
-store exposing exactly `append`, `get`, `list`, and `verify`. They reject
+store exposing required `append`, `get`, `list`, and `verify` methods and the
+optional public `recover` method. They reject
 accessors without invoking them, inherited values, proxies, exotic
 prototypes, symbols, unknown service fields, malformed list filters,
 out-of-filter rows, duplicate revision identities, discontinuous history,
@@ -49,10 +50,13 @@ the answer.
 The resulting `decision-answer.v1` ACP artifact contains the exact question
 ID, answer discrimination, source transition reference, complete source
 decision package and its canonical SHA-256, complete source-question snapshot,
-verified authority resolution, authority-registry hash, and deterministically
-rebuilt resolved package. Answer revisions are immutable. A stale source,
-different answer for the same question, conflicting immutable row, or reused
-authority record for another question fails with a nonzero conflict outcome.
+one verified authority resolution for every retained source question,
+authority-registry hash, and deterministically rebuilt resolved package.
+Complete verified answer histories reduce into one effective decision package
+without rewriting the PM artifact. Answer revisions are monotonic immutable
+records parented to the prior answer generation. A stale source, different
+answer for the same question, conflicting immutable row, or reused authority
+record for another question fails with a nonzero conflict outcome.
 
 ## ADR approvals
 
@@ -64,7 +68,10 @@ artifact ID, revision, and content hash, the complete pending approval package,
 the current transition, source revision/hash, actor route, and authority
 record. It appends or reuses a separate `adr-approval.v1` record; it never
 rewrites the ADR or any PM-owned artifact. Stale targets, replayed authority
-records, and conflicting approval history fail closed before append.
+records, and conflicting approval history fail closed before append. Complete
+verified approval histories reduce into an effective architecture aggregate;
+later source generations create parented approval revisions rather than
+colliding with revision 1.
 
 ## Plan, audit, and readiness views
 
@@ -100,6 +107,12 @@ remote marker duplicates return a stable nonzero exit and do not mutate
 GitHub. Retryable partial publication returns the writer's immutable partial
 result; a later invocation reconciles markers and history before continuing.
 Rerunning a complete publication does not create duplicate issues.
+
+The standalone executable always composes the local verified artifact store
+for these command families. It does not discover trust registries, repository
+identities, adapters, or writers from project files. Commands needing those
+external capabilities fail closed until the host injects them independently;
+store-only views continue to work locally.
 
 Closed structured blocked/validation/conflict data uses `command_exit_code`
 4, 5, or 6 respectively. The dispatcher preserves only those three values

@@ -8,6 +8,7 @@ const SEVERITY_ORDER=new Map(["P0","P1","P2","P3","P4"].map(
   (severity,index) => [severity,index],
 ));
 const OPTION_KEYS=Object.freeze(["architecture","issuePlan","pmAnalysis"]);
+const OPTIONAL_OPTION_KEYS=new Set(["approvals","decisionAnswers","decisionPackage"]);
 const SHA256_PATTERN=/^[a-f0-9]{64}$/;
 const ARTIFACT_ID_PATTERN=/^[A-Za-z0-9][A-Za-z0-9:._-]*$/;
 const DOCUMENT_TYPE_PATTERN=/^[a-z][a-z0-9-]*$/;
@@ -702,13 +703,17 @@ function adrFindings(architectureArtifact,adrs,issuePlan) {
   return findings;
 }
 
-function upstreamFindings(pmAnalysis,architectureArtifact,adrs,issuePlan) {
+function upstreamFindings(
+  pmAnalysis,architectureArtifact,adrs,issuePlan,approvals,decisionPackage,
+) {
   const findings=[];
   try {
     const architectureResult=validateArchitecture({
       pmAnalysis,
       architecture:architectureArtifact,
       adrs,
+      approvals,
+      decisionPackage,
     });
     for (const finding of architectureResult.findings ?? []) {
       if (architectureResult.valid && !BLOCKING_SEVERITIES.has(finding.severity)) {
@@ -749,6 +754,8 @@ function upstreamFindings(pmAnalysis,architectureArtifact,adrs,issuePlan) {
       pmAnalysis,
       architecture:architectureArtifact,
       adrs,
+      approvals,
+      ...(decisionPackage===undefined ? {} : {decisionPackage}),
       issuePlan,
     });
     for (const finding of issuePlanResult.findings ?? []) {
@@ -844,12 +851,17 @@ function canonicalOptions(options) {
     throw new SpecAuditInputError("Spec audit options must be a plain JSON object");
   }
   const keys=Object.keys(normalized).sort();
-  if (canonicalJson(keys)!==canonicalJson(OPTION_KEYS)) {
+  if (!OPTION_KEYS.every(key => Object.hasOwn(normalized,key)) ||
+      keys.some(key => !OPTION_KEYS.includes(key) && !OPTIONAL_OPTION_KEYS.has(key))) {
     throw new SpecAuditInputError(
       "Spec audit options require exactly architecture, issuePlan, and pmAnalysis",
     );
   }
-  return normalized;
+  return {
+    ...normalized,
+    approvals:normalized.approvals ?? [],
+    decisionAnswers:normalized.decisionAnswers ?? [],
+  };
 }
 
 function assertReferenceIdentity(artifact,path) {
@@ -919,6 +931,9 @@ export function auditSpecification(options) {
   const pm=normalized.pmAnalysis;
   const architectureArtifact=normalized.architecture.artifact;
   const adrs=[...normalized.architecture.adrs];
+  const approvals=[...normalized.approvals];
+  const decisionAnswers=[...normalized.decisionAnswers];
+  const decisionPackage=normalized.decisionPackage;
   const plan=normalized.issuePlan;
   assertMinimumEnvelopes(pm,architectureArtifact,adrs,plan);
   adrs.sort((left,right) =>
@@ -932,6 +947,10 @@ export function auditSpecification(options) {
     ...validationFindings(pm,"pm-analysis.v1","PM"),
     ...validationFindings(architectureArtifact,"architecture.v1","ARCHITECT"),
     ...adrs.flatMap(adr => validationFindings(adr,"adr.v1","ARCHITECT")),
+    ...approvals.flatMap(approval =>
+      validationFindings(approval,"adr-approval.v1","ARCHITECT")),
+    ...decisionAnswers.flatMap(answer =>
+      validationFindings(answer,"decision-answer.v1","USER")),
     ...validationFindings(plan,"issue-plan.v1","PM_FINALIZATION"),
   ];
   const inputsTrusted=upstreamValidationFindings.length===0;
@@ -962,7 +981,9 @@ export function auditSpecification(options) {
     ...issueAndReferenceFindings(pm,adrs,plan),
     ...dependencyCycleFindings(plan),
     ...adrFindings(architectureArtifact,adrs,plan),
-    ...upstreamFindings(pm,architectureArtifact,adrs,plan),
+    ...upstreamFindings(
+      pm,architectureArtifact,adrs,plan,approvals,decisionPackage,
+    ),
   ] : upstreamValidationFindings;
   const findings=finalizeFindings(rawFindings);
   const blocking=findings.filter(finding => BLOCKING_SEVERITIES.has(
@@ -975,6 +996,8 @@ export function auditSpecification(options) {
     artifactReference(pm),
     artifactReference(architectureArtifact),
     ...adrs.map(artifactReference),
+    ...approvals.map(artifactReference),
+    ...decisionAnswers.map(artifactReference),
     artifactReference(plan),
   ];
   const auditedIssueIds=inputsTrusted ?

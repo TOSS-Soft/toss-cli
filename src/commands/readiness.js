@@ -1,8 +1,11 @@
 import {evaluateProjectReadiness} from "../pipeline/readiness.js";
+import {buildTraceGraph} from "../pipeline/traceability.js";
+import {verifiedGateEvidence} from "./evidence.js";
 import {
   commandCatalog,
   deepFreeze,
   gateCommandServices,
+  OrchestrationError,
   resolveGateBundle,
 } from "./gate-support.js";
 
@@ -35,13 +38,33 @@ export async function runReadinessCommand(command,serviceInput) {
   }
   const services=gateCommandServices(serviceInput,{
     allowed:["artifactStore","authorityRegistry"],
-    required:["artifactStore","authorityRegistry"],
   });
+  if (services.authorityRegistry===undefined) {
+    throw new OrchestrationError(
+      "READINESS_AUTHORITY_REQUIRED",
+      "Readiness evaluation requires an independent trusted authority registry",4,
+    );
+  }
   const catalog=await commandCatalog(services.store);
   const bundle=await resolveGateBundle(catalog,{
-    requirePlan:true,requireAudit:true,requireState:true,current:true,
+    requirePlan:true,requireAudit:true,requireState:true,requireTrace:false,current:true,
   });
-  const readiness=evaluateProjectReadiness(bundle,{
+  const evidence=await verifiedGateEvidence(catalog,bundle,services.authorityRegistry);
+  const completeBundle={
+    ...bundle,
+    ...evidence,
+    traceGraph:buildTraceGraph({
+      pmAnalysis:bundle.pmAnalysis,
+      architecture:bundle.architecture,
+      approvals:evidence.adrApprovals,
+      ...(evidence.decisionPackage===undefined ? {} : {
+        decisionPackage:evidence.decisionPackage,
+      }),
+      decisionAnswers:evidence.decisionAnswers,
+      issuePlan:bundle.issuePlan,
+    }),
+  };
+  const readiness=evaluateProjectReadiness(completeBundle,{
     authorityRegistry:services.authorityRegistry,
   });
   const failures=actionable(readiness.failures);
