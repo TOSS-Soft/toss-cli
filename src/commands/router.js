@@ -241,6 +241,18 @@ function handlerFor(context,name) {
   return Object.getOwnPropertyDescriptor(context.handlers,name)?.value ?? null;
 }
 
+async function builtinHandler(name) {
+  if (name.startsWith("project.")) {
+    const {runProjectCommand}=await import("./project.js");
+    return runProjectCommand;
+  }
+  if (name.startsWith("feature.")) {
+    const {runFeatureCommand}=await import("./feature.js");
+    return runFeatureCommand;
+  }
+  return null;
+}
+
 async function dispatchTrace(command,context) {
   const {runTraceCommand}=await import("./trace.js");
   const traceContext=Object.create(null);
@@ -323,7 +335,8 @@ export async function dispatchCommand(command,context={}) {
         await dispatchTrace(normalized,normalizedContext),
       ));
     }
-    const handler=handlerFor(normalizedContext,normalized.name);
+    const handler=handlerFor(normalizedContext,normalized.name) ??
+      await builtinHandler(normalized.name);
     if (!handler) {
       return result(EXIT_CODES.NOT_IMPLEMENTED,failureResult({
         code:"COMMAND_NOT_IMPLEMENTED",

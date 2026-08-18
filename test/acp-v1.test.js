@@ -119,6 +119,8 @@ test("the registry declares role boundaries for every full-pipeline artifact",()
       "issue-plan",
       "spec-audit",
       "transition-event",
+      "project-input",
+      "feature-delta",
       "github-publication-result",
     ],
   );

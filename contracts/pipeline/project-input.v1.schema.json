@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://toss.software/schemas/pipeline/project-input.v1.schema.json",
+  "title": "TOSS Project Command Input v1",
+  "description": "Immutable caller-supplied stage material for one project source generation. It carries no approval authority.",
+  "allOf": [
+    {"$ref": "https://toss.software/schemas/common/artifact-envelope.v1.schema.json"},
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {"const": "acp.v1"},
+        "document_type": {"const": "project-input"},
+        "producer": {"type": "object", "properties": {"role": {"const": "orchestrator"}}},
+        "content": {"$ref": "#/$defs/content"}
+      }
+    }
+  ],
+  "$defs": {
+    "decision_enrichment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "context", "impact"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^Q-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"},
+        "context": {"type": "string", "minLength": 1},
+        "impact": {"type": "string", "minLength": 1},
+        "reversibility": {"enum": ["reversible", "partially-reversible", "irreversible"]},
+        "status": {"enum": ["unresolved", "resolved"]},
+        "resolved": {"type": "boolean"},
+        "authority_resolution": {"type": "object"},
+        "business_input_missing": {"type": "boolean"},
+        "technical_preference": {"type": "boolean"},
+        "dependencies": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+      }
+    },
+    "content": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "project_id", "analysis_id", "artifacts"],
+      "properties": {
+        "schema_version": {"const": "project-command-input.v1"},
+        "project_id": {"type": "string", "minLength": 1},
+        "analysis_id": {"type": "string", "minLength": 1},
+        "artifacts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["pm_analysis", "decision_enrichments", "architecture", "adrs", "issue_plan"],
+          "properties": {
+            "pm_analysis": {"$ref": "https://toss.software/schemas/agents/pm-analysis.v1.schema.json"},
+            "decision_enrichments": {"type": "array", "items": {"$ref": "#/$defs/decision_enrichment"}},
+            "architecture": {"$ref": "https://toss.software/schemas/agents/architecture.v1.schema.json"},
+            "adrs": {"type": "array", "items": {"$ref": "https://toss.software/schemas/agents/adr.v1.schema.json"}},
+            "issue_plan": {"$ref": "https://toss.software/schemas/agents/issue-plan.v1.schema.json"}
+          }
+        }
+      }
+    }
+  }
+}
