@@ -159,7 +159,7 @@ async function currentFeature(store,input) {
   return {history,latest};
 }
 
-async function runStages(command,store,input,targetStage) {
+async function runStages(command,store,input,targetStage,authorityRegistry) {
   const base=await readyBase(store,input.project_id);
   let {history,latest}=await currentFeature(store,input);
   if (latest && !sameBase(latest.content.base_project,base)) {
@@ -176,7 +176,9 @@ async function runStages(command,store,input,targetStage) {
     await verifyExactBaseReferences(store,base);
   }
   await verifyBaseSnapshot(store,base);
-  const design=targetStage==="PREPARED" ? await startFeatureDesign(store,latest) : null;
+  const design=targetStage==="PREPARED" ? await startFeatureDesign(
+    store,latest,{authorityRegistry:authorityRegistry ?? {actors:[]}},
+  ) : null;
   const result=deepFreeze({
     ...statusResult(latest,reused),
     ...(design ? {design} : {}),
@@ -184,7 +186,7 @@ async function runStages(command,store,input,targetStage) {
   return targetStage==="PREPARED" ? blockAutomation(command,result) : result;
 }
 
-async function featureStatus(store) {
+async function featureStatus(store,authorityRegistry) {
   const latest=await latestAnyFeature(store);
   const input=featureInputFromDelta(latest);
   const base=await readyBase(store,input.project_id);
@@ -194,7 +196,9 @@ async function featureStatus(store) {
     );
   }
   const design=latest.content.stage==="PREPARED" ?
-    await startFeatureDesign(store,latest,{readOnly:true}) : null;
+    await startFeatureDesign(store,latest,{
+      readOnly:true,authorityRegistry:authorityRegistry ?? {actors:[]},
+    }) : null;
   return deepFreeze({...statusResult(latest),...(design ? {design} : {})});
 }
 
@@ -209,7 +213,7 @@ export async function runFeatureCommand(command,serviceInput) {
   const services={...rawServices,store};
   let result;
   if (normalized.name==="feature.status") {
-    result=await featureStatus(services.store);
+    result=await featureStatus(services.store,services.authorityRegistry);
   } else {
     const input=await resolveFeature(normalized,services);
     const target={
@@ -217,7 +221,9 @@ export async function runFeatureCommand(command,serviceInput) {
       "feature.analyze":"ANALYZED",
       "feature.prepare":"PREPARED",
     }[normalized.name];
-    result=await runStages(normalized,services.store,input,target);
+    result=await runStages(
+      normalized,services.store,input,target,services.authorityRegistry,
+    );
   }
   await store.refresh();
   return result;

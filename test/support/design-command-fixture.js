@@ -66,9 +66,9 @@ export function classificationInput(overrides={}) {
     risk_signals:["MULTI_SCREEN"],
     requested_level:"AUTO",
     source:"company_system",
-    purpose:"Provide a safe and accessible checkout experience.",
-    success_criteria:["A customer can complete checkout without assistance."],
-    approval_owner:{role:"CEO",identity:"verified-ceo"},
+    purpose:"Provide an accessible checkout experience.",
+    success_criteria:["A user can complete checkout without assistance."],
+    approval_owner:{role:"CEO",identity:"authority:ceo"},
     ...overrides,
   };
 }
@@ -141,8 +141,8 @@ export function signedStageApproval(kind,artifacts,overrides={}) {
     approval_kind:kind,
     decision:"APPROVED",
     design_id:"DESIGN-CHECKOUT",
-    source_revision:fixture.source_revision,
-    source_sha256:fixture.source_sha256,
+    source_revision:overrides.source_revision ?? fixture.source_revision,
+    source_sha256:overrides.source_sha256 ?? fixture.source_sha256,
     recommended_level:overrides.recommended_level ?? level,
     effective_level:overrides.effective_level ?? level,
     from_level:overrides.from_level ?? null,

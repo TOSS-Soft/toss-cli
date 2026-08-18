@@ -148,6 +148,69 @@ test("UI feature prepare starts a provenance-bound design state without pre-gate
   assert.equal((await store.list({document_type:"design-orchestration-state"})).length,1);
 });
 
+test("feature status follows a valid descendant design state instead of comparing it to bootstrap",{
+  skip:!commandsAvailable,
+},async t => {
+  const {store}=await readyProject(t);
+  const input=featureCommandInput({designImpact:{
+    delivery_targets:["WEB"],
+    affected_surfaces:["SCREEN","FLOW","INFORMATION_ARCHITECTURE"],
+    risk_signals:["MULTI_SCREEN"],
+    requested_level:"AUTO",
+    source:"company_system",
+    purpose:"Add a requester-visible resolution notification screen and flow.",
+    success_criteria:["The requester can understand the resolved state."],
+    approval_owner:{role:"USER",identity:"verified-user"},
+  }});
+  await runFeatureCommand(
+    parsedCommand("feature.prepare",{from:"feature.json"}),featureServices(store,input),
+  );
+  const initial=(await store.list({document_type:"design-orchestration-state"})).at(-1);
+  const stages={
+    "design-brief":"BRIEF",
+    "ux-analysis":"ANALYSIS",
+    "user-flow":"FLOWS",
+    "information-architecture":"INFORMATION_ARCHITECTURE",
+    "wireframe-plan":"WIREFRAMES",
+    "visual-direction":"DIRECTION",
+    "design-system":"DESIGN_SYSTEM",
+    "screen-spec":"SCREENS",
+    "prototype-manifest":"PROTOTYPE",
+    "design-audit":"AUDIT",
+    "design-approval":"FINAL_APPROVAL",
+  };
+  const descendant=clone(initial);
+  descendant.revision=2;
+  descendant.parents=[artifactReference(initial)];
+  descendant.inputs=[];
+  descendant.content.state="DIRECTION_PENDING";
+  descendant.content.gate="DIRECTION_APPROVAL";
+  descendant.content.payload_commitments=descendant.content.required_artifact_types.map(
+    (documentType,index) => ({
+      stage:stages[documentType],
+      expected_document_type:documentType,
+      payload_sha256:documentType==="design-brief" ?
+        initial.content.payload_commitments[0].payload_sha256 :
+        "123456789ab"[index].repeat(64),
+      status:"COLLECTED",
+      artifact_ref:null,
+    }),
+  );
+  descendant.content.next_action={
+    command:"toss design approve",
+    owner:"USER",
+    reason:"Visual direction approval is required.",
+  };
+  rehash(descendant);
+  await store.append(descendant);
+
+  const status=await runFeatureCommand(
+    parsedCommand("feature.status"),featureServices(store,input),
+  );
+  assert.equal(status.design.state,"DIRECTION_PENDING");
+  assert.deepEqual(status.design.state_revision,artifactReference(descendant));
+});
+
 test("backend-only feature prepare persists exactly a reasoned N/A brief and state",{
   skip:!commandsAvailable,
 },async t => {

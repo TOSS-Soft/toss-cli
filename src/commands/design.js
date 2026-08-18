@@ -242,7 +242,9 @@ function initialFeatureState(featureArtifact,classification,brief,persistedBrief
   });
 }
 
-export async function startFeatureDesign(store,featureArtifact,{readOnly=false}={}) {
+export async function startFeatureDesign(
+  store,featureArtifact,{readOnly=false,authorityRegistry={actors:[]}}={},
+) {
   if (featureArtifact?.document_type!=="feature-delta" ||
       featureArtifact.content?.stage!=="PREPARED") {
     throw new OrchestrationError(
@@ -274,20 +276,23 @@ export async function startFeatureDesign(store,featureArtifact,{readOnly=false}=
     persistedBrief=existing ?? await store.append(brief);
   }
   const draft=initialFeatureState(featureArtifact,classification,brief,persistedBrief);
-  const existing=(await store.list({
+  let history=[...(await store.list({
     document_type:"design-orchestration-state",artifact_id:draft.artifact_id,
-  })).at(-1);
-  if (existing && canonicalJson(existing)!==canonicalJson(draft)) {
+  }))].sort((left,right) => left.revision-right.revision);
+  const bootstrap=history.find(row => row.revision===1);
+  if (history.length>0 && (!bootstrap || canonicalJson(bootstrap)!==canonicalJson(draft))) {
     throw new OrchestrationError(
-      "STALE_FEATURE_SOURCE","Existing design state contradicts the exact feature source",6,
+      "STALE_FEATURE_SOURCE","Design bootstrap contradicts the exact feature source",6,
     );
   }
-  if (!existing && readOnly) {
+  if (history.length===0 && readOnly) {
     throw new OrchestrationError(
       "FEATURE_DESIGN_NOT_READY","Prepared feature is missing its design state",4,
     );
   }
-  const state=existing ?? await store.append(draft);
+  if (history.length===0) history=[await store.append(draft)];
+  const orchestrator=createDesignOrchestrator({authorityRegistry});
+  const state=verifyStateHistory(orchestrator,history);
   return deepFreeze({
     level:classification.effective_level,
     state:state.content.state,
@@ -298,6 +303,9 @@ export async function startFeatureDesign(store,featureArtifact,{readOnly=false}=
 
 function stateResult(artifact,{reused=[],projection=artifact.content}={}) {
   const content=projection;
+  const blocked=new Set([
+    "DIRECTION_APPROVAL","DESIGN_SYSTEM_APPROVAL","FINAL_APPROVAL",
+  ]).has(content.gate);
   const approvedKinds=new Set(content.approvals.map(record => record.approval_kind));
   const approved=[
     ...(approvedKinds.has("CRITICAL_DOWNGRADE") ? ["CRITICAL_DOWNGRADE"] : []),
@@ -310,9 +318,8 @@ function stateResult(artifact,{reused=[],projection=artifact.content}={}) {
     recommended_level:content.classification.recommended_level,
     state:content.state,
     gate:content.gate,
-    blocked:new Set([
-      "DIRECTION_APPROVAL","DESIGN_SYSTEM_APPROVAL","FINAL_APPROVAL",
-    ]).has(content.gate),
+    blocked,
+    ...(blocked ? {command_exit_code:4} : {}),
     ready_to_persist:content.gate==="NONE" && content.state==="SYSTEM_APPROVED",
     collected:[...new Set(content.payload_commitments.map(row => row.stage))],
     approved,
@@ -376,6 +383,78 @@ async function stateHistory(store,designId) {
   return [...rows].sort((left,right) => left.revision-right.revision);
 }
 
+const STATE_SEQUENCE=Object.freeze({
+  INITIALIZED:0,
+  DIRECTION_PENDING:1,
+  SYSTEM_PENDING:2,
+  SYSTEM_APPROVED:3,
+  FINAL_APPROVAL_PENDING:4,
+  APPROVED:5,
+  NOT_APPLICABLE:5,
+});
+
+function stateCommitmentIdentity(content) {
+  return content.payload_commitments.map(row => canonicalJson({
+    stage:row.stage,
+    expected_document_type:row.expected_document_type,
+    payload_sha256:row.payload_sha256,
+  })).sort();
+}
+
+function verifyStateHistory(orchestrator,history) {
+  let previous=null;
+  for (const artifact of history) {
+    try {
+      orchestrator.verifyStateSnapshot({
+        content:artifact.content,
+        provenance:artifact.provenance,
+      });
+    } catch (error) {
+      const authority=/signature|authority|approval|downgrade/i.test(error?.message ?? "");
+      throw new OrchestrationError(
+        authority ? "DESIGN_AUTHORITY_INVALID" : "DESIGN_STATE_INVALID",
+        authority ? "Design state authority verification failed" :
+          "Design state semantic verification failed",
+        6,
+      );
+    }
+    if (!previous && (artifact.revision!==1 || !new Set([
+      "INITIALIZED","DIRECTION_PENDING","NOT_APPLICABLE",
+    ]).has(artifact.content.state))) {
+      throw new OrchestrationError(
+        "DESIGN_STATE_INVALID","Design state history begins from an illegal root",6,
+      );
+    }
+    if (previous) {
+      const priorApprovals=previous.content.approvals;
+      const approvals=artifact.content.approvals;
+      const priorCommitments=stateCommitmentIdentity(previous.content);
+      const commitments=stateCommitmentIdentity(artifact.content);
+      const commitmentContinuity=previous.content.state==="INITIALIZED" ?
+        priorCommitments.every(key => commitments.includes(key)) :
+        canonicalJson(priorCommitments)===canonicalJson(commitments);
+      const rank=STATE_SEQUENCE[artifact.content.state];
+      const previousRank=STATE_SEQUENCE[previous.content.state];
+      if (artifact.revision!==previous.revision+1 ||
+          canonicalJson(artifact.parents)!==canonicalJson([exactReference(previous)]) ||
+          canonicalJson(artifact.provenance)!==canonicalJson(previous.provenance) ||
+          canonicalJson(artifact.content.classification)!==
+            canonicalJson(previous.content.classification) ||
+          approvals.length<priorApprovals.length || priorApprovals.some((record,index) =>
+            canonicalJson(record)!==canonicalJson(approvals[index])) ||
+          !commitmentContinuity || rank!==previousRank+1 ||
+          (previous.content.state==="NOT_APPLICABLE" &&
+            artifact.content.state!=="NOT_APPLICABLE")) {
+        throw new OrchestrationError(
+          "DESIGN_STATE_INVALID","Design state history contains an illegal revision transition",6,
+        );
+      }
+    }
+    previous=artifact;
+  }
+  return history.at(-1);
+}
+
 async function latestAnyState(store) {
   const rows=await store.list({document_type:"design-orchestration-state"});
   const identities=[...new Set(rows.map(row => row.artifact_id))];
@@ -387,7 +466,7 @@ async function latestAnyState(store) {
       "AMBIGUOUS_DESIGN_HISTORY","Status requires exactly one design identity",5,
     );
   }
-  return [...rows].sort((left,right) => left.revision-right.revision).at(-1);
+  return [...rows].sort((left,right) => left.revision-right.revision);
 }
 
 async function persistedCandidates(store,graph) {
@@ -476,35 +555,48 @@ async function acquireDesignInput(command,services) {
   );
 }
 
-async function runWithInput(command,services,store,input) {
-  const history=await stateHistory(store,input.design_id);
-  let previous=history.at(-1) ?? null;
-  if (command.name==="design.approve") {
-    const pending=previous?.content.gate;
-    const approvalKinds=new Set(input.approval_records.map(row => row.approval_kind));
-    const legal=(pending==="DIRECTION_APPROVAL" && approvalKinds.has("VISUAL_DIRECTION")) ||
-      (pending==="DESIGN_SYSTEM_APPROVAL" && approvalKinds.has("DESIGN_SYSTEM")) ||
-      pending==="FINAL_APPROVAL" || pending==="COMPLETE";
-    if (!legal) {
-      throw new OrchestrationError(
-        "ILLEGAL_DESIGN_TRANSITION","Design approval requires one persisted pending gate",6,
-      );
-    }
+function assertApprovalHistoryTransition(previous,input,commandName) {
+  const prior=previous?.content.approvals ?? [];
+  const supplied=input.approval_records;
+  if (supplied.length<prior.length || prior.some((record,index) =>
+    canonicalJson(record)!==canonicalJson(supplied[index]))) {
+    throw new OrchestrationError(
+      "ILLEGAL_DESIGN_TRANSITION",
+      "Design approval history is an immutable ordered prefix",
+      6,
+    );
   }
+  const additions=supplied.slice(prior.length).map(record => record.approval_kind);
+  let expected=[];
+  if (!previous) {
+    const classification=classifyDesignLevel(input.classification_input);
+    expected=classification.requires_downgrade_approval ? ["CRITICAL_DOWNGRADE"] : [];
+    if (commandName==="design.approve") expected=["__PERSISTED_GATE_REQUIRED__"];
+  } else if (commandName==="design.approve") {
+    expected={
+      DIRECTION_APPROVAL:["VISUAL_DIRECTION"],
+      DESIGN_SYSTEM_APPROVAL:["DESIGN_SYSTEM"],
+      FINAL_APPROVAL:[],
+      COMPLETE:[],
+    }[previous.content.gate] ?? ["__PERSISTED_GATE_REQUIRED__"];
+  }
+  if (canonicalJson(additions)!==canonicalJson(expected)) {
+    throw new OrchestrationError(
+      "ILLEGAL_DESIGN_TRANSITION",
+      "Design command may add only the approval required by its persisted gate",
+      6,
+    );
+  }
+}
+
+async function runWithInput(command,store,input,orchestrator) {
+  const history=await stateHistory(store,input.design_id);
+  let previous=history.length===0 ? null : verifyStateHistory(orchestrator,history);
   if (previous) assertExactReplay(input,previous);
+  assertApprovalHistoryTransition(previous,input,command.name);
   let persisted=await persistedCandidates(store,input.artifacts);
   const reused=persisted.map(exactReference);
-  const orchestrator=createDesignOrchestrator({
-    authorityRegistry:services.authorityRegistry ?? {actors:[]},
-  });
   let outcome=preparedOutcome(orchestrator,input,persisted,command.name);
-
-  if (!previous && outcome.level!=="NOT_APPLICABLE") {
-    previous=await appendState(store,input,outcome,null);
-  } else if (previous && (outcome.state!==previous.content.state ||
-      canonicalJson(outcome.next_state_content)!==canonicalJson(previous.content))) {
-    previous=await appendState(store,input,outcome,previous);
-  }
 
   const shouldPersistNonFinal=outcome.ready_to_persist && command.name!=="design.approve";
   const shouldPersistFinal=outcome.state==="FINAL_APPROVAL_PENDING" &&
@@ -537,13 +629,17 @@ export async function runDesignCommand(command,serviceInput) {
   const rawServices=commandServices(serviceInput);
   const store=createVerifiedArtifactCatalog(rawServices.store);
   await store.refresh();
+  const orchestrator=createDesignOrchestrator({
+    authorityRegistry:rawServices.authorityRegistry ?? {actors:[]},
+  });
   if (normalized.name==="design.status") {
-    const status=await reconciledStatus(store,await latestAnyState(store));
+    const history=await latestAnyState(store);
+    const status=await reconciledStatus(store,verifyStateHistory(orchestrator,history));
     await store.refresh();
     return status;
   }
   const input=await acquireDesignInput(normalized,rawServices);
-  const result=await runWithInput(normalized,rawServices,store,input);
+  const result=await runWithInput(normalized,store,input,orchestrator);
   await store.refresh();
   return result;
 }

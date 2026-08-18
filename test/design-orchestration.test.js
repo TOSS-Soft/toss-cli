@@ -43,9 +43,9 @@ function classificationInput(overrides={}) {
     risk_signals:[],
     requested_level:"AUTO",
     source:"company_system",
-    purpose:"Provide a safe and accessible checkout experience.",
-    success_criteria:["A customer can complete checkout without assistance."],
-    approval_owner:{role:"CEO",identity:"verified-ceo"},
+    purpose:"Provide an accessible checkout experience.",
+    success_criteria:["A user can complete checkout without assistance."],
+    approval_owner:{role:"CEO",identity:"authority:ceo"},
     ...overrides,
   };
 }
@@ -156,8 +156,8 @@ function signedStageApproval(kind,artifacts,overrides={}) {
     approval_kind:kind,
     decision:"APPROVED",
     design_id:"DESIGN-CHECKOUT",
-    source_revision:designFixture.source_revision,
-    source_sha256:designFixture.source_sha256,
+    source_revision:overrides.source_revision ?? designFixture.source_revision,
+    source_sha256:overrides.source_sha256 ?? designFixture.source_sha256,
     recommended_level:overrides.recommended_level ?? level,
     effective_level:overrides.effective_level ?? level,
     from_level:overrides.from_level ?? null,
@@ -271,6 +271,20 @@ test("prepareDesign fails closed before a critical downgrade can advance",() => 
     }),
     /downgrade approval/i,
   );
+});
+
+test("prepareDesign rejects undeclared target commands",() => {
+  const graph=graphForLevel("STANDARD");
+  assert.throws(() => trustedPrepareDesign({
+    classification_input:classificationInput({
+      affected_surfaces:["SCREEN","FLOW","INFORMATION_ARCHITECTURE"],
+      risk_signals:["MULTI_SCREEN"],
+    }),
+    design_artifacts:graph,
+    persisted_artifacts:[],
+    approval_records:[],
+    target_command:"design.invented",
+  }),/target command|unsupported/i);
 });
 
 function stateArtifact() {
@@ -464,6 +478,8 @@ test("N/A is complete without stage or final approval",() => {
     delivery_targets:["API","CLI","BACKEND"],
     affected_surfaces:[],
     source:"NOT_APPLICABLE",
+    purpose:"The verified feature scope has no user-interface impact.",
+    success_criteria:["No UI design artifact is required for this source revision."],
   });
   const result=trustedPrepareDesign({
     classification_input:input,
@@ -477,4 +493,72 @@ test("N/A is complete without stage or final approval",() => {
   assert.equal(result.gate,"NOT_APPLICABLE");
   assert.equal(result.blocked,false);
   assert.deepEqual(result.artifact_revisions,graph.map(artifactReference));
+});
+
+test("critical downgrade authority cannot replay a signature from another source",() => {
+  const graph=graphForLevel("LITE");
+  const input=classificationInput({
+    risk_signals:["SECURITY_PRIVACY"],
+    requested_level:"LITE",
+  });
+  const crossSource=signedStageApproval("CRITICAL_DOWNGRADE",graph,{
+    level:"LITE",
+    recommended_level:"CRITICAL",
+    effective_level:"LITE",
+    from_level:"CRITICAL",
+    to_level:"LITE",
+    source_revision:"other-source@9",
+    source_sha256:"f".repeat(64),
+  });
+  assert.throws(() => trustedPrepareDesign({
+    classification_input:input,
+    design_artifacts:graph,
+    persisted_artifacts:[],
+    approval_records:[crossSource],
+    target_command:"design.prepare",
+  }),/source|provenance|downgrade/i);
+});
+
+test("classification input is exactly bound to the authoritative design brief",() => {
+  const graph=graphForLevel("STANDARD");
+  const cases=[
+    {source:"new_system"},
+    {purpose:"A different purpose under the same source revision."},
+    {success_criteria:["A different success criterion."]},
+    {approval_owner:{role:"USER",identity:"different-authority"}},
+  ];
+  for (const drift of cases) {
+    assert.throws(() => trustedPrepareDesign({
+      classification_input:classificationInput({
+        affected_surfaces:["SCREEN","FLOW","INFORMATION_ARCHITECTURE"],
+        risk_signals:["MULTI_SCREEN"],
+        ...drift,
+      }),
+      design_artifacts:graph,
+      persisted_artifacts:[],
+      approval_records:[],
+      target_command:"design.prepare",
+    }),/brief|classification|source|purpose|criteria|owner/i);
+  }
+});
+
+test("N/A rejects every approval record instead of persisting invented authority",() => {
+  const graph=graphForLevel("NOT_APPLICABLE");
+  const input=classificationInput({
+    delivery_targets:["API","CLI","BACKEND"],
+    affected_surfaces:[],
+    source:"NOT_APPLICABLE",
+    purpose:"The verified feature scope has no user-interface impact.",
+    success_criteria:["No UI design artifact is required for this source revision."],
+  });
+  const approval=signedStageApproval("VISUAL_DIRECTION",graph,{
+    level:"NOT_APPLICABLE",
+  });
+  assert.throws(() => trustedPrepareDesign({
+    classification_input:input,
+    design_artifacts:graph,
+    persisted_artifacts:graph,
+    approval_records:[approval],
+    target_command:"design.prepare",
+  }),/N\/A|NOT_APPLICABLE|approval/i);
 });

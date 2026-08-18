@@ -1,14 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {parseCommand} from "../src/commands/router.js";
+import {dispatchCommand,parseCommand} from "../src/commands/router.js";
+import {sha256Canonical} from "../src/contracts/acp.js";
 import {commandStore} from "./support/command-fixture.js";
 import {
   approvalsFor,
+  artifactReference,
   authorityRegistry,
   classificationInput,
   designCommandInput,
+  DIRECTION_TYPES,
   graphForLevel,
+  signedStageApproval,
+  SYSTEM_TYPES,
 } from "./support/design-command-fixture.js";
 
 const designModule=await import("../src/commands/design.js").catch(error => {
@@ -63,7 +68,14 @@ async function reachSystemGate(store,graph) {
     parsed("prepare",["--from","design.json"]),
     services(store,designCommandInput({artifacts:graph})),
   );
-  const approved=designCommandInput({artifacts:graph,approvalRecords:approvalsFor(graph)});
+  const approvals=approvalsFor(graph);
+  const direction=designCommandInput({artifacts:graph,approvalRecords:[approvals[0]]});
+  const pending=await runDesignCommand(
+    parsed("approve",["--from","design.json"]),
+    services(store,direction),
+  );
+  assert.equal(pending.state,"SYSTEM_PENDING");
+  const approved=designCommandInput({artifacts:graph,approvalRecords:approvals});
   const result=await runDesignCommand(
     parsed("approve",["--from","design.json"]),
     services(store,approved),
@@ -275,6 +287,8 @@ test("N/A feature-free design persists exactly one brief and one state",async t 
       affected_surfaces:[],
       risk_signals:[],
       source:"NOT_APPLICABLE",
+      purpose:"The verified feature scope has no user-interface impact.",
+      success_criteria:["No UI design artifact is required for this source revision."],
     }),
   });
   const result=await runDesignCommand(
@@ -284,4 +298,139 @@ test("N/A feature-free design persists exactly one brief and one state",async t 
   assert.equal(result.blocked,false);
   assert.deepEqual((await designRows(store)).map(row => row.document_type),["design-brief"]);
   assert.equal((await store.list({document_type:"design-orchestration-state"})).length,1);
+});
+
+function approvalOfKind(kind,graph,overrides={}) {
+  const types=kind==="VISUAL_DIRECTION" ? DIRECTION_TYPES : SYSTEM_TYPES;
+  return signedStageApproval(
+    kind,graph.filter(row => types.includes(row.document_type)),overrides,
+  );
+}
+
+async function reachDirectionGate(store,graph) {
+  return runDesignCommand(
+    parsed("prepare",["--from","design.json"]),
+    services(store,designCommandInput({artifacts:graph})),
+  );
+}
+
+async function reachSystemPending(store,graph) {
+  await reachDirectionGate(store,graph);
+  const direction=approvalOfKind("VISUAL_DIRECTION",graph);
+  const result=await runDesignCommand(
+    parsed("approve",["--from","design.json"]),
+    services(store,designCommandInput({artifacts:graph,approvalRecords:[direction]})),
+  );
+  return {direction,result};
+}
+
+test("approval history is an immutable ordered prefix with one expected transition",async t => {
+  await t.test("cannot skip direction and system gates in one approval",async () => {
+    const store=await commandStore(t);
+    const graph=graphForLevel();
+    await reachDirectionGate(store,graph);
+    const before=await store.list();
+    await assert.rejects(runDesignCommand(
+      parsed("approve",["--from","design.json"]),
+      services(store,designCommandInput({
+        artifacts:graph,approvalRecords:approvalsFor(graph),
+      })),
+    ),error => error?.code==="ILLEGAL_DESIGN_TRANSITION");
+    assert.deepEqual(await store.list(),before);
+  });
+
+  await t.test("cannot remove or replace an immutable approval",async () => {
+    for (const replacement of [null,"DESIGN-VISUAL-DIRECTION-REPLACED"]) {
+      const store=await commandStore(t);
+      const graph=graphForLevel();
+      const {direction}=await reachSystemPending(store,graph);
+      const approvalRecords=replacement===null ? [] : [approvalOfKind(
+        "VISUAL_DIRECTION",graph,{record_id:replacement},
+      )];
+      const before=await store.list();
+      await assert.rejects(runDesignCommand(
+        parsed("prepare",["--from","design.json"]),
+        services(store,designCommandInput({artifacts:graph,approvalRecords})),
+      ),error => error?.code==="ILLEGAL_DESIGN_TRANSITION");
+      assert.deepEqual(await store.list(),before);
+      assert.equal(direction.approval_kind,"VISUAL_DIRECTION");
+    }
+  });
+
+  await t.test("cannot reorder an immutable approval history",async () => {
+    const store=await commandStore(t);
+    const graph=graphForLevel();
+    const {direction}=await reachSystemPending(store,graph);
+    const system=approvalOfKind("DESIGN_SYSTEM",graph);
+    await runDesignCommand(
+      parsed("approve",["--from","design.json"]),
+      services(store,designCommandInput({
+        artifacts:graph,approvalRecords:[direction,system],
+      })),
+    );
+    const before=await store.list();
+    await assert.rejects(runDesignCommand(
+      parsed("prepare",["--from","design.json"]),
+      services(store,designCommandInput({
+        artifacts:graph,approvalRecords:[system,direction],
+      })),
+    ),error => error?.code==="ILLEGAL_DESIGN_TRANSITION");
+    assert.deepEqual(await store.list(),before);
+  });
+});
+
+test("design status rejects fabricated semantic completion, crypto, and no-op history",async t => {
+  for (const kind of ["semantic","crypto","idempotence"]) {
+    await t.test(kind,async () => {
+      const store=await commandStore(t);
+      const graph=graphForLevel();
+      await reachDirectionGate(store,graph);
+      const prior=(await store.list({document_type:"design-orchestration-state"})).at(-1);
+      const forged=structuredClone(prior);
+      forged.revision=2;
+      forged.parents=[artifactReference(prior)];
+      if (kind==="semantic") {
+        forged.content.state="APPROVED";
+        forged.content.gate="COMPLETE";
+        forged.content.next_action={
+          command:"toss design status",
+          owner:"DESIGN_SPECIALIST",
+          reason:"Fabricated completion.",
+        };
+      } else {
+        if (kind==="crypto") {
+          const direction=approvalOfKind("VISUAL_DIRECTION",graph);
+          direction.signature=`${direction.signature.slice(0,-3)}A==`;
+          forged.content.approvals=[direction];
+          forged.content.state="SYSTEM_PENDING";
+          forged.content.gate="DESIGN_SYSTEM_APPROVAL";
+          forged.content.next_action={
+            command:"toss design approve",
+            owner:"USER",
+            reason:"Fabricated signature.",
+          };
+        }
+      }
+      forged.content_sha256=sha256Canonical(forged.content);
+      await store.append(forged);
+      await assert.rejects(runDesignCommand(
+        parsed("status"),{artifactStore:store,authorityRegistry:authorityRegistry()},
+      ),error => new Set([
+        "DESIGN_STATE_INVALID","DESIGN_AUTHORITY_INVALID","INPUT_STALE",
+      ]).has(error?.code));
+    });
+  }
+});
+
+test("every design approval gate dispatches as structured blocked exit four",async t => {
+  const store=await commandStore(t);
+  const graph=graphForLevel();
+  const dispatched=await dispatchCommand(
+    parsed("screens",["--from","design.json","--non-interactive"]),
+    {services:services(store,designCommandInput({artifacts:graph}))},
+  );
+  assert.equal(dispatched.exitCode,4);
+  assert.equal(dispatched.result.ok,true);
+  assert.equal(dispatched.result.data.blocked,true);
+  assert.equal(dispatched.result.data.command_exit_code,4);
 });

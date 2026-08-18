@@ -10,6 +10,12 @@ const CONTEXT_KEYS=Object.freeze([
   "classification_input","design_artifacts","persisted_artifacts",
   "approval_records","target_command",
 ]);
+const TARGET_COMMANDS=new Set([
+  "design.init","design.analyze","design.prepare","design.flows",
+  "design.wireframes","design.direction","design.system","design.screens",
+  "design.prototype","design.audit","design.review","design.approve",
+  "design.status",
+]);
 const REQUIRED_TYPES=Object.freeze({
   NOT_APPLICABLE:Object.freeze(["design-brief"]),
   LITE:Object.freeze([
@@ -211,10 +217,24 @@ function levelFromApprovedDowngrade(classification,approvals,graph) {
   if (record.recommended_level!=="CRITICAL" || record.from_level!=="CRITICAL" ||
       record.to_level!==requested || record.effective_level!==requested ||
       record.design_id!==brief?.content?.design_id ||
+      record.source_revision!==brief?.provenance?.source_revision ||
+      record.source_sha256!==brief?.provenance?.source_sha256 ||
       !sameReferenceSet(record.artifact_refs,graph.map(reference))) {
     throw new TypeError("critical downgrade approval is required before design can advance");
   }
   return requested;
+}
+
+function assertClassificationBrief(classification,graph) {
+  const brief=uniqueDesignBrief(graph);
+  const input=classification.classification_input;
+  if (input.source!==brief.content.source || input.purpose!==brief.content.purpose ||
+      !same(input.success_criteria,brief.content.success_criteria) ||
+      !same(input.approval_owner,brief.content.approval_owner)) {
+    throw new TypeError(
+      "design classification must exactly match the authoritative design brief",
+    );
+  }
 }
 
 function assertExactLevelGraph(graph,level) {
@@ -254,6 +274,59 @@ function assertApproval(record,kind,level,graph,types) {
       record.from_level!==null || record.to_level!==null ||
       !sameReferenceSet(record.artifact_refs,expected)) {
     throw new TypeError(`${kind} approval is not bound to the exact design payload`);
+  }
+}
+
+function exactReferenceTypes(actual,required,allowed) {
+  if (!Array.isArray(actual)) return false;
+  const expected=required.filter(type => allowed.has(type)).sort();
+  const types=actual.map(row => row.document_type);
+  return new Set(types).size===types.length && same(types.sort(),expected);
+}
+
+function assertStateApproval(record,kind,level,content,provenance,types) {
+  if (!record || record.approval_kind!==kind || record.design_id!==content.design_id ||
+      record.source_revision!==provenance.source_revision ||
+      record.source_sha256!==provenance.source_sha256 ||
+      record.recommended_level!==level || record.effective_level!==level ||
+      record.from_level!==null || record.to_level!==null ||
+      !exactReferenceTypes(record.artifact_refs,content.required_artifact_types,types)) {
+    throw new TypeError(`${kind} state approval is not bound to the exact design source`);
+  }
+}
+
+function assertStateDowngrade(record,classification,level,content,provenance) {
+  if (!record || record.approval_kind!=="CRITICAL_DOWNGRADE" ||
+      record.design_id!==content.design_id ||
+      record.source_revision!==provenance.source_revision ||
+      record.source_sha256!==provenance.source_sha256 ||
+      record.recommended_level!=="CRITICAL" || record.from_level!=="CRITICAL" ||
+      record.to_level!==level || record.effective_level!==level ||
+      !exactReferenceTypes(
+        record.artifact_refs,content.required_artifact_types,
+        new Set(content.required_artifact_types),
+      )) {
+    throw new TypeError("critical downgrade state approval is stale or cross-source");
+  }
+  if (classification.classification_input.requested_level!==level) {
+    throw new TypeError("critical downgrade state level contradicts its classification");
+  }
+}
+
+function commitmentShape(content,{initialized}) {
+  const expectedTypes=initialized ? ["design-brief"] : content.required_artifact_types;
+  const actualTypes=content.payload_commitments.map(row => row.expected_document_type);
+  if (new Set(actualTypes).size!==actualTypes.length ||
+      !same([...actualTypes].sort(),[...expectedTypes].sort())) {
+    throw new TypeError("design state commitments do not close the required artifact set");
+  }
+  for (const row of content.payload_commitments) {
+    if (STAGE_BY_TYPE[row.expected_document_type]!==row.stage ||
+        (row.artifact_ref===null)!==(row.status!=="PERSISTED") ||
+        (row.artifact_ref!==null &&
+          row.artifact_ref.document_type!==row.expected_document_type)) {
+      throw new TypeError("design state commitment status or stage is inconsistent");
+    }
   }
 }
 
@@ -372,6 +445,152 @@ function outcome({classification,level,graph,persisted,approvals}) {
   return deepFreeze(result);
 }
 
+function assertTargetCommand(targetCommand,result) {
+  if (!TARGET_COMMANDS.has(targetCommand)) {
+    throw new TypeError("design target command is unsupported");
+  }
+  if (targetCommand==="design.approve" &&
+      new Set(["DIRECTION_APPROVAL","NOT_APPLICABLE"]).has(result.gate)) {
+    throw new TypeError("design approve cannot bypass the current legal gate");
+  }
+}
+
+function verifyStateSnapshot(value,actors) {
+  const snapshot=canonicalCopy(value,"design state snapshot");
+  exactObject(snapshot,"design state snapshot",["content","provenance"]);
+  const {content,provenance}=snapshot;
+  const classified=classifyDesignLevel(content.classification.classification_input);
+  const approvals=content.approvals.map(record => verifyApproval(record,actors));
+  const kinds=approvals.map(record => record.approval_kind);
+  if (new Set(kinds).size!==kinds.length) {
+    throw new TypeError("design state approval kinds must be unique");
+  }
+  let level=classified.effective_level;
+  const expectedKinds=[];
+  if (classified.requires_downgrade_approval) {
+    level=classified.classification_input.requested_level;
+    const downgrade=approvals.find(row => row.approval_kind==="CRITICAL_DOWNGRADE");
+    assertStateDowngrade(downgrade,classified,level,content,provenance);
+    expectedKinds.push("CRITICAL_DOWNGRADE");
+  } else if (kinds.includes("CRITICAL_DOWNGRADE")) {
+    throw new TypeError("design state contains an unexpected critical downgrade approval");
+  }
+  const expectedClassification={
+    ...classified,effective_level:level,requires_downgrade_approval:false,
+  };
+  if (!same(content.classification,expectedClassification) ||
+      !same(content.scope,classified.classification_input.scope) ||
+      !same(content.required_stages,REQUIRED_STAGES[level]) ||
+      !same(content.required_artifact_types,REQUIRED_TYPES[level]) ||
+      content.findings.length!==0) {
+    throw new TypeError("design state classification or level requirements are inconsistent");
+  }
+  const initialized=content.state==="INITIALIZED";
+  commitmentShape(content,{initialized});
+  if (initialized) {
+    if (level==="NOT_APPLICABLE" || approvals.length!==0 ||
+        content.gate!=="NONE" || content.artifact_refs.length!==0 ||
+        content.payload_commitments[0].status!=="COLLECTED" ||
+        !same(content.next_action,{
+          command:"toss design prepare --from <FILE>",
+          owner:"DESIGN_SPECIALIST",
+          reason:"Collect and replay the exact level-specific design graph.",
+        })) {
+      throw new TypeError("initialized feature design state is inconsistent");
+    }
+    return deepFreeze(snapshot);
+  }
+  if (level==="NOT_APPLICABLE") {
+    if (approvals.length!==0 || content.state!=="NOT_APPLICABLE" ||
+        content.gate!=="NOT_APPLICABLE" || !same(content.next_action,{
+          command:"toss design status",
+          owner:"DESIGN_SPECIALIST",
+          reason:"Design is not applicable.",
+        })) {
+      throw new TypeError("NOT_APPLICABLE design state cannot contain approvals");
+    }
+  }
+  const direction=approvals.find(row => row.approval_kind==="VISUAL_DIRECTION");
+  const system=approvals.find(row => row.approval_kind==="DESIGN_SYSTEM");
+  if (direction) {
+    assertStateApproval(direction,"VISUAL_DIRECTION",level,content,provenance,DIRECTION_TYPES);
+    expectedKinds.push("VISUAL_DIRECTION");
+  }
+  if (system) {
+    if (!direction) throw new TypeError("design-system approval cannot precede direction");
+    assertStateApproval(system,"DESIGN_SYSTEM",level,content,provenance,SYSTEM_TYPES);
+    expectedKinds.push("DESIGN_SYSTEM");
+  }
+  if (!same(kinds,expectedKinds)) {
+    throw new TypeError("design state approvals are not one canonical ordered history");
+  }
+  const persistedRefs=content.payload_commitments.filter(row =>
+    row.artifact_ref!==null).map(row => row.artifact_ref);
+  if (!sameReferenceSet(content.artifact_refs,persistedRefs)) {
+    throw new TypeError("design state artifact references contradict persisted commitments");
+  }
+  for (const row of content.payload_commitments) {
+    const expectedStatus=row.artifact_ref!==null ? "PERSISTED" : system ? "APPROVED" :
+      direction && DIRECTION_TYPES.has(row.expected_document_type) ? "APPROVED" : "COLLECTED";
+    if (row.status!==expectedStatus) {
+      throw new TypeError("design state commitment status is not derived from verified facts");
+    }
+  }
+  if (level!=="NOT_APPLICABLE") {
+    const persistedTypes=new Set(content.payload_commitments.filter(row =>
+      row.status==="PERSISTED").map(row => row.expected_document_type));
+    const nonFinal=content.required_artifact_types.filter(type => type!=="design-approval");
+    let expectedState;
+    let expectedGate;
+    let expectedAction;
+    if (!direction) {
+      if (persistedTypes.size!==0) throw new TypeError("pre-gate design state persisted artifacts");
+      expectedState="DIRECTION_PENDING";
+      expectedGate="DIRECTION_APPROVAL";
+      expectedAction={
+        command:"toss design approve",owner:"USER",
+        reason:"Visual direction approval is required.",
+      };
+    } else if (!system) {
+      if (persistedTypes.size!==0) throw new TypeError("pre-gate design state persisted artifacts");
+      expectedState="SYSTEM_PENDING";
+      expectedGate="DESIGN_SYSTEM_APPROVAL";
+      expectedAction={
+        command:"toss design approve",owner:"USER",
+        reason:"Design-system approval is required.",
+      };
+    } else if (!nonFinal.every(type => persistedTypes.has(type))) {
+      expectedState="SYSTEM_APPROVED";
+      expectedGate="NONE";
+      expectedAction={
+        command:"toss design prepare --from <FILE>",owner:"DESIGN_SPECIALIST",
+        reason:persistedTypes.size===0 ?
+          "Replay the exact approved payload for persistence." :
+          "Resume exact approved payload persistence.",
+      };
+    } else if (!persistedTypes.has("design-approval")) {
+      expectedState="FINAL_APPROVAL_PENDING";
+      expectedGate="FINAL_APPROVAL";
+      expectedAction={
+        command:"toss design approve",owner:"USER",
+        reason:"Final design approval is required.",
+      };
+    } else {
+      expectedState="APPROVED";
+      expectedGate="COMPLETE";
+      expectedAction={
+        command:"toss design status",owner:"DESIGN_SPECIALIST",
+        reason:"Design is complete.",
+      };
+    }
+    if (content.state!==expectedState || content.gate!==expectedGate ||
+        !same(content.next_action,expectedAction)) {
+      throw new TypeError("design state and gate are not derived from verified approvals");
+    }
+  }
+  return deepFreeze(snapshot);
+}
+
 function prepareWithActors(value,actors) {
   const context=canonicalCopy(value,"design preparation context");
   exactObject(context,"design preparation context",CONTEXT_KEYS);
@@ -393,13 +612,19 @@ function prepareWithActors(value,actors) {
     kinds.add(record.approval_kind);
   }
   const level=levelFromApprovedDowngrade(classification,approvals,graph);
+  assertClassificationBrief(classification,graph);
   assertExactLevelGraph(graph,level);
   assertPersistedSubset(graph,persisted);
   if (level==="NOT_APPLICABLE") {
+    if (approvals.length!==0) {
+      throw new TypeError("NOT_APPLICABLE design cannot contain approval records");
+    }
     const validation=validateDesignSystemRules(graph);
     if (!validation.valid) throw new TypeError("N/A design brief failed validation");
   }
-  return outcome({classification,level,graph,persisted,approvals});
+  const result=outcome({classification,level,graph,persisted,approvals});
+  assertTargetCommand(context.target_command,result);
+  return result;
 }
 
 const EMPTY_ACTORS=normalizedRegistry({actors:[]});
@@ -412,5 +637,8 @@ export function createDesignOrchestrator(options={}) {
   const normalized=canonicalCopy(options,"design orchestrator options");
   exactObject(normalized,"design orchestrator options",["authorityRegistry"]);
   const actors=normalizedRegistry(normalized.authorityRegistry);
-  return Object.freeze({prepareDesign:context => prepareWithActors(context,actors)});
+  return Object.freeze({
+    prepareDesign:context => prepareWithActors(context,actors),
+    verifyStateSnapshot:value => verifyStateSnapshot(value,actors),
+  });
 }
