@@ -62,6 +62,29 @@ function featureServices(store,input,options) {
   return commandServices(store,input,options);
 }
 
+function assertStateInputProjection(state) {
+  assert.deepEqual(state.inputs,[
+    ...state.content.source_artifact_refs,
+    ...state.content.artifact_refs,
+  ]);
+}
+
+function rewrittenStateInputStore(delegate,rewrite) {
+  const project=row => {
+    const result=clone(row);
+    if (result.document_type==="design-orchestration-state") {
+      result.inputs=rewrite(result);
+    }
+    return result;
+  };
+  return {
+    append:delegate.append,
+    get:async reference => project(await delegate.get(reference)),
+    list:async filter => (await delegate.list(filter)).map(project),
+    verify:async reference => project(await delegate.verify(reference)),
+  };
+}
+
 function downgradedFeatureGraph(input) {
   const graph=graphForLevel("LITE");
   const prepared=[];
@@ -190,6 +213,8 @@ test("UI feature prepare starts a provenance-bound design state without pre-gate
   assert.equal((await store.list({document_type:"design-brief"})).length,0);
   const states=await store.list({document_type:"design-orchestration-state"});
   assert.equal(states.length,1);
+  assertStateInputProjection(states[0]);
+  assert.equal(states[0].content.source_artifact_refs[0].document_type,"feature-delta");
   assert.deepEqual(first.design.state_revision,artifactReference(states[0]));
   assert.equal(states[0].provenance.source_revision,input.provenance.source_revision);
 
@@ -225,6 +250,7 @@ test("Critical feature downgrade starts from one valid pending bootstrap state",
   assert.equal(result.design.command_exit_code,4);
   const states=await store.list({document_type:"design-orchestration-state"});
   assert.equal(states.length,1);
+  assertStateInputProjection(states[0]);
   const status=await runFeatureCommand(
     parsedCommand("feature.status"),featureServices(store,input),
   );
@@ -316,7 +342,7 @@ test("feature status follows a valid descendant design state instead of comparin
   const descendant=clone(initial);
   descendant.revision=2;
   descendant.parents=[artifactReference(initial)];
-  descendant.inputs=[];
+  descendant.inputs=[...initial.content.source_artifact_refs];
   descendant.content.state="DIRECTION_PENDING";
   descendant.content.gate="DIRECTION_APPROVAL";
   descendant.content.payload_commitments=descendant.content.required_artifact_types.map(
@@ -364,6 +390,8 @@ test("backend-only feature prepare persists exactly a reasoned N/A brief and sta
   assert.equal(result.design.state,"NOT_APPLICABLE");
   assert.equal((await store.list({document_type:"design-brief"})).length,1);
   assert.equal((await store.list({document_type:"design-orchestration-state"})).length,1);
+  const state=(await store.list({document_type:"design-orchestration-state"}))[0];
+  assertStateInputProjection(state);
   assert.deepEqual(result.artifact.content.design_impact,input.design_impact);
   assert.equal(result.design.artifact_revisions[0].document_type,"design-brief");
   const beforeRerun=await store.list();
@@ -372,6 +400,39 @@ test("backend-only feature prepare persists exactly a reasoned N/A brief and sta
   );
   assert.deepEqual(await store.list(),beforeRerun);
   assert.deepEqual(rerun.design.state_revision,result.design.state_revision);
+});
+
+test("feature design status rejects cleared source, cleared artifact, extra, duplicate, and reordered state inputs",{
+  skip:!commandsAvailable,
+},async t => {
+  const {store}=await readyProject(t);
+  const input=featureCommandInput();
+  await runFeatureCommand(
+    parsedCommand("feature.prepare",{from:"feature.json"}),featureServices(store,input),
+  );
+  const state=(await store.list({document_type:"design-orchestration-state"}))[0];
+  assert.deepEqual(state.inputs.map(row => row.document_type),[
+    "feature-delta","design-brief",
+  ]);
+  const inputKeys=new Set(state.inputs.map(row => canonicalJson(row)));
+  const unexpected=artifactReference((await store.list()).find(row =>
+    row.document_type!=="design-orchestration-state" &&
+    !inputKeys.has(canonicalJson(artifactReference(row)))));
+  const variants={
+    "cleared source":row => row.inputs.slice(1),
+    "cleared artifact":row => row.inputs.slice(0,1),
+    extra:row => [...row.inputs,unexpected],
+    duplicate:row => [...row.inputs,row.inputs[0]],
+    reordered:row => [...row.inputs].reverse(),
+  };
+  for (const [name,rewrite] of Object.entries(variants)) {
+    await t.test(name,async () => {
+      await assert.rejects(runFeatureCommand(
+        parsedCommand("feature.status"),
+        featureServices(rewrittenStateInputStore(store,rewrite),input),
+      ),error => new Set(["DESIGN_STATE_INVALID","INPUT_STALE"]).has(error?.code));
+    });
+  }
 });
 
 test("feature prepare detects a stale exact base and never rewrites project artifacts",{

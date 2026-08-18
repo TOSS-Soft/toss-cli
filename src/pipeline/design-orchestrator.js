@@ -545,6 +545,13 @@ function verifyStateSnapshot(value,actors) {
   const snapshot=canonicalCopy(value,"design state snapshot");
   exactObject(snapshot,"design state snapshot",["content","provenance"]);
   const {content,provenance}=snapshot;
+  const featureScope=content.scope?.kind==="feature";
+  if (!Array.isArray(content.source_artifact_refs) ||
+      (featureScope ? content.source_artifact_refs.length!==1 ||
+        content.source_artifact_refs[0]?.document_type!=="feature-delta" :
+        content.source_artifact_refs.length!==0)) {
+    throw new TypeError("design state source artifact lineage is inconsistent with scope");
+  }
   const classified=classifyDesignLevel(content.classification.classification_input);
   const approvals=content.approvals.map(record => verifyApproval(record,actors));
   const kinds=approvals.map(record => record.approval_kind);

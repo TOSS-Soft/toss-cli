@@ -74,9 +74,32 @@ function instrumentStore(delegate,{failAtDesignAppend=Infinity}={}) {
   };
 }
 
+function rewrittenStateInputStore(delegate,rewrite) {
+  const project=row => {
+    const result=structuredClone(row);
+    if (result.document_type==="design-orchestration-state") {
+      result.inputs=rewrite(result);
+    }
+    return result;
+  };
+  return {
+    append:delegate.append,
+    get:async reference => project(await delegate.get(reference)),
+    list:async filter => (await delegate.list(filter)).map(project),
+    verify:async reference => project(await delegate.verify(reference)),
+  };
+}
+
 async function designRows(store) {
   return (await store.list()).filter(row =>
     row.document_type!=="design-orchestration-state");
+}
+
+function assertStateInputProjection(state) {
+  assert.deepEqual(state.inputs,[
+    ...state.content.source_artifact_refs,
+    ...state.content.artifact_refs,
+  ]);
 }
 
 function graphWithForgedArtifactIdentities(graph) {
@@ -195,6 +218,7 @@ test("pre-gate prepare stores only immutable commitments and truthful status",as
 
   const stateRows=await store.list({document_type:"design-orchestration-state"});
   assert.equal(stateRows.length,1);
+  assertStateInputProjection(stateRows[0]);
   assert.ok(stateRows[0].content.payload_commitments.every(row =>
     !Object.hasOwn(row,"payload") && row.artifact_ref===null));
 });
@@ -288,6 +312,9 @@ test("interrupted physical append resumes idempotently and status stays truthful
   assert.deepEqual(resumed.reused_revisions.map(row => row.document_type).sort(),
     partial.map(row => row.document_type).sort());
   const afterResume=await designRows(backing);
+  assertStateInputProjection((await backing.list({
+    document_type:"design-orchestration-state",
+  })).at(-1));
 
   const rerun=await runDesignCommand(
     parsed("prepare",["--from","design.json"]),
@@ -331,6 +358,8 @@ test("the complete design family supports router modes and final approval",async
   assert.equal(final.gate,"COMPLETE");
   assert.ok(final.artifact_revisions.some(row => row.document_type==="design-approval"));
   const completeRows=await store.list();
+  assertStateInputProjection(completeRows.filter(row =>
+    row.document_type==="design-orchestration-state").at(-1));
   await assert.rejects(runDesignCommand(
     parsed("approve",["--from","design.json"]),
     services(store,withFinalApproval(graph,approved)),
@@ -656,6 +685,64 @@ test("design status rejects an authority-signed but dependency-invalid resolved 
   await assert.rejects(runDesignCommand(
     parsed("status"),{artifactStore:maliciousStore,authorityCapability},
   ),error => error?.code==="INPUT_STALE");
+});
+
+test("design status rejects missing, extra, duplicate, and reordered state inputs",async t => {
+  const sourceStore=memoryCommandStore();
+  const graph=graphForLevel();
+  const approved=await reachSystemGate(sourceStore,graph);
+  await runDesignCommand(
+    parsed("prepare",["--from","design.json"]),services(sourceStore,approved),
+  );
+  await runDesignCommand(
+    parsed("approve",["--from","design.json"]),
+    services(sourceStore,withFinalApproval(graph,approved)),
+  );
+  const history=await sourceStore.list({document_type:"design-orchestration-state"});
+  const latestRevision=history.at(-1).revision;
+  const variants={
+    missing:row => row.revision===latestRevision ? row.inputs.slice(1) : row.inputs,
+    extra:row => row.revision===latestRevision ?
+      [...row.inputs,artifactReference(history[0])] : row.inputs,
+    duplicate:row => row.revision===latestRevision ?
+      [...row.inputs,row.inputs[0]] : row.inputs,
+    reordered:row => row.revision===latestRevision ? [...row.inputs].reverse() : row.inputs,
+    cleared:() => [],
+  };
+  for (const [name,rewrite] of Object.entries(variants)) {
+    await t.test(name,async () => {
+      await assert.rejects(runDesignCommand(
+        parsed("status"),{
+          artifactStore:rewrittenStateInputStore(sourceStore,rewrite),
+          authorityCapability,
+        },
+      ),error => new Set(["DESIGN_STATE_INVALID","INPUT_STALE"]).has(error?.code));
+    });
+  }
+
+  const rootStore=memoryCommandStore();
+  const rootGraph=graphForLevel("NOT_APPLICABLE");
+  const rootInput=designCommandInput({
+    artifacts:rootGraph,
+    classification:classificationInput({
+      delivery_targets:["API","CLI","BACKEND"],
+      affected_surfaces:[],risk_signals:[],
+      source:"NOT_APPLICABLE",
+      purpose:"The verified feature scope has no user-interface impact.",
+      success_criteria:["No UI design artifact is required for this source revision."],
+    }),
+  });
+  await runDesignCommand(
+    parsed("prepare",["--from","design.json"]),services(rootStore,rootInput),
+  );
+  await t.test("root",async () => {
+    await assert.rejects(runDesignCommand(
+      parsed("status"),{
+        artifactStore:rewrittenStateInputStore(rootStore,() => []),
+        authorityCapability,
+      },
+    ),error => new Set(["DESIGN_STATE_INVALID","INPUT_STALE"]).has(error?.code));
+  });
 });
 
 test("every design approval gate dispatches as structured blocked exit four",async t => {

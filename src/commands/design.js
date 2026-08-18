@@ -262,6 +262,7 @@ function featureDesignBrief(featureArtifact,classification) {
 function initialFeatureState(featureArtifact,classification,brief,persistedBrief) {
   const level=classification.effective_level;
   const designId=brief.content.design_id;
+  const sourceReference=exactReference(featureArtifact);
   const briefReference=persistedBrief ? exactReference(persistedBrief) : null;
   const downgradePending=classification.requires_downgrade_approval;
   const state=level==="NOT_APPLICABLE" ? "NOT_APPLICABLE" :
@@ -281,6 +282,7 @@ function initialFeatureState(featureArtifact,classification,brief,persistedBrief
     required_artifact_types:TYPES_BY_LEVEL[level],
     state,
     gate,
+    source_artifact_refs:[sourceReference],
     artifact_refs:briefReference ? [briefReference] : [],
     payload_commitments:[{
       stage:"BRIEF",
@@ -305,7 +307,7 @@ function initialFeatureState(featureArtifact,classification,brief,persistedBrief
     created_at:featureArtifact.created_at,
     provenance:featureArtifact.provenance,
     parents:[],
-    inputs:[exactReference(featureArtifact),...(briefReference ? [briefReference] : [])],
+    inputs:[sourceReference,...(briefReference ? [briefReference] : [])],
     content_sha256:sha256Canonical(content),
     content,
   });
@@ -352,19 +354,19 @@ export async function startFeatureDesign(
   let history=[...(await store.list({
     document_type:"design-orchestration-state",artifact_id:draft.artifact_id,
   }))].sort((left,right) => left.revision-right.revision);
-  const bootstrap=history.find(row => row.revision===1);
-  if (history.length>0 && (!bootstrap || canonicalJson(bootstrap)!==canonicalJson(draft))) {
-    throw new OrchestrationError(
-      "STALE_FEATURE_SOURCE","Design bootstrap contradicts the exact feature source",6,
-    );
-  }
   if (history.length===0 && readOnly) {
     throw new OrchestrationError(
       "FEATURE_DESIGN_NOT_READY","Prepared feature is missing its design state",4,
     );
   }
   if (history.length===0) history=[await store.append(draft)];
-  const state=verifyStateHistory(orchestrator,history);
+  const state=await verifyStateHistory(orchestrator,history,store);
+  const bootstrap=history.find(row => row.revision===1);
+  if (!bootstrap || canonicalJson(bootstrap)!==canonicalJson(draft)) {
+    throw new OrchestrationError(
+      "STALE_FEATURE_SOURCE","Design bootstrap contradicts the exact feature source",6,
+    );
+  }
   const blocked=new Set([
     "CRITICAL_DOWNGRADE_APPROVAL","DIRECTION_APPROVAL",
     "DESIGN_SYSTEM_APPROVAL","FINAL_APPROVAL",
@@ -491,9 +493,40 @@ function stateCommitmentIdentity(content) {
   })).sort();
 }
 
-function verifyStateHistory(orchestrator,history) {
+async function assertStateEnvelopeInputs(artifact,store) {
+  const sourceRefs=artifact.content.source_artifact_refs;
+  const featureScope=artifact.content.scope.kind==="feature";
+  const sourceShape=Array.isArray(sourceRefs) &&
+    (featureScope ? sourceRefs.length===1 &&
+      sourceRefs[0]?.document_type==="feature-delta" : sourceRefs.length===0);
+  const expected=sourceShape ? [...sourceRefs,...artifact.content.artifact_refs] : null;
+  if (!expected || canonicalJson(artifact.inputs)!==canonicalJson(expected)) {
+    throw new OrchestrationError(
+      "DESIGN_STATE_INVALID","Design state inputs contradict its exact source and artifacts",6,
+    );
+  }
+  try {
+    const resolved=[];
+    for (const reference of expected) resolved.push(await store.verify(reference));
+    if (featureScope) {
+      const source=resolved[0];
+      if (source.content?.feature_id!==artifact.content.scope.id ||
+          source.content?.stage!=="PREPARED" ||
+          canonicalJson(source.provenance)!==canonicalJson(artifact.provenance)) {
+        throw new TypeError("feature source does not match design state provenance");
+      }
+    }
+  } catch (error) {
+    throw new OrchestrationError(
+      "DESIGN_STATE_INVALID","Design state input does not resolve in the verified catalog",6,
+    );
+  }
+}
+
+async function verifyStateHistory(orchestrator,history,store) {
   let previous=null;
   for (const artifact of history) {
+    await assertStateEnvelopeInputs(artifact,store);
     try {
       orchestrator.verifyStateSnapshot({
         content:artifact.content,
@@ -540,6 +573,8 @@ function verifyStateHistory(orchestrator,history) {
       if (artifact.revision!==previous.revision+1 ||
           canonicalJson(artifact.parents)!==canonicalJson([exactReference(previous)]) ||
           canonicalJson(artifact.provenance)!==canonicalJson(previous.provenance) ||
+          canonicalJson(artifact.content.source_artifact_refs)!==
+            canonicalJson(previous.content.source_artifact_refs) ||
           !classificationContinuity ||
           approvals.length<priorApprovals.length || priorApprovals.some((record,index) =>
             canonicalJson(record)!==canonicalJson(approvals[index])) ||
@@ -614,7 +649,11 @@ function topologicalArtifacts(graph,{includeFinal}) {
 }
 
 async function appendState(store,input,outcome,previous) {
-  const content=outcome.next_state_content;
+  const sourceArtifactRefs=previous?.content.source_artifact_refs ?? [];
+  const content=deepFreeze({
+    ...outcome.next_state_content,
+    source_artifact_refs:sourceArtifactRefs,
+  });
   const contentSha256=sha256Canonical(content);
   if (previous?.content_sha256===contentSha256) return previous;
   const artifact={
@@ -628,7 +667,7 @@ async function appendState(store,input,outcome,previous) {
     created_at:input.created_at,
     provenance:input.provenance,
     parents:previous ? [exactReference(previous)] : [],
-    inputs:outcome.artifact_revisions,
+    inputs:[...sourceArtifactRefs,...outcome.artifact_revisions],
     content_sha256:contentSha256,
     content,
   };
@@ -692,7 +731,8 @@ function assertApprovalHistoryTransition(previous,input,commandName) {
 
 async function runWithInput(command,store,input,orchestrator) {
   const history=await stateHistory(store,input.design_id);
-  let previous=history.length===0 ? null : verifyStateHistory(orchestrator,history);
+  let previous=history.length===0 ? null :
+    await verifyStateHistory(orchestrator,history,store);
   if (previous) assertExactReplay(input,previous);
   assertApprovalHistoryTransition(previous,input,command.name);
   let persisted=await persistedCandidates(store,input.artifacts);
@@ -737,7 +777,8 @@ export async function runDesignCommand(command,serviceInput) {
   });
   if (normalized.name==="design.status") {
     const history=await latestAnyState(store);
-    const status=await reconciledStatus(store,verifyStateHistory(orchestrator,history));
+    const verifiedState=await verifyStateHistory(orchestrator,history,store);
+    const status=await reconciledStatus(store,verifiedState);
     await store.refresh();
     return status;
   }

@@ -359,6 +359,7 @@ function stateArtifact() {
     ],
     state:"INITIALIZED",
     gate:"NONE",
+    source_artifact_refs:[],
     artifact_refs:[],
     payload_commitments:[{
       stage:"BRIEF",
