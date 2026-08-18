@@ -6,6 +6,7 @@ import {artifactReference,clone,rehash} from "./support/trace-fixture.js";
 import {
   commandServices,
   commandStore,
+  countedCommandStore,
   featureCommandInput,
   memoryCommandStore,
   parsedCommand,
@@ -321,4 +322,122 @@ test("noninteractive feature blocking is exit 4 command-result data with finding
   assert.equal(dispatched.result.ok,true);
   assert.equal(dispatched.result.data.blocked,true);
   assert.deepEqual(dispatched.result.data.findings,input.findings);
+});
+
+test("feature status rejects rehashed derived readiness that contradicts its source",{
+  skip:!commandsAvailable,
+},async t => {
+  const {store}=await readyProject(t);
+  const prepared=await runFeatureCommand(
+    parsedCommand("feature.prepare",{from:"feature.json"}),
+    featureServices(store,featureCommandInput()),
+  );
+  const forged=clone(prepared.artifact);
+  forged.content.architecture_impact.requires_adr=true;
+  rehash(forged);
+  const forgedReference=artifactReference(forged);
+  const isForged=reference =>
+    reference.document_type===forgedReference.document_type &&
+    reference.artifact_id===forgedReference.artifact_id &&
+    reference.revision===forgedReference.revision &&
+    reference.content_sha256===forgedReference.content_sha256;
+  const hostile={
+    append:store.append,
+    list:async filter => (await store.list(filter)).map(row =>
+      row.document_type==="feature-delta" ? clone(forged) : row),
+    get:async reference => isForged(reference) ? clone(forged) : store.get(reference),
+    verify:async reference => isForged(reference) ? clone(forged) : store.verify(reference),
+  };
+  await assert.rejects(
+    runFeatureCommand(
+      parsedCommand("feature.status"),featureServices(hostile,featureCommandInput()),
+    ),
+    error => error?.code==="AMBIGUOUS_FEATURE_HISTORY" ||
+      error?.code==="FEATURE_BLOCKED",
+  );
+});
+
+test("feature status fails closed for missing, duplicate, and ambiguous identities",{
+  skip:!commandsAvailable,
+},async t => {
+  const missing=await readyProject(t);
+  await assert.rejects(
+    runFeatureCommand(
+      parsedCommand("feature.status"),featureServices(missing.store,featureCommandInput()),
+    ),
+    error => error?.code==="FEATURE_INPUT_REQUIRED",
+  );
+
+  const ambiguous=await readyProject(t);
+  await runFeatureCommand(
+    parsedCommand("feature.prepare",{from:"feature-1.json"}),
+    featureServices(ambiguous.store,featureCommandInput()),
+  );
+  const second=featureCommandInput();
+  second.feature_id="FEATURE-002";
+  await runFeatureCommand(
+    parsedCommand("feature.prepare",{from:"feature-2.json"}),
+    featureServices(ambiguous.store,second),
+  );
+  await assert.rejects(
+    runFeatureCommand(
+      parsedCommand("feature.status"),featureServices(ambiguous.store,second),
+    ),
+    error => error?.code==="AMBIGUOUS_FEATURE_HISTORY",
+  );
+
+  const rows=await ambiguous.store.list();
+  const duplicate={
+    append:ambiguous.store.append,
+    get:ambiguous.store.get,
+    verify:ambiguous.store.verify,
+    list:async filter => {
+      const listed=await ambiguous.store.list(filter);
+      const delta=listed.find(row => row.document_type==="feature-delta");
+      return delta ? [...listed,clone(delta)] : listed;
+    },
+  };
+  assert.ok(rows.some(row => row.document_type==="feature-delta"));
+  await assert.rejects(
+    runFeatureCommand(parsedCommand("feature.status"),featureServices(duplicate,second)),
+    error => error?.code==="DUPLICATE_REVISION_IDENTITY",
+  );
+});
+
+test("feature prepare uses bounded command-scoped store verification",{
+  skip:!commandsAvailable,
+},async t => {
+  const {store}=await readyProject(t);
+  const counted=countedCommandStore(store);
+  const result=await runFeatureCommand(
+    parsedCommand("feature.prepare",{from:"feature.json"}),
+    featureServices(counted.store,featureCommandInput()),
+  );
+  assert.equal(result.stage,"PREPARED");
+  assert.ok(
+    counted.calls.list<=3 && counted.calls.get<=15 && counted.calls.verify<=15,
+    `feature prepare store amplification: ${JSON.stringify(counted.calls)}`,
+  );
+  assert.equal(counted.calls.append,1);
+});
+
+test("feature status verifies two bounded base catalog generations",{
+  skip:!commandsAvailable,
+},async t => {
+  const {store}=await readyProject(t);
+  await runFeatureCommand(
+    parsedCommand("feature.prepare",{from:"feature.json"}),
+    featureServices(store,featureCommandInput()),
+  );
+  const counted=countedCommandStore(store);
+  const result=await runFeatureCommand(
+    parsedCommand("feature.status"),featureServices(counted.store,featureCommandInput()),
+  );
+  assert.equal(result.stage,"PREPARED");
+  assert.equal(counted.calls.list,2);
+  assert.ok(
+    counted.calls.get<=15 && counted.calls.verify<=15,
+    `feature status store amplification: ${JSON.stringify(counted.calls)}`,
+  );
+  assert.equal(counted.calls.append,0);
 });

@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   appendVerified,
+  createVerifiedArtifactCatalog,
   exactReference,
   listedArtifacts,
   verifiedExact,
@@ -55,6 +56,63 @@ test("appendVerified rejects draft mutation and a forged same-reference return",
     appendVerified(store,draft,"pm-analysis.v1"),
     error => error?.code==="APPEND_MUTATION",
   );
+});
+
+test("verified catalog rejects a conflicting revision identity before store append",async () => {
+  const first=pmArtifact();
+  const conflicting=clone(first);
+  conflicting.content.summary=`${conflicting.content.summary} Conflicting.`;
+  rehash(conflicting);
+  let appendCalls=0;
+  let appended=null;
+  const select=reference => reference.content_sha256===conflicting.content_sha256 ?
+    appended : first;
+  const catalog=createVerifiedArtifactCatalog({
+    async append(candidate) {
+      appendCalls+=1;
+      appended=clone(candidate);
+      return clone(appended);
+    },
+    async list() { return [clone(first)]; },
+    async get(reference) { return clone(select(reference)); },
+    async verify(reference) { return clone(select(reference)); },
+  });
+  await catalog.refresh();
+
+  await assert.rejects(
+    catalog.append(conflicting),
+    error => error?.code==="DUPLICATE_REVISION_IDENTITY",
+  );
+  assert.equal(appendCalls,0);
+});
+
+test("catalog final refresh detects full-row drift without repeating exact reads",async () => {
+  const first=pmArtifact();
+  const drifted=clone(first);
+  drifted.producer.identity="externally-drifted-envelope";
+  const calls={get:0,list:0,verify:0};
+  const catalog=createVerifiedArtifactCatalog({
+    async append() { throw new Error("unexpected append"); },
+    async list() {
+      calls.list+=1;
+      return [clone(calls.list===1 ? first : drifted)];
+    },
+    async get() {
+      calls.get+=1;
+      return clone(first);
+    },
+    async verify() {
+      calls.verify+=1;
+      return clone(first);
+    },
+  });
+  await catalog.refresh();
+
+  await assert.rejects(
+    catalog.refresh(),
+    error => error?.code==="UNEXPECTED_ARTIFACT_CHANGE",
+  );
+  assert.deepEqual(calls,{get:1,list:2,verify:1});
 });
 
 test("listedArtifacts rejects conflicting hashes for one revision identity",async () => {

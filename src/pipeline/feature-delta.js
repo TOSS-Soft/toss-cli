@@ -243,6 +243,10 @@ export async function appendFeatureStage(store,input,stage,base,previous) {
 
 export async function featureHistory(store,projectId,featureId) {
   const artifactId=`feature-delta:${projectId}:${featureId}`;
+  return featureHistoryForArtifactId(store,artifactId);
+}
+
+async function featureHistoryForArtifactId(store,artifactId) {
   const rows=await listedArtifacts(store,{document_type:"feature-delta",artifact_id:artifactId});
   rows.sort((left,right) => left.revision-right.revision);
   const stages=["ADDED","ANALYZED","PREPARED"];
@@ -295,10 +299,8 @@ export async function latestAnyFeature(store) {
       "AMBIGUOUS_FEATURE_HISTORY","The artifact store contains multiple feature identities",5,
     );
   }
-  return rows
-    .filter(row => row.artifact_id===identities[0])
-    .sort((left,right) => left.revision-right.revision)
-    .at(-1);
+  const history=await featureHistoryForArtifactId(store,identities[0]);
+  return history.at(-1);
 }
 
 export async function verifyExactBaseReferences(store,base) {

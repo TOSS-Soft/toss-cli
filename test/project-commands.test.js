@@ -11,6 +11,7 @@ import {clone,rehash} from "./support/trace-fixture.js";
 import {
   commandServices as services,
   commandStore as testStore,
+  countedCommandStore,
   memoryCommandStore,
   parsedCommand as command,
   projectCommandInput as projectInput,
@@ -314,6 +315,59 @@ test("READY re-entry resolves the one exact spec audit referenced by its transit
   );
   assert.equal(result.state,"READY_FOR_ISSUES");
   assert.equal(result.readiness.ready_for_issue_generation,true);
+});
+
+test("project prepare uses one command-scoped verified catalog",{
+  skip:!projectAvailable,
+},async () => {
+  const counted=countedCommandStore(memoryCommandStore());
+  const result=await runProjectCommand(
+    command("project.prepare",{from:"project.json"}),
+    services(counted.store,projectInput()),
+  );
+  assert.equal(result.state,"READY_FOR_ISSUES");
+  assert.ok(
+    counted.calls.list<=3 && counted.calls.get<=15 && counted.calls.verify<=15,
+    `project command store amplification: ${JSON.stringify(counted.calls)}`,
+  );
+  assert.equal(counted.calls.append,10);
+});
+
+test("project prepare rejects an unexpected artifact at its final consistency refresh",{
+  skip:!projectAvailable,
+},async () => {
+  const backing=memoryCommandStore();
+  let listCalls=0;
+  let external=null;
+  const isExternal=reference => external &&
+    reference.document_type===external.document_type &&
+    reference.artifact_id===external.artifact_id &&
+    reference.revision===external.revision &&
+    reference.content_sha256===external.content_sha256;
+  const store={
+    append:backing.append,
+    get:async reference => isExternal(reference) ? clone(external) : backing.get(reference),
+    verify:async reference => isExternal(reference) ? clone(external) : backing.verify(reference),
+    list:async filter => {
+      listCalls+=1;
+      const rows=await backing.list(filter);
+      if (listCalls>1 && rows.length>0) {
+        external=clone(rows[0]);
+        external.artifact_id=`external:${external.artifact_id}`;
+        return [...rows,clone(external)];
+      }
+      return rows;
+    },
+  };
+
+  await assert.rejects(
+    runProjectCommand(
+      command("project.prepare",{from:"project.json"}),
+      services(store,projectInput()),
+    ),
+    error => error?.code==="UNEXPECTED_ARTIFACT_CHANGE" && error?.exitCode===6,
+  );
+  assert.equal(listCalls,2);
 });
 
 test("project handlers reject stale, exotic, ambiguous, and GitHub-shaped service boundaries",{

@@ -14,6 +14,7 @@ import {
   acquireInput,
   canonicalCopy,
   commandServices,
+  createVerifiedArtifactCatalog,
   deepFreeze,
   exactReference,
   listedArtifacts,
@@ -195,13 +196,22 @@ export async function runFeatureCommand(command,serviceInput) {
   if (!FEATURE_COMMANDS.has(normalized.name)) {
     throw new TypeError(`Unsupported feature command ${String(normalized.name)}`);
   }
-  const services=commandServices(serviceInput);
-  if (normalized.name==="feature.status") return featureStatus(services.store);
-  const input=await resolveFeature(normalized,services);
-  const target={
-    "feature.add":"ADDED",
-    "feature.analyze":"ANALYZED",
-    "feature.prepare":"PREPARED",
-  }[normalized.name];
-  return runStages(normalized,services.store,input,target);
+  const rawServices=commandServices(serviceInput);
+  const store=createVerifiedArtifactCatalog(rawServices.store);
+  await store.refresh();
+  const services={...rawServices,store};
+  let result;
+  if (normalized.name==="feature.status") {
+    result=await featureStatus(services.store);
+  } else {
+    const input=await resolveFeature(normalized,services);
+    const target={
+      "feature.add":"ADDED",
+      "feature.analyze":"ANALYZED",
+      "feature.prepare":"PREPARED",
+    }[normalized.name];
+    result=await runStages(normalized,services.store,input,target);
+  }
+  await store.refresh();
+  return result;
 }

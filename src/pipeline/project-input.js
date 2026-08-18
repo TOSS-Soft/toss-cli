@@ -307,7 +307,7 @@ export async function verifiedExact(store,reference) {
   return deepFreeze(verifiedCopy);
 }
 
-export async function listedArtifacts(store,filter={}) {
+async function listedSnapshot(store,filter={}) {
   const requestedFilter=deepFreeze(canonicalListFilter(filter));
   let listed;
   try {
@@ -323,14 +323,19 @@ export async function listedArtifacts(store,filter={}) {
   const rows=canonicalCopy(listed,"artifactStore.list result");
   if (!Array.isArray(rows)) throw new TypeError("artifactStore.list must return an array");
   const seen=new Set();
-  const verified=[];
+  const histories=new Map();
   for (const row of rows) {
     if (Object.entries(requestedFilter).some(([key,value]) => row[key]!==value)) {
       throw new OrchestrationError(
         "FILTER_VIOLATION","Artifact store list returned a row outside the exact filter",5,
       );
     }
-    const reference=exactReference(row);
+    const reference=canonicalReference(
+      exactReference(row),"artifactStore.list artifact reference",
+    );
+    validationError(row,"artifact-envelope.v1","artifact envelope");
+    const schemaId=SCHEMA_BY_TYPE[row.document_type];
+    if (schemaId) validationError(row,schemaId,row.document_type);
     const key=canonicalJson({
       document_type:reference.document_type,
       artifact_id:reference.artifact_id,
@@ -343,18 +348,7 @@ export async function listedArtifacts(store,filter={}) {
       );
     }
     seen.add(key);
-    const exact=await verifiedExact(store,reference);
-    if (canonicalJson(row)!==canonicalJson(exact)) {
-      throw new OrchestrationError(
-        "AMBIGUOUS_ARTIFACT_HISTORY",
-        "Artifact store list contradicted get and verify for an exact revision",5,
-      );
-    }
-    verified.push(exact);
-  }
-  if (requestedFilter.revision===undefined && requestedFilter.content_sha256===undefined) {
-    const histories=new Map();
-    for (const row of verified) {
+    if (requestedFilter.revision===undefined && requestedFilter.content_sha256===undefined) {
       const identity=canonicalJson({
         document_type:row.document_type,
         artifact_id:row.artifact_id,
@@ -363,6 +357,8 @@ export async function listedArtifacts(store,filter={}) {
       revisions.push(row.revision);
       histories.set(identity,revisions);
     }
+  }
+  if (requestedFilter.revision===undefined && requestedFilter.content_sha256===undefined) {
     for (const revisions of histories.values()) {
       revisions.sort((left,right) => left-right);
       if (revisions.some((revision,index) => revision!==index+1)) {
@@ -371,6 +367,22 @@ export async function listedArtifacts(store,filter={}) {
         );
       }
     }
+  }
+  return deepFreeze(rows);
+}
+
+export async function listedArtifacts(store,filter={}) {
+  const rows=await listedSnapshot(store,filter);
+  const verified=[];
+  for (const row of rows) {
+    const exact=await verifiedExact(store,exactReference(row));
+    if (canonicalJson(row)!==canonicalJson(exact)) {
+      throw new OrchestrationError(
+        "AMBIGUOUS_ARTIFACT_HISTORY",
+        "Artifact store list contradicted get and verify for an exact revision",5,
+      );
+    }
+    verified.push(exact);
   }
   return verified;
 }
@@ -430,6 +442,116 @@ export async function appendVerified(store,draft,schemaId) {
     );
   }
   return verified;
+}
+
+function artifactReferenceKey(artifact) {
+  return canonicalJson({
+    document_type:artifact.document_type,
+    artifact_id:artifact.artifact_id,
+    revision:artifact.revision,
+    content_sha256:artifact.content_sha256,
+  });
+}
+
+export function createVerifiedArtifactCatalog(store) {
+  let current=new Map();
+  let initialized=false;
+  let changed=false;
+  let refreshPromise=null;
+
+  async function refresh() {
+    if (refreshPromise) return refreshPromise;
+    const expected=initialized ? new Map(current) : null;
+    refreshPromise=(async () => {
+      const rows=initialized ? await listedSnapshot(store,{}) :
+        await listedArtifacts(store,{});
+      const next=new Map(rows.map(row => [artifactReferenceKey(row),row]));
+      if (expected) {
+        if (next.size!==expected.size || [...expected].some(([key,artifact]) =>
+          !next.has(key) || canonicalJson(next.get(key))!==canonicalJson(artifact))) {
+          throw new OrchestrationError(
+            "UNEXPECTED_ARTIFACT_CHANGE",
+            "Artifact store changed outside the command-scoped verified catalog",
+            6,
+          );
+        }
+      }
+      current=next;
+      initialized=true;
+      changed=false;
+      return deepFreeze([...current.values()]);
+    })();
+    try {
+      return await refreshPromise;
+    } finally {
+      refreshPromise=null;
+    }
+  }
+
+  async function ensureInitialized() {
+    if (!initialized) await refresh();
+  }
+
+  async function list(filter={}) {
+    await ensureInitialized();
+    const normalized=canonicalListFilter(filter);
+    return deepFreeze([...current.values()].filter(artifact =>
+      Object.entries(normalized).every(([key,value]) => artifact[key]===value)));
+  }
+
+  async function exact(reference) {
+    await ensureInitialized();
+    const normalized=canonicalReference(reference,"artifact reference");
+    const artifact=current.get(canonicalJson(normalized));
+    if (!artifact) throw new OrchestrationError(
+      "ARTIFACT_NOT_FOUND","Exact artifact reference is absent from the verified catalog",5,
+    );
+    return artifact;
+  }
+
+  async function append(draft) {
+    await ensureInitialized();
+    const expected=canonicalCopy(draft,"catalog append draft");
+    const schemaId=SCHEMA_BY_TYPE[expected.document_type];
+    if (!schemaId) throw new OrchestrationError(
+      "ORCHESTRATION_VALIDATION_FAILED",
+      `Unsupported catalog artifact type ${String(expected.document_type)}`,
+      5,
+    );
+    validationError(expected,schemaId,expected.document_type);
+    const identity=canonicalJson({
+      document_type:expected.document_type,
+      artifact_id:expected.artifact_id,
+      revision:expected.revision,
+    });
+    for (const artifact of current.values()) {
+      if (canonicalJson({
+        document_type:artifact.document_type,
+        artifact_id:artifact.artifact_id,
+        revision:artifact.revision,
+      })===identity) {
+        if (canonicalJson(artifact)===canonicalJson(expected)) return artifact;
+        throw new OrchestrationError(
+          "DUPLICATE_REVISION_IDENTITY",
+          "Append conflicts with a verified catalog revision identity",
+          5,
+        );
+      }
+    }
+    const appended=await appendVerified(store,expected,schemaId);
+    current.set(artifactReferenceKey(appended),appended);
+    changed=true;
+    return appended;
+  }
+
+  return Object.freeze({
+    append,
+    get:exact,
+    list,
+    verify:exact,
+    refresh,
+    hasChanges:() => changed,
+  });
 }
 
 export function verifiedOrchestrationStore(store) {

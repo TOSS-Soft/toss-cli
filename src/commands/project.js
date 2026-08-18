@@ -9,6 +9,7 @@ import {
   appendVerified,
   canonicalCopy,
   commandServices,
+  createVerifiedArtifactCatalog,
   deepFreeze,
   exactReference,
   latestArtifact,
@@ -373,22 +374,28 @@ export async function runProjectCommand(command,serviceInput) {
   if (!PROJECT_COMMANDS.has(normalized.name)) {
     throw new TypeError(`Unsupported project command ${String(normalized.name)}`);
   }
-  const services=commandServices(serviceInput);
+  const rawServices=commandServices(serviceInput);
+  const store=createVerifiedArtifactCatalog(rawServices.store);
+  await store.refresh();
+  const services={...rawServices,store};
   const resolved=await resolveInput(normalized,services);
   const reused=resolved.reused ? [exactReference(resolved.artifact)] : [];
+  let result;
   if (normalized.name==="project.create") {
-    return projectStatus(services.store,resolved.input,{
+    result=await projectStatus(services.store,resolved.input,{
       inputArtifact:resolved.artifact,reused,
     });
-  }
-  if (normalized.name==="project.status") {
-    return projectStatus(services.store,resolved.input,{
+  } else if (normalized.name==="project.status") {
+    result=await projectStatus(services.store,resolved.input,{
       inputArtifact:resolved.artifact,reused,
     });
+  } else {
+    result=await prepareProject(normalized,services.store,resolved.input,{
+      analyzeOnly:normalized.name==="project.analyze",
+      inputArtifact:resolved.artifact,
+      reused,
+    });
   }
-  return prepareProject(normalized,services.store,resolved.input,{
-    analyzeOnly:normalized.name==="project.analyze",
-    inputArtifact:resolved.artifact,
-    reused,
-  });
+  if (store.hasChanges()) await store.refresh();
+  return result;
 }

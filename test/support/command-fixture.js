@@ -66,6 +66,24 @@ export function memoryCommandStore() {
   return {append,get,list,verify};
 }
 
+export function countedCommandStore(delegate) {
+  const calls={append:0,get:0,list:0,verify:0};
+  const store={};
+  for (const method of Object.keys(calls)) {
+    store[method]=async (...args) => {
+      calls[method]+=1;
+      return delegate[method](...args);
+    };
+  }
+  return {
+    store,
+    calls,
+    reset() {
+      for (const method of Object.keys(calls)) calls[method]=0;
+    },
+  };
+}
+
 export function projectCommandInput({blockingDecision=false,pendingAdr=false}={}) {
   const graph=completeArtifacts();
   const raw=graph.pmAnalysis.provenance;

@@ -24,7 +24,14 @@ transition, and authority rules in `analysis-state-machine.md` and
 Project input and feature delta envelopes are immutable ACP artifacts. Every
 artifact is schema-validated before append, resolved by an exact reference
 through both `get` and `verify`, and verified again after append. List results
-must have one unambiguous, contiguous identity history.
+must have one unambiguous, contiguous identity history. Each command builds a
+verified catalog from one canonical list snapshot per consistency boundary and
+reuses each exact artifact within that catalog generation. A write command
+rechecks the complete expected catalog after its append batch; feature commands
+also take distinct pre- and post-base snapshots. Missing, conflicting, or
+unexpected rows fail closed. A later snapshot is a canonical, schema-validated
+full-row comparison with the already verified catalog, so unchanged exact
+artifacts are not fetched and verified again.
 
 `project resume` starts from the latest verified transition revision for the
 exact source revision and hash. A verified `BLOCKED` state records the legal
@@ -72,6 +79,9 @@ The immutable feature-source projection covers the request, impact,
 requirements, architecture impact, issue-plan delta, and caller findings.
 Those fields cannot drift under one source revision/hash. Stage-derived audit,
 readiness, and next-command fields must equal their deterministic projection.
+Feature status reconstructs that projection from the complete verified history
+for the one selected feature identity; it never trusts persisted derived status
+fields by themselves.
 
 `architecture_impact.requires_adr: true` independently creates an
 ARCHITECT-owned blocking finding until an exact approved feature ADR evidence
