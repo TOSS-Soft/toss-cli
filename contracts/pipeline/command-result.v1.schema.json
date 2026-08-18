@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://toss.software/schemas/pipeline/command-result.v1.schema.json",
+  "title": "TOSS Command Result v1",
+  "description": "A closed deterministic machine envelope for one lifecycle CLI command result.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "document_type", "ok", "data", "error"],
+  "properties": {
+    "schema_version": {"const": "command-result.v1"},
+    "document_type": {"const": "command-result"},
+    "ok": {"type": "boolean"},
+    "data": {"$ref": "#/$defs/json_value"},
+    "error": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/error"}
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"ok": {"const": true}}, "required": ["ok"]},
+      "then": {"properties": {"error": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"ok": {"const": false}}, "required": ["ok"]},
+      "then": {
+        "properties": {
+          "data": {"type": "null"},
+          "error": {"$ref": "#/$defs/error"}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["code", "message"],
+      "properties": {
+        "code": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]*$"},
+        "message": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"}
+      }
+    },
+    "json_value": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "number"},
+        {"type": "string"},
+        {
+          "type": "array",
+          "items": {"$ref": "#/$defs/json_value"}
+        },
+        {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/json_value"}
+        }
+      ]
+    }
+  }
+}
