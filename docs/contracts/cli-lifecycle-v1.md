@@ -155,9 +155,13 @@ boundary and recursively freeze their result. They MUST reject `undefined`,
 non-finite numbers, bigint, functions, symbols, cycles, sparse or named
 arrays, exotic prototypes, symbol keys, non-enumerable JSON properties, and
 accessor-bearing contract data without invoking getters. `failureResult`
-accepts a standard `Error` only by reading its own data descriptors for
-`message` and optional `code`; diagnostic `stack` accessors are ignored and
-never invoked.
+accepts a trusted native `Error` only after a guarded platform-native identity
+check and then reads own data descriptors for `message`, optional `code`, and
+optional `exitCode`; diagnostic `stack` accessors are ignored and never
+invoked. A non-Error is accepted only when canonical validation proves it is
+an exact plain own enumerable `{code,message}` object. Proxies, Error-shaped
+duck types, exotic prototypes, accessors, and extra diagnostic or exit fields
+are not trusted as errors.
 
 ## Programmatic Parser and Dispatcher
 
@@ -198,8 +202,9 @@ The programmatic `trace` dispatch lazily calls the existing trace command and
 wraps its unmodified closed `trace-result.v1` as `command-result.v1.data`.
 It requires exactly one explicit own data source, either `context.artifacts`
 or `context.artifactStore`. With neither source it returns
-`TRACE_INPUT_MISSING`/`INVALID_INPUT`; with both it rejects the ambiguous
-programmatic boundary. It MUST NOT infer a store from the current directory or
+`TRACE_INPUT_MISSING`/`INVALID_INPUT`; with both it returns the closed
+`TRACE_INPUT_AMBIGUOUS`/`INVALID_INPUT` result. Neither invalid source count may
+inspect an artifact source, infer a store from the current directory or
 `--project`, read the filesystem, or create a project directory. The raw CLI
 compatibility path may continue constructing its established current-directory
 store.

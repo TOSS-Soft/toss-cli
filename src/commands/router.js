@@ -1,5 +1,9 @@
 import {canonicalJson} from "../contracts/acp.js";
-import {failureResult,successResult} from "../output/command-result.js";
+import {
+  failureResult,
+  inspectNativeCommandError,
+  successResult,
+} from "../output/command-result.js";
 import {
   COMMAND_DEFINITIONS,
   EXIT_CODES,
@@ -254,40 +258,43 @@ function result(exitCode,result) {
 }
 
 function errorExitCode(error) {
-  try {
-    if (!error || (typeof error!=="object" && typeof error!=="function")) {
-      return EXIT_CODES.INTERNAL;
-    }
-    const descriptors=Object.getOwnPropertyDescriptors(error);
-    const exitDescriptor=descriptors.exitCode;
-    const value=exitDescriptor && "value" in exitDescriptor ? exitDescriptor.value : null;
-    if (Object.values(EXIT_CODES).includes(value) && value!==EXIT_CODES.SUCCESS) {
-      return value;
-    }
-    const codeDescriptor=descriptors.code;
-    const code=codeDescriptor && "value" in codeDescriptor ? codeDescriptor.value : null;
-    if (code==="TRACE_STORE_INVALID") return EXIT_CODES.VALIDATION_FAILED;
-    if (new Set([
-      "TRACE_ARGUMENT_INVALID",
-      "TRACE_INPUT_INVALID",
-      "TRACE_INPUT_MISSING",
-      "TRACE_INPUT_AMBIGUOUS",
-      "TRACE_ENTITY_NOT_FOUND",
-    ]).has(code)) return EXIT_CODES.INVALID_INPUT;
-  } catch {
-    return EXIT_CODES.INTERNAL;
+  const value=error.exitCode;
+  if (Object.values(EXIT_CODES).includes(value) && value!==EXIT_CODES.SUCCESS) {
+    return value;
   }
+  const code=error.error.code;
+  if (code==="TRACE_STORE_INVALID") return EXIT_CODES.VALIDATION_FAILED;
+  if (new Set([
+    "TRACE_ARGUMENT_INVALID",
+    "TRACE_INPUT_INVALID",
+    "TRACE_INPUT_MISSING",
+    "TRACE_INPUT_AMBIGUOUS",
+    "TRACE_ENTITY_NOT_FOUND",
+  ]).has(code)) return EXIT_CODES.INVALID_INPUT;
   return EXIT_CODES.INTERNAL;
+}
+
+function defaultFailure() {
+  return Object.freeze({
+    exitCode:EXIT_CODES.INTERNAL,
+    result:failureResult({
+      code:"COMMAND_FAILED",
+      message:"Command handler failed with an unsupported error",
+    }),
+  });
 }
 
 function closedFailure(error) {
   try {
-    return failureResult(error);
-  } catch {
-    return failureResult({
-      code:"COMMAND_FAILED",
-      message:"Command handler failed with an unsupported error",
+    const native=inspectNativeCommandError(error);
+    if (!native) return defaultFailure();
+    const failure=failureResult(native.error);
+    return Object.freeze({
+      exitCode:errorExitCode(native),
+      result:failure,
     });
+  } catch {
+    return defaultFailure();
   }
 }
 
@@ -297,9 +304,10 @@ export async function dispatchCommand(command,context={}) {
   if (normalized.name==="trace" &&
       normalizedContext.artifacts!==undefined &&
       normalizedContext.artifactStore!==undefined) {
-    throw new TypeError(
-      "Trace dispatch context accepts exactly one of artifacts or artifactStore",
-    );
+    return result(EXIT_CODES.INVALID_INPUT,failureResult({
+      code:"TRACE_INPUT_AMBIGUOUS",
+      message:"Trace dispatch context accepts exactly one explicit artifact source",
+    }));
   }
   if (normalized.name==="trace" &&
       normalizedContext.artifacts===undefined &&
@@ -327,6 +335,7 @@ export async function dispatchCommand(command,context={}) {
     );
     return result(EXIT_CODES.SUCCESS,successResult(data));
   } catch (error) {
-    return result(errorExitCode(error),closedFailure(error));
+    const failure=closedFailure(error);
+    return result(failure.exitCode,failure.result);
   }
 }

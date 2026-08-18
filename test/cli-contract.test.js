@@ -280,6 +280,99 @@ test("command-result builders reject exotic, accessor, and open values",() => {
   assert.equal(getterReads,0);
 });
 
+test("failureResult trusts native Errors but rejects proxies without observable traps",() => {
+  let getterReads=0;
+  const native=new Error("native failure");
+  native.code="NATIVE_FAILURE";
+  native.exitCode=EXIT_CODES.BLOCKED;
+  Object.defineProperty(native,"stack",{
+    configurable:true,
+    get() {
+      getterReads+=1;
+      return "forged stack";
+    },
+  });
+  const accepted=failureResult(native);
+  assert.deepEqual(accepted.error,{
+    code:"NATIVE_FAILURE",
+    message:"native failure",
+  });
+
+  const trapCounts={getPrototypeOf:0,ownKeys:0,getOwnPropertyDescriptor:0,get:0};
+  const stackAccessor={code:"STACK_ACCESSOR",message:"forged"};
+  Object.defineProperty(stackAccessor,"stack",{
+    enumerable:true,
+    get() {
+      getterReads+=1;
+      return "forged stack";
+    },
+  });
+  const cooperative=new Proxy({
+    name:"Error",
+    code:"PROXY",
+    message:"forged",
+    stack:"forged stack",
+    cause:null,
+    exitCode:EXIT_CODES.BLOCKED,
+  },{
+    getPrototypeOf(target) {
+      trapCounts.getPrototypeOf+=1;
+      return Reflect.getPrototypeOf(target);
+    },
+    ownKeys(target) {
+      trapCounts.ownKeys+=1;
+      return Reflect.ownKeys(target);
+    },
+    getOwnPropertyDescriptor(target,key) {
+      trapCounts.getOwnPropertyDescriptor+=1;
+      return Reflect.getOwnPropertyDescriptor(target,key);
+    },
+    get(target,key,receiver) {
+      trapCounts.get+=1;
+      return Reflect.get(target,key,receiver);
+    },
+  });
+  const throwing=new Proxy({},{
+    getPrototypeOf() {
+      trapCounts.getPrototypeOf+=1;
+      throw new Error("prototype trap");
+    },
+    ownKeys() {
+      trapCounts.ownKeys+=1;
+      throw new Error("keys trap");
+    },
+    getOwnPropertyDescriptor() {
+      trapCounts.getOwnPropertyDescriptor+=1;
+      throw new Error("descriptor trap");
+    },
+    get() {
+      trapCounts.get+=1;
+      throw new Error("get trap");
+    },
+  });
+
+  assert.throws(() => failureResult(stackAccessor),/command error|canonical|accessor/i);
+  assert.throws(() => failureResult(cooperative),/proxy|command error/i);
+  assert.throws(() => failureResult(throwing),/proxy|command error/i);
+  assert.throws(() => failureResult({
+    code:cooperative,
+    message:"nested proxy",
+  }),/command error|canonical|string/i);
+  const nativeWithProxyCode=new Error("native with invalid code");
+  nativeWithProxyCode.code=cooperative;
+  assert.throws(
+    () => failureResult(nativeWithProxyCode),
+    /command error|metadata|string/i,
+  );
+  assert.deepEqual(trapCounts,{
+    getPrototypeOf:0,
+    ownKeys:0,
+    getOwnPropertyDescriptor:0,
+    get:0,
+  });
+  assert.equal(getterReads,0);
+});
+
 test("dispatchCommand fails safely for declared commands without handlers",async () => {
   const command=parseCommand(["readiness","check","--json"]);
   const dispatched=await dispatchCommand(command,{});
@@ -456,14 +549,72 @@ test("dispatchCommand rejects accessor services and closes exotic handler failur
   assert.equal(getterReads,0);
 });
 
-test("dispatchCommand closes hostile proxy failures without letting reflection traps escape",async () => {
+test("dispatchCommand defaults every non-Error failure without inspecting proxy traps",async () => {
   const command=parseCommand(["readiness","check"]);
+  let accessorReads=0;
+  const stackAccessor={code:"FORGED",message:"forged"};
+  Object.defineProperty(stackAccessor,"stack",{
+    enumerable:true,
+    get() {
+      accessorReads+=1;
+      return "forged stack";
+    },
+  });
+  const exotic=Object.assign(Object.create({trusted:true}),{
+    code:"TRACE_ENTITY_NOT_FOUND",
+    message:"forged",
+  });
+  const trapCounts={getPrototypeOf:0,ownKeys:0,getOwnPropertyDescriptor:0,get:0};
+  const cooperative=new Proxy({
+    name:"Error",
+    code:"TRACE_ENTITY_NOT_FOUND",
+    message:"forged",
+    stack:"forged stack",
+    cause:null,
+    exitCode:EXIT_CODES.INVALID_INPUT,
+  },{
+    getPrototypeOf(target) {
+      trapCounts.getPrototypeOf+=1;
+      return Reflect.getPrototypeOf(target);
+    },
+    ownKeys(target) {
+      trapCounts.ownKeys+=1;
+      return Reflect.ownKeys(target);
+    },
+    getOwnPropertyDescriptor(target,key) {
+      trapCounts.getOwnPropertyDescriptor+=1;
+      return Reflect.getOwnPropertyDescriptor(target,key);
+    },
+    get(target,key,receiver) {
+      trapCounts.get+=1;
+      return Reflect.get(target,key,receiver);
+    },
+  });
+  const throwing=new Proxy({},{
+    getPrototypeOf() {
+      trapCounts.getPrototypeOf+=1;
+      throw new Error("prototype trap");
+    },
+    ownKeys() {
+      trapCounts.ownKeys+=1;
+      throw new Error("keys trap");
+    },
+    getOwnPropertyDescriptor() {
+      trapCounts.getOwnPropertyDescriptor+=1;
+      throw new Error("descriptor trap");
+    },
+    get() {
+      trapCounts.get+=1;
+      throw new Error("get trap");
+    },
+  });
   const failures=[
-    new Proxy({}, {getPrototypeOf() { throw new Error("prototype trap"); }}),
-    new Proxy({}, {ownKeys() { throw new Error("keys trap"); }}),
-    new Proxy({}, {
-      getOwnPropertyDescriptor() { throw new Error("descriptor trap"); },
-    }),
+    {code:"TRACE_ENTITY_NOT_FOUND",message:"forged"},
+    {code:"FORGED",message:"forged",exitCode:EXIT_CODES.BLOCKED},
+    exotic,
+    stackAccessor,
+    cooperative,
+    throwing,
   ];
 
   for (const failure of failures) {
@@ -480,6 +631,38 @@ test("dispatchCommand closes hostile proxy failures without letting reflection t
       errors:[],
     });
   }
+  assert.equal(accessorReads,0);
+  assert.deepEqual(trapCounts,{
+    getPrototypeOf:0,
+    ownKeys:0,
+    getOwnPropertyDescriptor:0,
+    get:0,
+  });
+});
+
+test("dispatchCommand retains safe native Error code and exit metadata",async () => {
+  const command=parseCommand(["readiness","check"]);
+  let stackReads=0;
+  const failure=new Error("blocked by a trusted native error");
+  failure.code="READINESS_BLOCKED";
+  failure.exitCode=EXIT_CODES.BLOCKED;
+  Object.defineProperty(failure,"stack",{
+    configurable:true,
+    get() {
+      stackReads+=1;
+      return "forged stack";
+    },
+  });
+
+  const dispatched=await dispatchCommand(command,{
+    handlers:{"readiness.check":async () => { throw failure; }},
+  });
+  assert.equal(dispatched.exitCode,EXIT_CODES.BLOCKED);
+  assert.deepEqual(dispatched.result.error,{
+    code:"READINESS_BLOCKED",
+    message:"blocked by a trusted native error",
+  });
+  assert.equal(stackReads,0);
 });
 
 test("dispatchCommand wraps trace-result.v1 without changing its raw shape",async () => {
@@ -493,9 +676,31 @@ test("dispatchCommand wraps trace-result.v1 without changing its raw shape",asyn
   assert.equal(Object.hasOwn(dispatched.result.data,"data"),false);
 });
 
-test("dispatchCommand rejects ambiguous trace inputs before tracing",async () => {
-  const command=parseCommand(["trace","REQ-001"]);
+test("dispatchCommand closes ambiguous trace inputs before tracing",async t => {
+  const directory=fs.mkdtempSync(path.join(os.tmpdir(),"toss-trace-ambiguous-"));
+  t.after(() => fs.rmSync(directory,{recursive:true,force:true}));
+  const missing=path.join(directory,"must-not-be-created");
+  const command=parseCommand(["trace","REQ-001","--project",missing]);
   let storeReads=0;
+  let artifactReads=0;
+  const artifacts=new Proxy(completeArtifacts(),{
+    getPrototypeOf(target) {
+      artifactReads+=1;
+      return Reflect.getPrototypeOf(target);
+    },
+    ownKeys(target) {
+      artifactReads+=1;
+      return Reflect.ownKeys(target);
+    },
+    getOwnPropertyDescriptor(target,key) {
+      artifactReads+=1;
+      return Reflect.getOwnPropertyDescriptor(target,key);
+    },
+    get(target,key,receiver) {
+      artifactReads+=1;
+      return Reflect.get(target,key,receiver);
+    },
+  });
   const store={};
   Object.defineProperty(store,"list",{
     enumerable:true,
@@ -504,11 +709,20 @@ test("dispatchCommand rejects ambiguous trace inputs before tracing",async () =>
       return async () => [];
     },
   });
-  await assert.rejects(dispatchCommand(command,{
-    artifacts:completeArtifacts(),
+  const dispatched=await dispatchCommand(command,{
+    artifacts,
     artifactStore:store,
-  }),/exactly one|ambiguous|context/i);
+  });
+  assert.equal(dispatched.exitCode,EXIT_CODES.INVALID_INPUT);
+  assert.equal(dispatched.result.error.code,"TRACE_INPUT_AMBIGUOUS");
+  assert.equal(Object.isFrozen(dispatched),true);
+  assert.deepEqual(validateDocument(dispatched.result,"command-result.v1"),{
+    valid:true,
+    errors:[],
+  });
   assert.equal(storeReads,0);
+  assert.equal(artifactReads,0);
+  assert.equal(fs.existsSync(missing),false);
 });
 
 test("trace dispatch requires one explicit source and never creates a fallback project",async t => {
