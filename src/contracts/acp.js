@@ -36,6 +36,9 @@ function encodeCanonical(value,path,ancestors) {
   ancestors.add(value);
   try {
     if (Array.isArray(value)) {
+      if (Object.getPrototypeOf(value)!==Array.prototype) {
+        nonJson(path,"arrays must use Array.prototype");
+      }
       const symbols=Object.getOwnPropertySymbols(value);
       if (symbols.length > 0) {
         nonJson(path,"symbol keys are unsupported");
@@ -48,13 +51,15 @@ function encodeCanonical(value,path,ancestors) {
           keys.some((key,index) => key!==String(index))) {
         nonJson(path,"arrays must be dense and have no named properties");
       }
+      const items=[];
       for (const key of keys) {
         const descriptor=Object.getOwnPropertyDescriptor(value,key);
-        if (!descriptor || !("value" in descriptor)) {
+        if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
           nonJson(`${path}[${key}]`,"accessor properties are unsupported");
         }
+        items.push(descriptor.value);
       }
-      return `[${value.map((item,index) =>
+      return `[${items.map((item,index) =>
         encodeCanonical(item,`${path}[${index}]`,ancestors)).join(",")}]`;
     }
 
@@ -67,6 +72,7 @@ function encodeCanonical(value,path,ancestors) {
     }
 
     const keys=Object.getOwnPropertyNames(value).sort();
+    const entries=[];
     for (const key of keys) {
       const descriptor=Object.getOwnPropertyDescriptor(value,key);
       if (!descriptor || !("value" in descriptor)) {
@@ -75,9 +81,10 @@ function encodeCanonical(value,path,ancestors) {
       if (!descriptor.enumerable) {
         nonJson(`${path}.${key}`,"non-enumerable properties are unsupported");
       }
+      entries.push([key,descriptor.value]);
     }
-    return `{${keys.map(key =>
-      `${JSON.stringify(key)}:${encodeCanonical(value[key],`${path}.${key}`,ancestors)}`
+    return `{${entries.map(([key,item]) =>
+      `${JSON.stringify(key)}:${encodeCanonical(item,`${path}.${key}`,ancestors)}`
     ).join(",")}}`;
   } finally {
     ancestors.delete(value);

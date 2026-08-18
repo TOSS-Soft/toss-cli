@@ -902,17 +902,23 @@ const LEGACY_SCAFFOLD_OPTIONS=new Set([
 
 function isLegacyFastScaffold(args) {
   const name=args[0];
-  return typeof name==="string" && (
+  return typeof name==="string" && name.length>0 && !name.startsWith("-") && (
     /\s/.test(name) ||
     /[A-Z]/.test(name) ||
+    !/^[a-z]+$/.test(name) ||
     args.slice(1).some(value => LEGACY_SCAFFOLD_OPTIONS.has(value))
   );
 }
 
+function hasExplicitLegacyScaffoldOption(args) {
+  return args.slice(1).some(value => LEGACY_SCAFFOLD_OPTIONS.has(value));
+}
+
 async function runLifecycle(args) {
-  const [router,output]=await Promise.all([
+  const [router,output,options]=await Promise.all([
     import("./commands/router.js"),
     import("./output/command-result.js"),
+    import("./commands/options.js"),
   ]);
   if (args.at(-1)==="--help" || args.at(-1)==="-h") {
     if (args.filter(value => value==="--help" || value==="-h").length!==1) {
@@ -920,9 +926,13 @@ async function runLifecycle(args) {
       process.exitCode=router.EXIT_CODES.USAGE;
       return;
     }
-    if (args.length>2) {
+    const subject=args.slice(0,-1);
+    const exactCommand=options.COMMAND_DEFINITIONS.some(definition =>
+      definition.tokens.length===subject.length &&
+      definition.tokens.every((token,index) => token===subject[index]));
+    if (!exactCommand) {
       try {
-        router.parseCommand(args.slice(0,-1));
+        router.parseCommand(subject);
       } catch (error) {
         console.error(output.renderCommandHuman(output.failureResult(error)));
         process.exitCode=router.EXIT_CODES.USAGE;
@@ -954,8 +964,13 @@ async function runLifecycle(args) {
 
 async function main() {
   const args=process.argv.slice(2);
-  if (!args.length || args[0]==="--help" || args[0]==="-h") return help();
-  if (args[0]==="--version" || args[0]==="-v") return console.log(VERSION);
+  if (!args.length || (args.length===1 && ["--help","-h"].includes(args[0]))) {
+    return help();
+  }
+  if (args.length===1 && ["--version","-v"].includes(args[0])) {
+    return console.log(VERSION);
+  }
+  if (["--help","-h"].includes(args.at(-1))) return runLifecycle(args);
 
   if (args[0]==="init") {
     return initBrief(args[1]||"project-brief.yaml");
@@ -1015,6 +1030,14 @@ async function main() {
     console.log(command.format==="json" ?
       renderTraceJson(command.result) : renderTraceHuman(command.result));
     return;
+  }
+
+  if (hasExplicitLegacyScaffoldOption(args)) {
+    return createFromConfig({
+      ...parseLegacy(args),
+      governanceProfiles:{core:true,delivery:false},
+      requiredStatusChecks:[],
+    },null);
   }
 
   if (LIFECYCLE_FAMILIES.has(args[0])) {

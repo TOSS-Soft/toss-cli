@@ -104,6 +104,13 @@ specific machine `error.code` values, but it MUST map them to one of these
 process exit codes. Unknown command, unknown option, and invalid option
 combination MUST use exit 2 deterministically.
 
+Lifecycle trace dispatch maps `TRACE_ARGUMENT_INVALID`, `TRACE_INPUT_INVALID`,
+`TRACE_INPUT_MISSING`, `TRACE_INPUT_AMBIGUOUS`, and
+`TRACE_ENTITY_NOT_FOUND` to `INVALID_INPUT` (3). `TRACE_STORE_INVALID` maps to
+`VALIDATION_FAILED` (5). An unknown trace or handler failure remains
+`INTERNAL` (70); callers MUST NOT relabel an unclassified internal failure as
+bad input.
+
 ## Stdout and Stderr
 
 ### Human mode
@@ -175,10 +182,13 @@ returns a recursively frozen closed command:
 ```
 
 `dispatchCommand(command, context)` independently validates that normalized
-shape and safety metadata. Context and injected handler entries MUST be own,
-enumerable data properties. A handler MUST be an own enumerable data-function
-under its exact dotted command name. Accessor, inherited, symbolic, unknown,
-or non-function handler entries are rejected without invoking them.
+shape and safety metadata. Context, service, and injected handler entries MUST
+be own, enumerable data properties. The dispatcher captures those descriptors
+once into null-prototype maps and never resolves inherited context values. A
+handler MUST be an own enumerable data-function under its exact dotted command
+name. Inherited entries are absent; accessors, symbols, non-enumerable entries,
+unknown keys, and non-function handlers are rejected without invoking getters
+or inherited values.
 
 The dispatch return is the frozen pair `{exitCode, result}` where `result` is
 a `command-result.v1`. A missing handler returns exit 69 and
@@ -186,6 +196,13 @@ a `command-result.v1`. A missing handler returns exit 69 and
 
 The programmatic `trace` dispatch lazily calls the existing trace command and
 wraps its unmodified closed `trace-result.v1` as `command-result.v1.data`.
+It requires exactly one explicit own data source, either `context.artifacts`
+or `context.artifactStore`. With neither source it returns
+`TRACE_INPUT_MISSING`/`INVALID_INPUT`; with both it rejects the ambiguous
+programmatic boundary. It MUST NOT infer a store from the current directory or
+`--project`, read the filesystem, or create a project directory. The raw CLI
+compatibility path may continue constructing its established current-directory
+store.
 Trace and artifact-store modules, including their Ajv validator dependency,
 MUST NOT be eagerly loaded merely to parse, display help, or report an
 unimplemented lifecycle command.
@@ -209,8 +226,12 @@ toss validate <FILE>
 ```
 
 It MUST also list shared options and the compatibility commands `init`,
-`create`, raw `trace`, and fast scaffold. `--help` and `-h` are help tokens;
-`--version` and `-v` remain version tokens.
+`create`, raw `trace`, and fast scaffold. Root help and version accept only the
+exact one-token forms `--help`, `-h`, `--version`, and `-v`. A lifecycle help
+path must identify a complete declared command (for example, `project create
+--help` or `trace --help`); an unknown command, an incomplete family such as
+`project --help`, an unknown trailing option, or extra input after a root help
+or version token is a deterministic `USAGE` failure.
 
 ## Shell-Completion Vocabulary
 
@@ -242,8 +263,12 @@ The following interfaces remain compatible in v2.1:
   `{error:{code,message}}` shape on stderr. It is not silently wrapped. Code
   that wants the lifecycle envelope uses `dispatchCommand`.
 - Fast scaffold remains available as `toss "Project Name" [legacy options]`.
-  A multiword/capitalized project name or any established scaffold option
-  selects that legacy path.
+  A multiword/capitalized name, an unambiguous non-alphabetic one-token name
+  such as `my-project`, or any established scaffold option selects that legacy
+  path. An explicit scaffold option selects compatibility routing even when
+  the project name is a lifecycle family, for example
+  `toss project --slug project --no-git`. Without an explicit scaffold option,
+  a recognized lifecycle command continues to win.
 
 There is an unavoidable ambiguity between a bare lowercase alphabetic
 one-token project name and a future top-level command. In v2.1, an unadorned

@@ -198,6 +198,25 @@ test("parseCommand rejects non-canonical argv without reading accessors",() => {
   assert.equal(getterReads,0);
 });
 
+test("parseCommand and command-result builders reject exotic arrays without invoking methods",() => {
+  let methodCalls=0;
+  const exotic=["project","status"];
+  Object.setPrototypeOf(exotic,{
+    map() {
+      methodCalls+=1;
+      return ["readiness","check"];
+    },
+  });
+  const hidden=["project","status"];
+  Object.defineProperty(hidden,"0",{value:"project",enumerable:false});
+
+  assert.throws(() => parseCommand(exotic),/canonical|JSON/i);
+  assert.throws(() => successResult(exotic),/canonical|JSON/i);
+  assert.throws(() => failureResult(exotic),/error|canonical|JSON|plain/i);
+  assert.throws(() => parseCommand(hidden),/canonical|JSON/i);
+  assert.equal(methodCalls,0);
+});
+
 test("command-result builders emit closed canonical frozen envelopes",() => {
   const success=successResult({ready:true,evidence:["PDOR-001"]});
   assert.deepEqual(success,{
@@ -246,12 +265,16 @@ test("command-result builders reject exotic, accessor, and open values",() => {
     },
   });
   const inherited=Object.create({code:"INHERITED",message:"forged"});
+  const exotic=Object.assign(Object.create({forged:true}),{
+    code:"EXOTIC",
+    message:"forged",
+  });
   const openError={code:"OPEN",message:"open",extra:true};
 
   for (const data of [undefined,new Date(),accessor,{value:Symbol("invalid")}]) {
     assert.throws(() => successResult(data),/canonical|JSON|unsupported|plain/i);
   }
-  for (const error of [inherited,openError,accessor]) {
+  for (const error of [inherited,exotic,openError,accessor]) {
     assert.throws(() => failureResult(error),/error|canonical|property|plain/i);
   }
   assert.equal(getterReads,0);
@@ -297,6 +320,105 @@ test("dispatchCommand invokes only an explicit own data-function handler",async 
   assert.equal(getterReads,0);
 });
 
+test("dispatchCommand ignores inherited context injection without invoking getters",async t => {
+  const command=parseCommand(["readiness","check"]);
+  const originalHandlers=Object.getOwnPropertyDescriptor(Object.prototype,"handlers");
+  const originalServices=Object.getOwnPropertyDescriptor(Object.prototype,"services");
+  t.after(() => {
+    if (originalHandlers) Object.defineProperty(Object.prototype,"handlers",originalHandlers);
+    else delete Object.prototype.handlers;
+    if (originalServices) Object.defineProperty(Object.prototype,"services",originalServices);
+    else delete Object.prototype.services;
+  });
+
+  let inheritedHandlerCalls=0;
+  Object.defineProperty(Object.prototype,"handlers",{
+    configurable:true,
+    enumerable:false,
+    value:{
+      "readiness.check":async () => {
+        inheritedHandlerCalls+=1;
+        return {ready:true};
+      },
+    },
+  });
+  let dispatched=await dispatchCommand(command,{});
+  assert.equal(dispatched.exitCode,EXIT_CODES.NOT_IMPLEMENTED);
+  assert.equal(inheritedHandlerCalls,0);
+
+  let inheritedHandlerReads=0;
+  Object.defineProperty(Object.prototype,"handlers",{
+    configurable:true,
+    enumerable:false,
+    get() {
+      inheritedHandlerReads+=1;
+      return {"readiness.check":async () => ({ready:true})};
+    },
+  });
+  dispatched=await dispatchCommand(command,{});
+  assert.equal(dispatched.exitCode,EXIT_CODES.NOT_IMPLEMENTED);
+  assert.equal(inheritedHandlerReads,0);
+
+  let inheritedServiceReads=0;
+  Object.defineProperty(Object.prototype,"services",{
+    configurable:true,
+    enumerable:false,
+    get() {
+      inheritedServiceReads+=1;
+      return {forged:true};
+    },
+  });
+  dispatched=await dispatchCommand(command,{
+    handlers:{
+      "readiness.check":async (_command,services) => ({
+        serviceWasAbsent:services===undefined,
+      }),
+    },
+  });
+  assert.equal(dispatched.exitCode,EXIT_CODES.SUCCESS);
+  assert.deepEqual(dispatched.result.data,{serviceWasAbsent:true});
+  assert.equal(inheritedServiceReads,0);
+});
+
+test("dispatchCommand rejects open or exotic own context maps without reading accessors",async () => {
+  const command=parseCommand(["readiness","check"]);
+  let getterReads=0;
+  const accessorContext={};
+  Object.defineProperty(accessorContext,"handlers",{
+    enumerable:true,
+    get() {
+      getterReads+=1;
+      return {};
+    },
+  });
+  const nonEnumerableContext={};
+  Object.defineProperty(nonEnumerableContext,"services",{
+    enumerable:false,
+    value:{},
+  });
+  const symbolicContext={[Symbol("handlers")]:{}};
+  const extraContext={extra:true};
+  const symbolicHandlers={};
+  symbolicHandlers[Symbol("readiness.check")]=async () => ({ready:true});
+  const hiddenHandlers={};
+  Object.defineProperty(hiddenHandlers,"readiness.check",{
+    enumerable:false,
+    value:async () => ({ready:true}),
+  });
+
+  for (const context of [
+    accessorContext,nonEnumerableContext,symbolicContext,extraContext,
+    {handlers:symbolicHandlers},{handlers:hiddenHandlers},
+    {handlers:{extra:async () => ({})}},
+  ]) {
+    await assert.rejects(
+      dispatchCommand(command,context),
+      /context|accessor|non-enumerable|symbol|unknown/i,
+    );
+  }
+  assert.equal(getterReads,0);
+});
+
 test("dispatchCommand rejects accessor services and closes exotic handler failures",async () => {
   const command=parseCommand(["readiness","check"]);
   let getterReads=0;
@@ -334,6 +456,32 @@ test("dispatchCommand rejects accessor services and closes exotic handler failur
   assert.equal(getterReads,0);
 });
 
+test("dispatchCommand closes hostile proxy failures without letting reflection traps escape",async () => {
+  const command=parseCommand(["readiness","check"]);
+  const failures=[
+    new Proxy({}, {getPrototypeOf() { throw new Error("prototype trap"); }}),
+    new Proxy({}, {ownKeys() { throw new Error("keys trap"); }}),
+    new Proxy({}, {
+      getOwnPropertyDescriptor() { throw new Error("descriptor trap"); },
+    }),
+  ];
+
+  for (const failure of failures) {
+    const dispatched=await dispatchCommand(command,{
+      handlers:{"readiness.check":async () => { throw failure; }},
+    });
+    assert.equal(dispatched.exitCode,EXIT_CODES.INTERNAL);
+    assert.deepEqual(dispatched.result.error,{
+      code:"COMMAND_FAILED",
+      message:"Command handler failed with an unsupported error",
+    });
+    assert.deepEqual(validateDocument(dispatched.result,"command-result.v1"),{
+      valid:true,
+      errors:[],
+    });
+  }
+});
+
 test("dispatchCommand wraps trace-result.v1 without changing its raw shape",async () => {
   const command=parseCommand(["trace","REQ-001","--json"]);
   const dispatched=await dispatchCommand(command,{artifacts:completeArtifacts()});
@@ -347,10 +495,65 @@ test("dispatchCommand wraps trace-result.v1 without changing its raw shape",asyn
 
 test("dispatchCommand rejects ambiguous trace inputs before tracing",async () => {
   const command=parseCommand(["trace","REQ-001"]);
+  let storeReads=0;
+  const store={};
+  Object.defineProperty(store,"list",{
+    enumerable:true,
+    get() {
+      storeReads+=1;
+      return async () => [];
+    },
+  });
   await assert.rejects(dispatchCommand(command,{
     artifacts:completeArtifacts(),
-    artifactStore:{},
+    artifactStore:store,
   }),/exactly one|ambiguous|context/i);
+  assert.equal(storeReads,0);
+});
+
+test("trace dispatch requires one explicit source and never creates a fallback project",async t => {
+  const directory=fs.mkdtempSync(path.join(os.tmpdir(),"toss-trace-source-"));
+  t.after(() => fs.rmSync(directory,{recursive:true,force:true}));
+  const missing=path.join(directory,"must-not-be-created");
+  const command=parseCommand(["trace","REQ-001","--project",missing]);
+
+  const dispatched=await dispatchCommand(command,{});
+  assert.equal(dispatched.exitCode,EXIT_CODES.INVALID_INPUT);
+  assert.equal(dispatched.result.ok,false);
+  assert.equal(fs.existsSync(missing),false);
+  assert.deepEqual(validateDocument(dispatched.result,"command-result.v1"),{
+    valid:true,
+    errors:[],
+  });
+});
+
+test("trace dispatch maps stable input and store categories to documented exit codes",async () => {
+  const missingEntity=await dispatchCommand(
+    parseCommand(["trace","REQ-MISSING"]),
+    {artifacts:completeArtifacts()},
+  );
+  assert.equal(missingEntity.exitCode,EXIT_CODES.INVALID_INPUT);
+  assert.equal(missingEntity.result.error.code,"TRACE_ENTITY_NOT_FOUND");
+
+  const missingInput=await dispatchCommand(
+    parseCommand(["trace","REQ-001"]),
+    {artifacts:[]},
+  );
+  assert.equal(missingInput.exitCode,EXIT_CODES.INVALID_INPUT);
+
+  const invalidStore=await dispatchCommand(
+    parseCommand(["trace","REQ-001"]),
+    {artifactStore:{list:async () => ({})}},
+  );
+  assert.equal(invalidStore.exitCode,EXIT_CODES.VALIDATION_FAILED);
+  assert.equal(invalidStore.result.error.code,"TRACE_STORE_INVALID");
+
+  for (const dispatched of [missingEntity,missingInput,invalidStore]) {
+    assert.deepEqual(validateDocument(dispatched.result,"command-result.v1"),{
+      valid:true,
+      errors:[],
+    });
+  }
 });
 
 test("every declared future command dispatches to the safe unavailable result",async () => {
@@ -409,6 +612,31 @@ test("CLI usage failures are deterministic and JSON failures use stdout",() => {
   assert.equal(result.error.code,"COMMAND_NOT_IMPLEMENTED");
 });
 
+test("CLI help and version accept only exact valid paths",() => {
+  for (const args of [
+    ["--help"],
+    ["-h"],
+    ["--version"],
+    ["-v"],
+    ["project","create","--help"],
+    ["trace","--help"],
+    ["validate","--help"],
+  ]) {
+    const result=runCli(args);
+    assert.equal(result.status,EXIT_CODES.SUCCESS,`${args.join(" ")}: ${result.stderr}`);
+  }
+  for (const args of [
+    ["unknown","--help"],
+    ["project","--help"],
+    ["--help","--unknown"],
+    ["--version","--unknown"],
+  ]) {
+    const result=runCli(args);
+    assert.equal(result.status,EXIT_CODES.USAGE,args.join(" "));
+    assert.match(result.stderr,/unknown|usage|invalid/i,args.join(" "));
+  }
+});
+
 test("unimplemented lifecycle routing does not eagerly load Ajv",t => {
   const directory=fs.mkdtempSync(path.join(os.tmpdir(),"toss-cli-loader-"));
   t.after(() => fs.rmSync(directory,{recursive:true,force:true}));
@@ -451,4 +679,24 @@ test("legacy init and explicit fast scaffold remain routed unchanged",t => {
   assert.equal(scaffold.status,0,scaffold.stderr);
   assert.match(scaffold.stdout,/PROJECT BOOTSTRAP COMPLETE/);
   assert.equal(fs.existsSync(path.join(destination,"project.json")),true);
+});
+
+test("legacy fast scaffold keeps nonalphabetic names and explicit scaffold options",t => {
+  const directory=fs.mkdtempSync(path.join(os.tmpdir(),"toss-cli-fast-legacy-"));
+  t.after(() => fs.rmSync(directory,{recursive:true,force:true}));
+
+  const hyphenated=runCli(["my-project"],{cwd:directory});
+  assert.equal(hyphenated.status,EXIT_CODES.SUCCESS,hyphenated.stderr);
+  assert.equal(fs.existsSync(path.join(directory,"my-project","project.json")),true);
+
+  const destination=path.join(directory,"project-scaffold");
+  const explicit=runCli([
+    "project","--slug","project-scaffold","--dir",destination,"--no-git",
+  ],{cwd:directory});
+  assert.equal(explicit.status,EXIT_CODES.SUCCESS,explicit.stderr);
+  assert.equal(fs.existsSync(path.join(destination,"project.json")),true);
+
+  const lifecycle=runCli(["project","status"],{cwd:directory});
+  assert.equal(lifecycle.status,EXIT_CODES.NOT_IMPLEMENTED,lifecycle.stderr);
+  assert.equal(fs.existsSync(path.join(directory,"project","project.json")),false);
 });

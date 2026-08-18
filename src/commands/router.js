@@ -139,20 +139,29 @@ function isPlainObject(value) {
   return prototype===Object.prototype || prototype===null;
 }
 
-function assertDataProperties(value,label,allowedKeys) {
+function captureDataProperties(value,label,allowedKeys) {
   if (!isPlainObject(value)) throw new TypeError(`${label} must be a plain object`);
-  if (Object.getOwnPropertySymbols(value).length>0) {
+  const descriptors=Object.getOwnPropertyDescriptors(value);
+  const keys=Reflect.ownKeys(descriptors);
+  if (keys.some(key => typeof key==="symbol")) {
     throw new TypeError(`${label} symbol properties are unsupported`);
   }
-  for (const key of Object.getOwnPropertyNames(value)) {
-    const descriptor=Object.getOwnPropertyDescriptor(value,key);
+  const normalized=Object.create(null);
+  for (const key of keys) {
+    const descriptor=descriptors[key];
     if (!descriptor?.enumerable || !("value" in descriptor)) {
       throw new TypeError(`${label} accessor or non-enumerable property is unsupported: ${key}`);
     }
     if (allowedKeys && !allowedKeys.has(key)) {
       throw new TypeError(`Unknown ${label} property: ${key}`);
     }
+    normalized[key]=descriptor.value;
   }
+  return normalized;
+}
+
+function assertDataProperties(value,label,allowedKeys) {
+  captureDataProperties(value,label,allowedKeys);
 }
 
 function assertParsedCommand(command) {
@@ -201,23 +210,26 @@ function assertParsedCommand(command) {
   return deepFreeze(normalized);
 }
 
-function assertContext(context) {
-  assertDataProperties(context,"dispatch context",CONTEXT_KEYS);
-  if (context.services!==undefined) {
-    assertDataProperties(context.services,"command services");
+function normalizeContext(context) {
+  const normalized=captureDataProperties(context,"dispatch context",CONTEXT_KEYS);
+  if (Object.hasOwn(normalized,"services") && normalized.services!==undefined) {
+    normalized.services=Object.freeze(captureDataProperties(
+      normalized.services,"command services",
+    ));
   }
-  if (context.handlers!==undefined) {
-    assertDataProperties(context.handlers,"command handlers");
-    for (const key of Object.getOwnPropertyNames(context.handlers)) {
+  if (Object.hasOwn(normalized,"handlers") && normalized.handlers!==undefined) {
+    const handlers=captureDataProperties(normalized.handlers,"command handlers");
+    for (const key of Object.getOwnPropertyNames(handlers)) {
       if (!definitionsByName.has(key)) {
         throw new TypeError(`Unknown command handler: ${key}`);
       }
-      const descriptor=Object.getOwnPropertyDescriptor(context.handlers,key);
-      if (typeof descriptor.value!=="function") {
+      if (typeof handlers[key]!=="function") {
         throw new TypeError(`Command handler must be an own enumerable data-function: ${key}`);
       }
     }
+    normalized.handlers=Object.freeze(handlers);
   }
+  return Object.freeze(normalized);
 }
 
 function handlerFor(context,name) {
@@ -227,18 +239,10 @@ function handlerFor(context,name) {
 
 async function dispatchTrace(command,context) {
   const {runTraceCommand}=await import("./trace.js");
-  let traceContext;
-  if (context.artifacts!==undefined) traceContext={artifacts:context.artifacts};
-  else if (context.artifactStore!==undefined) traceContext={artifactStore:context.artifactStore};
-  else {
-    const [{createArtifactStore},{default:process}]=await Promise.all([
-      import("../artifacts/store.js"),
-      import("node:process"),
-    ]);
-    traceContext={artifactStore:createArtifactStore({
-      root:command.options.project ?? process.cwd(),
-    })};
-  }
+  const traceContext=Object.create(null);
+  if (context.artifacts!==undefined) traceContext.artifacts=context.artifacts;
+  else traceContext.artifactStore=context.artifactStore;
+  Object.freeze(traceContext);
   const traceArgs=[...command.args];
   if (command.options.json) traceArgs.push("--json");
   const trace=await runTraceCommand(traceArgs,traceContext);
@@ -250,11 +254,30 @@ function result(exitCode,result) {
 }
 
 function errorExitCode(error) {
-  const descriptor=error instanceof Error ?
-    Object.getOwnPropertyDescriptor(error,"exitCode") : null;
-  const value=descriptor && "value" in descriptor ? descriptor.value : null;
-  return Object.values(EXIT_CODES).includes(value) && value!==EXIT_CODES.SUCCESS ?
-    value : EXIT_CODES.INTERNAL;
+  try {
+    if (!error || (typeof error!=="object" && typeof error!=="function")) {
+      return EXIT_CODES.INTERNAL;
+    }
+    const descriptors=Object.getOwnPropertyDescriptors(error);
+    const exitDescriptor=descriptors.exitCode;
+    const value=exitDescriptor && "value" in exitDescriptor ? exitDescriptor.value : null;
+    if (Object.values(EXIT_CODES).includes(value) && value!==EXIT_CODES.SUCCESS) {
+      return value;
+    }
+    const codeDescriptor=descriptors.code;
+    const code=codeDescriptor && "value" in codeDescriptor ? codeDescriptor.value : null;
+    if (code==="TRACE_STORE_INVALID") return EXIT_CODES.VALIDATION_FAILED;
+    if (new Set([
+      "TRACE_ARGUMENT_INVALID",
+      "TRACE_INPUT_INVALID",
+      "TRACE_INPUT_MISSING",
+      "TRACE_INPUT_AMBIGUOUS",
+      "TRACE_ENTITY_NOT_FOUND",
+    ]).has(code)) return EXIT_CODES.INVALID_INPUT;
+  } catch {
+    return EXIT_CODES.INTERNAL;
+  }
+  return EXIT_CODES.INTERNAL;
 }
 
 function closedFailure(error) {
@@ -270,27 +293,38 @@ function closedFailure(error) {
 
 export async function dispatchCommand(command,context={}) {
   const normalized=assertParsedCommand(command);
-  assertContext(context);
+  const normalizedContext=normalizeContext(context);
   if (normalized.name==="trace" &&
-      context.artifacts!==undefined && context.artifactStore!==undefined) {
+      normalizedContext.artifacts!==undefined &&
+      normalizedContext.artifactStore!==undefined) {
     throw new TypeError(
       "Trace dispatch context accepts exactly one of artifacts or artifactStore",
     );
   }
+  if (normalized.name==="trace" &&
+      normalizedContext.artifacts===undefined &&
+      normalizedContext.artifactStore===undefined) {
+    return result(EXIT_CODES.INVALID_INPUT,failureResult({
+      code:"TRACE_INPUT_MISSING",
+      message:"Trace dispatch context requires exactly one explicit artifact source",
+    }));
+  }
   try {
     if (normalized.name==="trace") {
       return result(EXIT_CODES.SUCCESS,successResult(
-        await dispatchTrace(normalized,context),
+        await dispatchTrace(normalized,normalizedContext),
       ));
     }
-    const handler=handlerFor(context,normalized.name);
+    const handler=handlerFor(normalizedContext,normalized.name);
     if (!handler) {
       return result(EXIT_CODES.NOT_IMPLEMENTED,failureResult({
         code:"COMMAND_NOT_IMPLEMENTED",
         message:`Command is declared but not implemented: ${normalized.name}`,
       }));
     }
-    const data=await Reflect.apply(handler,undefined,[normalized,context.services]);
+    const data=await Reflect.apply(
+      handler,undefined,[normalized,normalizedContext.services],
+    );
     return result(EXIT_CODES.SUCCESS,successResult(data));
   } catch (error) {
     return result(errorExitCode(error),closedFailure(error));

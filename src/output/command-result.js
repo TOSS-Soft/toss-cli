@@ -6,9 +6,18 @@ function canonicalClone(value,label) {
   try {
     return JSON.parse(canonicalJson(value));
   } catch (error) {
+    let detail="invalid value";
+    try {
+      const descriptor=error && (typeof error==="object" || typeof error==="function") ?
+        Object.getOwnPropertyDescriptor(error,"message") : null;
+      if (descriptor && "value" in descriptor && typeof descriptor.value==="string") {
+        detail=descriptor.value;
+      }
+    } catch {
+      // Keep the literal fallback; caught values are untrusted.
+    }
     throw new TypeError(
-      `${label} must be canonical JSON: ${error instanceof Error ? error.message : "invalid value"}`,
-      {cause:error},
+      `${label} must be canonical JSON: ${detail}`,
     );
   }
 }
@@ -20,34 +29,40 @@ function deepFreeze(value) {
 }
 
 function errorRecord(error) {
-  if (error instanceof Error) {
-    if (Object.getOwnPropertySymbols(error).length>0) {
-      throw new TypeError("Command error symbol properties are unsupported");
+  if (!error || (typeof error!=="object" && typeof error!=="function")) {
+    throw new TypeError("Command error must be a closed object");
+  }
+  let descriptors;
+  try {
+    descriptors=Object.getOwnPropertyDescriptors(error);
+  } catch {
+    throw new TypeError("Command error properties could not be inspected safely");
+  }
+  const keys=Reflect.ownKeys(descriptors);
+  if (keys.some(key => typeof key==="symbol")) {
+    throw new TypeError("Command error symbol properties are unsupported");
+  }
+  const names=keys.sort();
+  const plain=names.join(",")==="code,message";
+  if (plain) return canonicalClone(error,"Command error");
+  const allowed=new Set(["message","stack","cause","code","exitCode","name"]);
+  if (names.some(key => !allowed.has(key))) {
+    throw new TypeError("Command error has unknown properties");
+  }
+  for (const key of names) {
+    const descriptor=descriptors[key];
+    if (!("value" in descriptor)) {
+      if (key==="stack") continue;
+      throw new TypeError(`Command error accessor property is unsupported: ${key}`);
     }
-    const allowed=new Set(["message","stack","cause","code","exitCode","name"]);
-    for (const key of Object.getOwnPropertyNames(error)) {
-      const descriptor=Object.getOwnPropertyDescriptor(error,key);
-      if (!descriptor || !("value" in descriptor)) {
-        if (key==="stack") continue;
-        throw new TypeError(`Command error accessor property is unsupported: ${key}`);
-      }
-      if (!allowed.has(key)) {
-        throw new TypeError(`Unknown command error property: ${key}`);
-      }
-    }
-    const message=Object.getOwnPropertyDescriptor(error,"message")?.value;
-    const code=Object.getOwnPropertyDescriptor(error,"code")?.value ?? "COMMAND_FAILED";
-    return {code,message};
   }
-  const normalized=canonicalClone(error,"Command error");
-  if (!normalized || typeof normalized!=="object" || Array.isArray(normalized)) {
-    throw new TypeError("Command error must be a plain object or Error");
+  if (!Object.hasOwn(descriptors,"message")) {
+    throw new TypeError("Command error must have an own message property");
   }
-  const keys=Object.keys(normalized).sort();
-  if (keys.join(",")!=="code,message") {
-    throw new TypeError("Command error must contain exactly code and message properties");
-  }
-  return normalized;
+  return {
+    code:Object.hasOwn(descriptors,"code") ? descriptors.code.value : "COMMAND_FAILED",
+    message:descriptors.message?.value,
+  };
 }
 
 function assertErrorRecord(error) {
