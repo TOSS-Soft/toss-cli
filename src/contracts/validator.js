@@ -28,6 +28,18 @@ const schemaDefinitions=[
   ["github-publication-result.v1","../../contracts/pipeline/github-publication-result.v1.schema.json"],
   ["decision-answer.v1","../../contracts/pipeline/decision-answer.v1.schema.json"],
   ["adr-approval.v1","../../contracts/pipeline/adr-approval.v1.schema.json"],
+  ["design-brief.v1","../../contracts/design/design-brief.v1.schema.json"],
+  ["ux-analysis.v1","../../contracts/design/ux-analysis.v1.schema.json"],
+  ["user-flow.v1","../../contracts/design/user-flow.v1.schema.json"],
+  ["information-architecture.v1","../../contracts/design/information-architecture.v1.schema.json"],
+  ["wireframe-plan.v1","../../contracts/design/wireframe-plan.v1.schema.json"],
+  ["visual-direction.v1","../../contracts/design/visual-direction.v1.schema.json"],
+  ["design-system.v1","../../contracts/design/design-system.v1.schema.json"],
+  ["screen-spec.v1","../../contracts/design/screen-spec.v1.schema.json"],
+  ["prototype-manifest.v1","../../contracts/design/prototype-manifest.v1.schema.json"],
+  ["usability-evidence.v1","../../contracts/design/usability-evidence.v1.schema.json"],
+  ["design-audit.v1","../../contracts/design/design-audit.v1.schema.json"],
+  ["design-approval.v1","../../contracts/design/design-approval.v1.schema.json"],
 ];
 
 function loadSchema(path) {

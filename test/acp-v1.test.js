@@ -124,6 +124,18 @@ test("the registry declares role boundaries for every full-pipeline artifact",()
       "github-publication-result",
       "decision-answer",
       "adr-approval",
+      "design-brief",
+      "ux-analysis",
+      "user-flow",
+      "information-architecture",
+      "wireframe-plan",
+      "visual-direction",
+      "design-system",
+      "screen-spec",
+      "prototype-manifest",
+      "usability-evidence",
+      "design-audit",
+      "design-approval",
     ],
   );
   for (const row of registry.documents) {
