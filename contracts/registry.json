@@ -98,6 +98,18 @@
       ]
     },
     {
+      "document_type": "design-orchestration-state",
+      "schema_version": "acp.v1",
+      "producer": "orchestrator",
+      "consumers": ["orchestrator", "design-specialist", "design-auditor", "human-reviewer"],
+      "allowed_mutations": ["append the next immutable design orchestration state revision"],
+      "forbidden_actions": [
+        "mutate an existing revision",
+        "advance an illegal level-specific transition",
+        "treat caller state or an unverified public key as approval authority"
+      ]
+    },
+    {
       "document_type": "github-publication-result",
       "schema_version": "acp.v1",
       "producer": "issue-publisher",

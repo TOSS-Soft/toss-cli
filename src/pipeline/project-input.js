@@ -27,6 +27,19 @@ const SCHEMA_BY_TYPE=Object.freeze({
   "feature-delta":"feature-delta.v1",
   "decision-answer":"decision-answer.v1",
   "adr-approval":"adr-approval.v1",
+  "design-orchestration-state":"design-orchestration-state.v1",
+  "design-brief":"design-brief.v1",
+  "ux-analysis":"ux-analysis.v1",
+  "user-flow":"user-flow.v1",
+  "information-architecture":"information-architecture.v1",
+  "wireframe-plan":"wireframe-plan.v1",
+  "visual-direction":"visual-direction.v1",
+  "design-system":"design-system.v1",
+  "screen-spec":"screen-spec.v1",
+  "prototype-manifest":"prototype-manifest.v1",
+  "usability-evidence":"usability-evidence.v1",
+  "design-audit":"design-audit.v1",
+  "design-approval":"design-approval.v1",
 });
 
 export class OrchestrationError extends Error {

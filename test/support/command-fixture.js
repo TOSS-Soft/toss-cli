@@ -131,7 +131,7 @@ export function projectCommandInput({blockingDecision=false,pendingAdr=false}={}
   };
 }
 
-export function featureCommandInput({findings=[]}={}) {
+export function featureCommandInput({findings=[],designImpact}={}) {
   return {
     schema_version:"feature-command-input.v1",
     project_id:"support-workspace",
@@ -167,6 +167,16 @@ export function featureCommandInput({findings=[]}={}) {
     issue_plan_delta:{
       summary:"Adds one implementation issue after request persistence.",
       issue_ids:["ISSUE-002"],
+    },
+    design_impact:designImpact ?? {
+      delivery_targets:["API","BACKEND"],
+      affected_surfaces:[],
+      risk_signals:[],
+      requested_level:"AUTO",
+      source:"NOT_APPLICABLE",
+      purpose:"The feature changes backend notification delivery only.",
+      success_criteria:["No user-interface design artifact is required."],
+      approval_owner:{role:"USER",identity:"verified-user"},
     },
     findings,
   };

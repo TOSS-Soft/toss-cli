@@ -74,8 +74,11 @@ test("feature add/analyze/prepare creates immutable delta revisions over one exa
   assert.deepEqual(result.artifact.content.base_project.artifacts,prepared.artifact_revisions);
   assert.equal(result.artifact.content.base_project.authority,"reference-only");
 
+  const featureOwnedTypes=new Set([
+    "feature-delta","design-brief","design-orchestration-state",
+  ]);
   const projectAfter=(await store.list()).filter(entry =>
-    entry.document_type!=="feature-delta");
+    !featureOwnedTypes.has(entry.document_type));
   assert.deepEqual(projectAfter,projectBefore);
   assert.deepEqual(result.artifact.inputs,prepared.artifact_revisions.filter(
     reference => reference.document_type==="transition-event",
@@ -110,6 +113,61 @@ test("feature prepare is idempotent and reports reused immutable revisions",{
   assert.deepEqual(after,before);
   assert.equal(first.artifact.content_sha256,second.artifact.content_sha256);
   assert.ok(second.reused_revisions.length>=1);
+});
+
+test("UI feature prepare starts a provenance-bound design state without pre-gate artifacts",{
+  skip:!commandsAvailable,
+},async t => {
+  const {store}=await readyProject(t);
+  const input=featureCommandInput({designImpact:{
+    delivery_targets:["WEB"],
+    affected_surfaces:["SCREEN","FLOW","INFORMATION_ARCHITECTURE"],
+    risk_signals:["MULTI_SCREEN"],
+    requested_level:"AUTO",
+    source:"company_system",
+    purpose:"Add a requester-visible resolution notification screen and flow.",
+    success_criteria:["The requester can understand the resolved state."],
+    approval_owner:{role:"USER",identity:"verified-user"},
+  }});
+  const first=await runFeatureCommand(
+    parsedCommand("feature.prepare",{from:"feature.json"}),featureServices(store,input),
+  );
+  assert.equal(first.design.level,"STANDARD");
+  assert.equal(first.design.state,"INITIALIZED");
+  assert.equal(first.design.artifact_revisions.length,0);
+  assert.equal((await store.list({document_type:"design-brief"})).length,0);
+  const states=await store.list({document_type:"design-orchestration-state"});
+  assert.equal(states.length,1);
+  assert.deepEqual(first.design.state_revision,artifactReference(states[0]));
+  assert.equal(states[0].provenance.source_revision,input.provenance.source_revision);
+
+  const second=await runFeatureCommand(
+    parsedCommand("feature.prepare",{from:"feature.json"}),featureServices(store,input),
+  );
+  assert.deepEqual(second.design.state_revision,first.design.state_revision);
+  assert.equal((await store.list({document_type:"design-orchestration-state"})).length,1);
+});
+
+test("backend-only feature prepare persists exactly a reasoned N/A brief and state",{
+  skip:!commandsAvailable,
+},async t => {
+  const {store}=await readyProject(t);
+  const input=featureCommandInput();
+  const result=await runFeatureCommand(
+    parsedCommand("feature.prepare",{from:"feature.json"}),featureServices(store,input),
+  );
+  assert.equal(result.design.level,"NOT_APPLICABLE");
+  assert.equal(result.design.state,"NOT_APPLICABLE");
+  assert.equal((await store.list({document_type:"design-brief"})).length,1);
+  assert.equal((await store.list({document_type:"design-orchestration-state"})).length,1);
+  assert.deepEqual(result.artifact.content.design_impact,input.design_impact);
+  assert.equal(result.design.artifact_revisions[0].document_type,"design-brief");
+  const beforeRerun=await store.list();
+  const rerun=await runFeatureCommand(
+    parsedCommand("feature.prepare",{from:"feature.json"}),featureServices(store,input),
+  );
+  assert.deepEqual(await store.list(),beforeRerun);
+  assert.deepEqual(rerun.design.state_revision,result.design.state_revision);
 });
 
 test("feature prepare detects a stale exact base and never rewrites project artifacts",{
@@ -418,7 +476,7 @@ test("feature prepare uses bounded command-scoped store verification",{
     counted.calls.list<=3 && counted.calls.get<=15 && counted.calls.verify<=15,
     `feature prepare store amplification: ${JSON.stringify(counted.calls)}`,
   );
-  assert.equal(counted.calls.append,1);
+  assert.equal(counted.calls.append,3);
 });
 
 test("feature status verifies two bounded base catalog generations",{

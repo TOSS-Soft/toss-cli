@@ -892,7 +892,7 @@ async function help() {
 }
 
 const LIFECYCLE_FAMILIES=new Set([
-  "project","feature","decisions","architecture","plan","audit",
+  "project","feature","design","decisions","architecture","plan","audit",
   "readiness","issues","artifacts","validate",
 ]);
 const LEGACY_SCAFFOLD_OPTIONS=new Set([
@@ -935,6 +935,7 @@ async function lifecycleContext(command) {
   const root=path.resolve(process.cwd(),command.options.project ?? ".");
   const services={artifactStore:createArtifactStore({root})};
   if (command.name.startsWith("project.") || command.name.startsWith("feature.") ||
+      command.name.startsWith("design.") ||
       command.name==="decisions.answer" || command.name==="architecture.approve" ||
       (command.name==="issues.publish" && command.options.apply)) {
     services.readInput=async inputPath => readLifecycleInput(inputPath);

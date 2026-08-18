@@ -76,6 +76,13 @@ export const COMMAND_DEFINITIONS=Object.freeze([
     options:CONTINUABLE,mutation:"always",interactive:true,
   }),
   definition("feature.status",["feature","status"]),
+  ...[
+    "init","analyze","prepare","flows","wireframes","direction","system",
+    "screens","prototype","audit","review","approve",
+  ].map(name => definition(`design.${name}`,["design",name],{
+    options:CONTINUABLE,mutation:"always",interactive:true,
+  })),
+  definition("design.status",["design","status"]),
   definition("decisions.list",["decisions","list"]),
   definition("decisions.answer",["decisions","answer"],{
     args:1,
@@ -122,6 +129,7 @@ export const COMMAND_DEFINITIONS=Object.freeze([
 export const HELP_TREE=Object.freeze([
   "project <create|analyze|prepare|status|resume>",
   "feature <add|analyze|prepare|status>",
+  "design <init|analyze|prepare|status|flows|wireframes|direction|system|screens|prototype|audit|review|approve>",
   "decisions <list|answer>",
   "architecture <review|approve>",
   "plan show",

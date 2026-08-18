@@ -10,6 +10,7 @@ import {
   verifyExactBaseReferences,
 } from "../pipeline/feature-delta.js";
 import {resumeAnalysis} from "../pipeline/orchestrator.js";
+import {startFeatureDesign} from "./design.js";
 import {
   acquireInput,
   canonicalCopy,
@@ -175,7 +176,11 @@ async function runStages(command,store,input,targetStage) {
     await verifyExactBaseReferences(store,base);
   }
   await verifyBaseSnapshot(store,base);
-  const result=statusResult(latest,reused);
+  const design=targetStage==="PREPARED" ? await startFeatureDesign(store,latest) : null;
+  const result=deepFreeze({
+    ...statusResult(latest,reused),
+    ...(design ? {design} : {}),
+  });
   return targetStage==="PREPARED" ? blockAutomation(command,result) : result;
 }
 
@@ -188,7 +193,9 @@ async function featureStatus(store) {
       "STALE_FEATURE_BASE","Persisted feature delta references a stale project snapshot",6,
     );
   }
-  return statusResult(latest);
+  const design=latest.content.stage==="PREPARED" ?
+    await startFeatureDesign(store,latest,{readOnly:true}) : null;
+  return deepFreeze({...statusResult(latest),...(design ? {design} : {})});
 }
 
 export async function runFeatureCommand(command,serviceInput) {

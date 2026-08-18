@@ -250,6 +250,10 @@ async function builtinHandler(name) {
     const {runFeatureCommand}=await import("./feature.js");
     return runFeatureCommand;
   }
+  if (name.startsWith("design.")) {
+    const {runDesignCommand}=await import("./design.js");
+    return runDesignCommand;
+  }
   if (name.startsWith("decisions.")) {
     const {runDecisionsCommand}=await import("./decisions.js");
     return runDecisionsCommand;

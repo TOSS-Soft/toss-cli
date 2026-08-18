@@ -121,6 +121,7 @@ test("the registry declares role boundaries for every full-pipeline artifact",()
       "transition-event",
       "project-input",
       "feature-delta",
+      "design-orchestration-state",
       "github-publication-result",
       "decision-answer",
       "adr-approval",
