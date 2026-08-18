@@ -7,7 +7,7 @@ import {classifyDesignLevel} from "./design-level.js";
 
 const SIGNING_DOMAIN="toss.design-orchestration.authority-approval.v1";
 const CONTEXT_KEYS=Object.freeze([
-  "classification_input","design_artifacts","persisted_artifacts",
+  "classification_input","source_artifact_refs","design_artifacts","persisted_artifacts",
   "approval_records","target_command",
 ]);
 const TARGET_COMMANDS=new Set([
@@ -122,6 +122,29 @@ function reference(artifact) {
 
 function same(left,right) {
   return canonicalJson(left)===canonicalJson(right);
+}
+
+function sourceArtifactReferences(value,scope) {
+  if (!Array.isArray(value)) {
+    throw new TypeError("design source artifact references must be an array");
+  }
+  for (const artifactRef of value) {
+    exactObject(artifactRef,"design source artifact reference",[
+      "document_type","artifact_id","revision","content_sha256",
+    ]);
+    if (artifactRef.document_type!=="feature-delta" ||
+        typeof artifactRef.artifact_id!=="string" || artifactRef.artifact_id.length===0 ||
+        !Number.isSafeInteger(artifactRef.revision) || artifactRef.revision<1 ||
+        typeof artifactRef.content_sha256!=="string" ||
+        !/^[a-f0-9]{64}$/u.test(artifactRef.content_sha256)) {
+      throw new TypeError("design source artifact reference is not canonical");
+    }
+  }
+  if ((scope.kind==="project" && value.length!==0) ||
+      (scope.kind==="feature" && value.length!==1)) {
+    throw new TypeError("design source artifact references contradict classification scope");
+  }
+  return value;
 }
 
 function sameReferenceSet(left,right) {
@@ -421,7 +444,7 @@ function commitments(graph,persisted,approvedKinds) {
   });
 }
 
-function outcome({classification,level,graph,persisted,approvals}) {
+function outcome({classification,sourceArtifactRefs,level,graph,persisted,approvals}) {
   const direction=approvals.find(row => row.approval_kind==="VISUAL_DIRECTION");
   const system=approvals.find(row => row.approval_kind==="DESIGN_SYSTEM");
   const final=approvals.find(row => row.approval_kind==="FINAL");
@@ -518,6 +541,7 @@ function outcome({classification,level,graph,persisted,approvals}) {
       required_artifact_types:REQUIRED_TYPES[level],
       state,
       gate,
+      source_artifact_refs:sourceArtifactRefs,
       artifact_refs:refs,
       payload_commitments:payloadCommitments,
       approvals:approvals,
@@ -545,13 +569,7 @@ function verifyStateSnapshot(value,actors) {
   const snapshot=canonicalCopy(value,"design state snapshot");
   exactObject(snapshot,"design state snapshot",["content","provenance"]);
   const {content,provenance}=snapshot;
-  const featureScope=content.scope?.kind==="feature";
-  if (!Array.isArray(content.source_artifact_refs) ||
-      (featureScope ? content.source_artifact_refs.length!==1 ||
-        content.source_artifact_refs[0]?.document_type!=="feature-delta" :
-        content.source_artifact_refs.length!==0)) {
-    throw new TypeError("design state source artifact lineage is inconsistent with scope");
-  }
+  sourceArtifactReferences(content.source_artifact_refs,content.scope);
   const classified=classifyDesignLevel(content.classification.classification_input);
   const approvals=content.approvals.map(record => verifyApproval(record,actors));
   const kinds=approvals.map(record => record.approval_kind);
@@ -718,6 +736,9 @@ function prepareWithActors(value,actors) {
     throw new TypeError("design approval records must be an array");
   }
   const classification=classifyDesignLevel(context.classification_input);
+  const sourceArtifactRefs=sourceArtifactReferences(
+    context.source_artifact_refs,classification.classification_input.scope,
+  );
   const graph=normalizedGraph(context.design_artifacts,"design artifacts");
   const persisted=normalizedGraph(context.persisted_artifacts,"persisted design artifacts");
   const approvals=context.approval_records.map(record => verifyApproval(record,actors));
@@ -742,7 +763,9 @@ function prepareWithActors(value,actors) {
     const validation=validateDesignSystemRules(graph);
     if (!validation.valid) throw new TypeError("N/A design brief failed validation");
   }
-  const result=outcome({classification,level,graph,persisted,approvals});
+  const result=outcome({
+    classification,sourceArtifactRefs,level,graph,persisted,approvals,
+  });
   assertTargetCommand(context.target_command,result);
   return result;
 }

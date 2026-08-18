@@ -146,7 +146,10 @@ function authorityRegistry() {
 
 function trustedPrepareDesign(context) {
   assert.equal(typeof createDesignOrchestrator,"function");
-  return createDesignOrchestrator({authorityRegistry:authorityRegistry()}).prepareDesign(context);
+  return createDesignOrchestrator({authorityRegistry:authorityRegistry()}).prepareDesign({
+    source_artifact_refs:[],
+    ...context,
+  });
 }
 
 function signedStageApproval(kind,artifacts,overrides={}) {
@@ -273,6 +276,7 @@ test("prepareDesign fails closed before a critical downgrade can advance",() => 
         risk_signals:["SECURITY_PRIVACY"],
         requested_level:"LITE",
       }),
+      source_artifact_refs:[],
       design_artifacts:[],
       persisted_artifacts:[],
       approval_records:[],
@@ -418,6 +422,56 @@ const DIRECTION_TYPES=Object.freeze([
   "wireframe-plan","visual-direction",
 ]);
 const SYSTEM_TYPES=Object.freeze([...DIRECTION_TYPES,"design-system"]);
+
+test("public preparation carries exact project and feature source lineage into verifier roundtrips",async t => {
+  const graph=graphForLevel("STANDARD");
+  const sourceReference={
+    document_type:"feature-delta",
+    artifact_id:"feature-delta:PROJECT-CHECKOUT:FEATURE-001",
+    revision:3,
+    content_sha256:"a".repeat(64),
+  };
+  const cases={
+    project:{classification:classificationInput({
+      affected_surfaces:["SCREEN","FLOW","INFORMATION_ARCHITECTURE"],
+      risk_signals:["MULTI_SCREEN"],
+    }),sourceRefs:[]},
+    feature:{classification:classificationInput({
+      scope:{kind:"feature",id:"FEATURE-001"},
+      affected_surfaces:["SCREEN","FLOW","INFORMATION_ARCHITECTURE"],
+      risk_signals:["MULTI_SCREEN"],
+    }),sourceRefs:[sourceReference]},
+  };
+  for (const [name,{classification,sourceRefs}] of Object.entries(cases)) {
+    await t.test(name,() => {
+      const orchestrator=createDesignOrchestrator({authorityRegistry:authorityRegistry()});
+      const outcome=orchestrator.prepareDesign({
+        classification_input:classification,
+        source_artifact_refs:sourceRefs,
+        design_artifacts:graph,
+        persisted_artifacts:[],
+        approval_records:[],
+        target_command:"design.prepare",
+      });
+      assert.deepEqual(outcome.next_state_content.source_artifact_refs,sourceRefs);
+      assert.deepEqual(orchestrator.verifyStateSnapshot({
+        content:outcome.next_state_content,
+        provenance:graph[0].provenance,
+      }).content.source_artifact_refs,sourceRefs);
+      if (name==="feature") {
+        const malformed=structuredClone(outcome.next_state_content);
+        malformed.source_artifact_refs=[{
+          document_type:"feature-delta",
+          unexpected:"missing exact immutable identity",
+        }];
+        assert.throws(() => orchestrator.verifyStateSnapshot({
+          content:malformed,
+          provenance:graph[0].provenance,
+        }),/source artifact reference|canonical|closed/i);
+      }
+    });
+  }
+});
 
 test("Standard collection stops truthfully at direction and system approval gates",() => {
   assert.equal(typeof prepareDesign,"function");

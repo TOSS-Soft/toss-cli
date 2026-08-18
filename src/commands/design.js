@@ -5,6 +5,7 @@ import {
   validateDesignSystemRules,
 } from "../pipeline/design-contracts.js";
 import {classifyDesignLevel} from "../pipeline/design-level.js";
+import {featureHistory} from "../pipeline/feature-delta.js";
 import {createDesignOrchestrator} from "../pipeline/design-orchestrator.js";
 import {
   acquireInput,
@@ -515,6 +516,47 @@ async function assertStateEnvelopeInputs(artifact,store) {
           canonicalJson(source.provenance)!==canonicalJson(artifact.provenance)) {
         throw new TypeError("feature source does not match design state provenance");
       }
+      const expectedArtifactId=
+        `feature-delta:${source.content.project_id}:${source.content.feature_id}`;
+      const matching=(await store.list({document_type:"feature-delta"})).filter(row =>
+        row.content?.feature_id===artifact.content.scope.id &&
+        canonicalJson(row.provenance)===canonicalJson(artifact.provenance));
+      const identities=[...new Set(matching.map(row => row.artifact_id))];
+      if (source.artifact_id!==expectedArtifactId || identities.length!==1 ||
+          identities[0]!==expectedArtifactId) {
+        throw new TypeError("feature source identity is ambiguous or noncanonical");
+      }
+      const history=await featureHistory(
+        store,source.content.project_id,source.content.feature_id,
+      );
+      const latest=history.at(-1);
+      if (!latest || latest.content.stage!=="PREPARED" ||
+          canonicalJson(exactReference(latest))!==canonicalJson(sourceRefs[0]) ||
+          canonicalJson(latest)!==canonicalJson(source)) {
+        throw new TypeError("design state does not reference the unique latest feature source");
+      }
+      const sourceClassification=classifyDesignLevel({
+        schema_version:"design-classification-input.v1",
+        scope:{kind:"feature",id:source.content.feature_id},
+        ...source.content.design_impact,
+      });
+      if (canonicalJson(artifact.content.classification.classification_input)!==
+          canonicalJson(sourceClassification.classification_input)) {
+        throw new TypeError("design state classification contradicts feature design impact");
+      }
+      const derivedBrief=featureDesignBrief(source,{
+        ...sourceClassification,
+        effective_level:artifact.content.classification.effective_level,
+      });
+      const briefCommitments=artifact.content.payload_commitments.filter(row =>
+        row.expected_document_type==="design-brief");
+      if (artifact.content.design_id!==derivedBrief.content.design_id ||
+          briefCommitments.length!==1 ||
+          canonicalJson(briefCommitments[0].expected_artifact_ref)!==
+            canonicalJson(exactReference(derivedBrief)) ||
+          briefCommitments[0].payload_sha256!==sha256Canonical(derivedBrief)) {
+        throw new TypeError("design state brief commitment contradicts feature design impact");
+      }
     }
   } catch (error) {
     throw new OrchestrationError(
@@ -649,11 +691,8 @@ function topologicalArtifacts(graph,{includeFinal}) {
 }
 
 async function appendState(store,input,outcome,previous) {
-  const sourceArtifactRefs=previous?.content.source_artifact_refs ?? [];
-  const content=deepFreeze({
-    ...outcome.next_state_content,
-    source_artifact_refs:sourceArtifactRefs,
-  });
+  const content=outcome.next_state_content;
+  const sourceArtifactRefs=content.source_artifact_refs;
   const contentSha256=sha256Canonical(content);
   if (previous?.content_sha256===contentSha256) return previous;
   const artifact={
@@ -674,14 +713,24 @@ async function appendState(store,input,outcome,previous) {
   return store.append(deepFreeze(artifact));
 }
 
-function preparedOutcome(orchestrator,input,persisted,targetCommand) {
+function preparedOutcome(orchestrator,input,persisted,targetCommand,sourceArtifactRefs) {
   return orchestrator.prepareDesign({
     classification_input:input.classification_input,
+    source_artifact_refs:sourceArtifactRefs,
     design_artifacts:input.artifacts,
     persisted_artifacts:persisted,
     approval_records:input.approval_records,
     target_command:targetCommand,
   });
+}
+
+async function assertOutcomeSource(store,input,outcome) {
+  const content=outcome.next_state_content;
+  await assertStateEnvelopeInputs({
+    content,
+    provenance:input.provenance,
+    inputs:[...content.source_artifact_refs,...content.artifact_refs],
+  },store);
 }
 
 async function acquireDesignInput(command,services) {
@@ -735,9 +784,13 @@ async function runWithInput(command,store,input,orchestrator) {
     await verifyStateHistory(orchestrator,history,store);
   if (previous) assertExactReplay(input,previous);
   assertApprovalHistoryTransition(previous,input,command.name);
+  const sourceArtifactRefs=previous?.content.source_artifact_refs ?? [];
   let persisted=await persistedCandidates(store,input.artifacts);
   const reused=persisted.map(exactReference);
-  let outcome=preparedOutcome(orchestrator,input,persisted,command.name);
+  let outcome=preparedOutcome(
+    orchestrator,input,persisted,command.name,sourceArtifactRefs,
+  );
+  await assertOutcomeSource(store,input,outcome);
 
   const shouldPersistNonFinal=outcome.ready_to_persist && command.name!=="design.approve";
   const shouldPersistFinal=outcome.state==="FINAL_APPROVAL_PENDING" &&
@@ -753,11 +806,16 @@ async function runWithInput(command,store,input,orchestrator) {
       const appended=await store.append(artifact);
       persisted=orderedArtifacts([...persisted,appended]);
       already.add(key);
-      outcome=preparedOutcome(orchestrator,input,persisted,command.name);
+      outcome=preparedOutcome(
+        orchestrator,input,persisted,command.name,sourceArtifactRefs,
+      );
     }
   }
 
-  outcome=preparedOutcome(orchestrator,input,persisted,command.name);
+  outcome=preparedOutcome(
+    orchestrator,input,persisted,command.name,sourceArtifactRefs,
+  );
+  await assertOutcomeSource(store,input,outcome);
   previous=await appendState(store,input,outcome,previous);
   return stateResult(previous,{reused});
 }

@@ -274,9 +274,19 @@ async function featureHistoryForArtifactId(store,artifactId) {
   for (const [index,row] of rows.entries()) {
     const rank=stages.indexOf(row.content.stage);
     const previousRank=index===0 ? -1 : stages.indexOf(rows[index-1].content.stage);
-    if (row.revision!==index+1 || rank<0 || rank<=previousRank) {
+    const expectedArtifactId=`feature-delta:${row.content.project_id}:${row.content.feature_id}`;
+    const expectedParents=index===0 ? [] : [exactReference(rows[index-1])];
+    const stateReferences=row.content.base_project.artifacts.filter(
+      reference => reference.document_type==="transition-event",
+    );
+    if (row.artifact_id!==expectedArtifactId || row.revision!==index+1 ||
+        rank<0 || rank<=previousRank ||
+        canonicalJson(row.parents)!==canonicalJson(expectedParents) ||
+        stateReferences.length!==1 ||
+        canonicalJson(row.inputs)!==canonicalJson(stateReferences)) {
       throw new OrchestrationError(
-        "AMBIGUOUS_FEATURE_HISTORY","Feature delta history is not one monotonic stage chain",5,
+        "AMBIGUOUS_FEATURE_HISTORY",
+        "Feature delta history is not one canonical monotonic envelope chain",5,
       );
     }
     if (index>0 && canonicalJson(row.content.base_project)!==
