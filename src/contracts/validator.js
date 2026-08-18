@@ -20,6 +20,7 @@ const schemaDefinitions=[
   ["decision-package.v1","../../contracts/pipeline/decision-package.v1.schema.json"],
   ["trace-graph.v1","../../contracts/pipeline/trace-graph.v1.schema.json"],
   ["trace-result.v1","../../contracts/pipeline/trace-result.v1.schema.json"],
+  ["command-result.v1","../../contracts/pipeline/command-result.v1.schema.json"],
   ["transition-event.v1","../../contracts/pipeline/transition-event.v1.schema.json"],
   ["pdor-result.v1","../../contracts/pipeline/pdor-result.v1.schema.json"],
   ["github-publication-result.v1","../../contracts/pipeline/github-publication-result.v1.schema.json"],

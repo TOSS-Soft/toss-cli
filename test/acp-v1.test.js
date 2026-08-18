@@ -36,6 +36,34 @@ test("canonical JSON rejects values outside the JSON data model",() => {
   assert.throws(() => canonicalJson(cyclic),/non-JSON value/i);
 });
 
+test("canonical JSON accepts only dense ordinary arrays without invoking their methods",() => {
+  let methodCalls=0;
+  const exotic=["safe"];
+  Object.setPrototypeOf(exotic,{
+    map() {
+      methodCalls+=1;
+      return ["forged"];
+    },
+  });
+  const hidden=["safe"];
+  Object.defineProperty(hidden,"0",{value:"safe",enumerable:false});
+  const named=["safe"];
+  Object.defineProperty(named,"extra",{value:true,enumerable:false});
+  const accessor=["safe"];
+  Object.defineProperty(accessor,"0",{
+    enumerable:true,
+    get() {
+      methodCalls+=1;
+      return "forged";
+    },
+  });
+
+  for (const value of [exotic,hidden,named,accessor]) {
+    assert.throws(() => canonicalJson(value),/non-JSON value/i);
+  }
+  assert.equal(methodCalls,0);
+});
+
 test("canonical hashes are lowercase SHA-256 digests of UTF-8 JSON",() => {
   assert.equal(
     sha256Canonical({b:2,a:1}),

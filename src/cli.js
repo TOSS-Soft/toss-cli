@@ -886,29 +886,91 @@ function parseLegacy(args) {
   return a;
 }
 
-function help() {
-  console.log(`TOSS CLI v${VERSION}
+async function help() {
+  const {renderHelp}=await import("./commands/options.js");
+  console.log(renderHelp(VERSION));
+}
 
-Usage:
-  toss init [project-brief.yaml]
-  toss create <project-brief.yaml>
-  toss trace <ENTITY-ID> [--json]
-  toss "Project Name" [options]
+const LIFECYCLE_FAMILIES=new Set([
+  "project","feature","decisions","architecture","plan","audit",
+  "readiness","issues","artifacts","validate",
+]);
+const LEGACY_SCAFFOLD_OPTIONS=new Set([
+  "--description","--owner","--visibility","--dir","--slug","--github",
+  "--github-project","--ruleset","--no-git","--force",
+]);
 
-Recommended:
-  toss init
-  # fill project-brief.yaml
-  toss create project-brief.yaml
+function isLegacyFastScaffold(args) {
+  const name=args[0];
+  return typeof name==="string" && name.length>0 && !name.startsWith("-") && (
+    /\s/.test(name) ||
+    /[A-Z]/.test(name) ||
+    !/^[a-z]+$/.test(name) ||
+    args.slice(1).some(value => LEGACY_SCAFFOLD_OPTIONS.has(value))
+  );
+}
 
-Global package:
-  npm install -g @toss-software/cli
-`);
+function hasExplicitLegacyScaffoldOption(args) {
+  return args.slice(1).some(value => LEGACY_SCAFFOLD_OPTIONS.has(value));
+}
+
+async function runLifecycle(args) {
+  const [router,output,options]=await Promise.all([
+    import("./commands/router.js"),
+    import("./output/command-result.js"),
+    import("./commands/options.js"),
+  ]);
+  if (args.at(-1)==="--help" || args.at(-1)==="-h") {
+    if (args.filter(value => value==="--help" || value==="-h").length!==1) {
+      console.error("Duplicate help option");
+      process.exitCode=router.EXIT_CODES.USAGE;
+      return;
+    }
+    const subject=args.slice(0,-1);
+    const exactCommand=options.COMMAND_DEFINITIONS.some(definition =>
+      definition.tokens.length===subject.length &&
+      definition.tokens.every((token,index) => token===subject[index]));
+    if (!exactCommand) {
+      try {
+        router.parseCommand(subject);
+      } catch (error) {
+        console.error(output.renderCommandHuman(output.failureResult(error)));
+        process.exitCode=router.EXIT_CODES.USAGE;
+        return;
+      }
+    }
+    return help();
+  }
+
+  let dispatched;
+  try {
+    dispatched=await router.dispatchCommand(router.parseCommand(args),{});
+  } catch (error) {
+    const exitCode=error instanceof router.CommandUsageError ?
+      router.EXIT_CODES.USAGE : router.EXIT_CODES.INTERNAL;
+    dispatched={exitCode,result:output.failureResult(error)};
+  }
+
+  const json=args.includes("--json");
+  const rendered=json ?
+    output.renderCommandJson(dispatched.result) :
+    output.renderCommandHuman(dispatched.result);
+  if (json || dispatched.result.ok) console.log(rendered);
+  else console.error(rendered);
+  if (dispatched.exitCode!==router.EXIT_CODES.SUCCESS) {
+    process.exitCode=dispatched.exitCode;
+  }
 }
 
 async function main() {
   const args=process.argv.slice(2);
-  if (!args.length || args[0]==="--help" || args[0]==="-h") return help();
-  if (args[0]==="--version" || args[0]==="-v") return console.log(VERSION);
+  if (!args.length || (args.length===1 && ["--help","-h"].includes(args[0]))) {
+    return help();
+  }
+  if (args.length===1 && ["--version","-v"].includes(args[0])) {
+    return console.log(VERSION);
+  }
+  if (["--help","-h"].includes(args.at(-1))) return runLifecycle(args);
 
   if (args[0]==="init") {
     return initBrief(args[1]||"project-brief.yaml");
@@ -968,6 +1030,22 @@ async function main() {
     console.log(command.format==="json" ?
       renderTraceJson(command.result) : renderTraceHuman(command.result));
     return;
+  }
+
+  if (hasExplicitLegacyScaffoldOption(args)) {
+    return createFromConfig({
+      ...parseLegacy(args),
+      governanceProfiles:{core:true,delivery:false},
+      requiredStatusChecks:[],
+    },null);
+  }
+
+  if (LIFECYCLE_FAMILIES.has(args[0])) {
+    return runLifecycle(args);
+  }
+
+  if (!isLegacyFastScaffold(args)) {
+    return runLifecycle(args);
   }
 
   return createFromConfig({
