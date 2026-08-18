@@ -4,7 +4,7 @@ import {canonicalJson,sha256Canonical} from "../contracts/acp.js";
 import {validateDocument} from "../contracts/validator.js";
 import {fromYamlProjection} from "../contracts/yaml-projection.js";
 
-const SERVICE_KEYS=new Set(["artifactStore","readInput","prompt"]);
+const SERVICE_KEYS=new Set(["artifactStore","readInput","prompt","authorityRegistry"]);
 const STORE_KEYS=new Set(["append","get","list","verify","recover"]);
 const ARTIFACT_REFERENCE_KEYS=new Set([
   "document_type","artifact_id","revision","content_sha256",
@@ -25,6 +25,8 @@ const SCHEMA_BY_TYPE=Object.freeze({
   "transition-event":"transition-event.v1",
   "project-input":"project-input.v1",
   "feature-delta":"feature-delta.v1",
+  "decision-answer":"decision-answer.v1",
+  "adr-approval":"adr-approval.v1",
 });
 
 export class OrchestrationError extends Error {
@@ -124,6 +126,8 @@ export function commandServices(value) {
     store:Object.freeze(store),
     readInput:services.readInput,
     prompt:services.prompt,
+    authorityRegistry:services.authorityRegistry===undefined ? undefined :
+      deepFreeze(canonicalCopy(services.authorityRegistry,"authority registry")),
   });
 }
 

@@ -26,6 +26,8 @@ const schemaDefinitions=[
   ["feature-delta.v1","../../contracts/pipeline/feature-delta.v1.schema.json"],
   ["pdor-result.v1","../../contracts/pipeline/pdor-result.v1.schema.json"],
   ["github-publication-result.v1","../../contracts/pipeline/github-publication-result.v1.schema.json"],
+  ["decision-answer.v1","../../contracts/pipeline/decision-answer.v1.schema.json"],
+  ["adr-approval.v1","../../contracts/pipeline/adr-approval.v1.schema.json"],
 ];
 
 function loadSchema(path) {

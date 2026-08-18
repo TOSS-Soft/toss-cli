@@ -6,6 +6,7 @@ import {validateDocument} from "../contracts/validator.js";
 import {auditSpecification} from "./spec-auditor.js";
 
 const INPUT_KEYS=Object.freeze(["architecture","issuePlan","pmAnalysis"]);
+const OPTIONAL_INPUT_KEYS=new Set(["approvals","decisionAnswers","decisionPackage"]);
 const ARCHITECTURE_KEYS=Object.freeze(["adrs","artifact"]);
 const ROOT_TYPES=new Set(["REQ","NFR","BR"]);
 const REQUIREMENT_TYPES=new Set(["REQ","NFR"]);
@@ -342,7 +343,15 @@ function assertGraph(graph) {
 
 function normalizedInputs(artifacts) {
   const normalized=canonicalCopy(artifacts,"trace artifacts");
-  assertExactKeys(normalized,INPUT_KEYS,"trace artifacts");
+  const keys=Object.keys(normalized).sort();
+  if (!INPUT_KEYS.every(key => Object.hasOwn(normalized,key)) ||
+      keys.some(key => !INPUT_KEYS.includes(key) && !OPTIONAL_INPUT_KEYS.has(key))) {
+    throw new TraceabilityInputError(
+      "trace artifacts contain an unknown or extra property outside exact PM, architecture, plan, and optional approval evidence",
+    );
+  }
+  normalized.approvals=normalized.approvals ?? [];
+  normalized.decisionAnswers=normalized.decisionAnswers ?? [];
   assertExactKeys(normalized.architecture,ARCHITECTURE_KEYS,
     "trace artifacts architecture");
   if (!Array.isArray(normalized.architecture.adrs)) {
@@ -356,6 +365,8 @@ function assertUniqueInputSnapshotIdentities(artifacts) {
     artifacts.pmAnalysis,
     artifacts.architecture.artifact,
     ...artifacts.architecture.adrs,
+    ...artifacts.approvals,
+    ...artifacts.decisionAnswers,
     artifacts.issuePlan,
   ];
   const identities=new Set();

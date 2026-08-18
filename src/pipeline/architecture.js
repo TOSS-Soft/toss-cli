@@ -381,11 +381,12 @@ function architectureEntityIdentityFindings(architecture) {
   return findings;
 }
 
-function pmQuestionFindings(pmAnalysis) {
+function pmQuestionFindings(pmAnalysis,resolvedQuestionIds=new Set()) {
   const findings=[];
   const questions=pmAnalysis.content.open_questions ?? [];
   for (const [index,question] of questions.entries()) {
     if (!BLOCKING_SEVERITIES.has(question.severity)) continue;
+    if (resolvedQuestionIds.has(question.id)) continue;
     findings.push(freezeFinding({
       type:"UNRESOLVED_PM_BUSINESS_INFORMATION",
       path:`/content/open_questions/${index}`,
@@ -396,6 +397,38 @@ function pmQuestionFindings(pmAnalysis) {
     }));
   }
   return findings;
+}
+
+function decisionEvidence(pmAnalysis,decisionPackage) {
+  if (decisionPackage===undefined) return {findings:[],resolved:new Set()};
+  const validation=validateDocument(decisionPackage,"decision-package.v1");
+  if (!validation.valid) return {findings:[freezeFinding({
+    type:"DECISION_PACKAGE_INVALID",
+    path:"/decisionPackage",
+    message:`Decision package is invalid: ${validation.errors[0]?.message ?? "schema failure"}`,
+  })],resolved:new Set()};
+  const pmById=new Map(pmAnalysis.content.open_questions.map(question => [question.id,question]));
+  const retained=[
+    "meaning","question","severity","owner","options","recommendation","rationale",
+    "affected_entities","provenance",
+  ];
+  const evidence=decisionPackage.questions.flatMap(question => question.evidence);
+  const exact=evidence.length===pmById.size && new Set(evidence.map(row => row.source_id)).size===
+    evidence.length && evidence.every(row => {
+    const pm=pmById.get(row.source_id);
+    return pm && retained.every(field => canonicalJson(row[field])===canonicalJson(pm[field]));
+  });
+  if (!exact || decisionPackage.gate.can_continue!==true ||
+      decisionPackage.gate.status!=="CLEAR") {
+    return {findings:[freezeFinding({
+      type:"DECISION_PACKAGE_STALE",
+      path:"/decisionPackage",
+      message:"Decision package must exactly resolve the current PM question set",
+    })],resolved:new Set()};
+  }
+  const resolved=new Set(decisionPackage.questions.filter(question =>
+    question.status==="resolved").flatMap(question => question.source_ids));
+  return {findings:[],resolved};
 }
 
 function unresolvedFindingGates(architecture) {
@@ -414,7 +447,7 @@ function unresolvedFindingGates(architecture) {
   return findings;
 }
 
-function architectureReadinessFindings(pmAnalysis,architecture,adrs) {
+function architectureReadinessFindings(pmAnalysis,architecture,adrs,approvedAdrReferences=new Set()) {
   const findings=[];
   const pmQuestionIds=pmArchitectureQuestionIds(pmAnalysis);
   const resolutions=new Map(architecture.content.architecture_questions.map(question => [
@@ -446,6 +479,7 @@ function architectureReadinessFindings(pmAnalysis,architecture,adrs) {
 
   for (const adr of adrs) {
     const content=adr.content;
+    const externallyApproved=approvedAdrReferences.has(artifactIdentity(adr));
     for (const id of content.resolved_architecture_questions) adrQuestionIds.add(id);
     if (content.status==="blocked") {
       findings.push(freezeFinding({
@@ -454,7 +488,7 @@ function architectureReadinessFindings(pmAnalysis,architecture,adrs) {
         message:`ADR ${content.id} is blocked`,
         affected_entities:[content.id],
       }));
-    } else if (content.status!=="accepted") {
+    } else if (content.status!=="accepted" && !externallyApproved) {
       findings.push(freezeFinding({
         type:"ADR_PENDING",
         path:"/content/status",
@@ -462,7 +496,7 @@ function architectureReadinessFindings(pmAnalysis,architecture,adrs) {
         affected_entities:[content.id],
       }));
     }
-    if (content.approval.state!=="approved") {
+    if (content.approval.state!=="approved" && !externallyApproved) {
       findings.push(freezeFinding({
         type:"ADR_UNAPPROVED",
         path:"/content/approval/state",
@@ -483,6 +517,53 @@ function architectureReadinessFindings(pmAnalysis,architecture,adrs) {
     }
   }
   return findings;
+}
+
+function approvalEvidence(approvals,adrs) {
+  if (!Array.isArray(approvals)) {
+    return {findings:[freezeFinding({
+      type:"ADR_APPROVALS_NOT_ARRAY",
+      path:"/approvals",
+      message:"ADR approvals must be an array",
+    })],approved:new Set()};
+  }
+  const current=new Map(adrs.map(adr => [artifactIdentity(adr),adr]));
+  const approved=new Set();
+  const findings=[];
+  for (const [index,approval] of approvals.entries()) {
+    const rowFindings=schemaAndIntegrityFindings(approval,"adr-approval.v1");
+    findings.push(...rowFindings);
+    if (rowFindings.length>0) continue;
+    const key=referenceIdentity(approval.content.adr);
+    const adr=current.get(key);
+    if (!adr) {
+      findings.push(freezeFinding({
+        type:"STALE_ADR_APPROVAL",
+        path:`/approvals/${index}/content/adr`,
+        message:"ADR approval must bind one exact current ADR revision",
+      }));
+      continue;
+    }
+    if (approved.has(key)) {
+      findings.push(freezeFinding({
+        type:"DUPLICATE_ADR_APPROVAL",
+        path:`/approvals/${index}`,
+        message:"Each current ADR revision may have exactly one approval",
+      }));
+      continue;
+    }
+    if (approval.provenance?.source_revision!==adr.provenance.source_revision ||
+        approval.provenance?.source_sha256!==adr.provenance.source_sha256) {
+      findings.push(freezeFinding({
+        type:"STALE_ADR_APPROVAL",
+        path:`/approvals/${index}/provenance`,
+        message:"ADR approval provenance must match its exact ADR source",
+      }));
+      continue;
+    }
+    approved.add(key);
+  }
+  return {findings,approved};
 }
 
 function adrSemanticFindings(pmAnalysis,architecture,adrs) {
@@ -664,10 +745,15 @@ export function buildArchitecture({pmAnalysis,decisions,artifactContext}={}) {
   return deepFreeze(architecture);
 }
 
-export function validateArchitecture({pmAnalysis,architecture,adrs=[]}={}) {
+export function validateArchitecture({
+  pmAnalysis,architecture,adrs=[],approvals=[],decisionPackage,
+}={}) {
   let normalized;
   try {
-    normalized=canonicalCopy({pmAnalysis,architecture,adrs});
+    normalized=canonicalCopy({
+      pmAnalysis,architecture,adrs,approvals,
+      ...(decisionPackage===undefined ? {} : {decisionPackage}),
+    });
   } catch (error) {
     return resultFor({contractFindings:[canonicalFinding(error)]});
   }
@@ -675,6 +761,8 @@ export function validateArchitecture({pmAnalysis,architecture,adrs=[]}={}) {
     pmAnalysis:pm,
     architecture:architectureArtifact,
     adrs:adrArtifacts,
+    approvals:approvalArtifacts,
+    decisionPackage:decisionEvidencePackage,
   }=normalized;
   const contractFindings=[];
   const gateFindings=[];
@@ -688,7 +776,9 @@ export function validateArchitecture({pmAnalysis,architecture,adrs=[]}={}) {
     return resultFor({contractFindings});
   }
 
-  gateFindings.push(...pmQuestionFindings(pm));
+  const decisions=decisionEvidence(pm,decisionEvidencePackage);
+  contractFindings.push(...decisions.findings);
+  gateFindings.push(...pmQuestionFindings(pm,decisions.resolved));
   contractFindings.push(
     ...schemaAndIntegrityFindings(architectureArtifact,"architecture.v1"),
   );
@@ -735,11 +825,14 @@ export function validateArchitecture({pmAnalysis,architecture,adrs=[]}={}) {
   contractFindings.push(...adrArtifactIdentityFindings(validAdrs));
   contractFindings.push(...adrSemanticFindings(pm,architectureArtifact,validAdrs));
   contractFindings.push(...adrStatusApprovalFindings(validAdrs));
+  const approvalResult=approvalEvidence(approvalArtifacts,validAdrs);
+  contractFindings.push(...approvalResult.findings);
   gateFindings.push(...unresolvedFindingGates(architectureArtifact));
   gateFindings.push(...architectureReadinessFindings(
     pm,
     architectureArtifact,
     validAdrs,
+    approvalResult.approved,
   ));
   return resultFor({contractFindings,gateFindings});
 }

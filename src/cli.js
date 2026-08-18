@@ -927,16 +927,20 @@ function readLifecycleInput(inputPath) {
 }
 
 async function lifecycleContext(command) {
-  if (!command.name.startsWith("project.") && !command.name.startsWith("feature.")) {
+  const family=command.name.split(".")[0];
+  if (!LIFECYCLE_FAMILIES.has(family) || ["artifacts","validate"].includes(family)) {
     return {};
   }
   const {createArtifactStore}=await import("./artifacts/store.js");
   const root=path.resolve(process.cwd(),command.options.project ?? ".");
+  const services={artifactStore:createArtifactStore({root})};
+  if (command.name.startsWith("project.") || command.name.startsWith("feature.") ||
+      command.name==="decisions.answer" || command.name==="architecture.approve" ||
+      (command.name==="issues.publish" && command.options.apply)) {
+    services.readInput=async inputPath => readLifecycleInput(inputPath);
+  }
   return {
-    services:{
-      artifactStore:createArtifactStore({root}),
-      readInput:async inputPath => readLifecycleInput(inputPath),
-    },
+    services,
   };
 }
 
