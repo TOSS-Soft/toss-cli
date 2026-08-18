@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://toss.software/schemas/pipeline/github-publication-result.v1.schema.json",
+  "title": "TOSS GitHub Publication Result v1",
+  "description": "An immutable ACP result recording verified local issue to GitHub issue mappings and retryable publication progress.",
+  "allOf": [
+    {"$ref": "https://toss.software/schemas/common/artifact-envelope.v1.schema.json"},
+    {
+      "type": "object",
+      "properties": {
+        "schema_version": {"const": "acp.v1"},
+        "document_type": {"const": "github-publication-result"},
+        "producer": {
+          "type": "object",
+          "properties": {"role": {"const": "issue-publisher"}}
+        },
+        "content": {"$ref": "#/$defs/content"}
+      }
+    }
+  ],
+  "$defs": {
+    "material_string": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"},
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "artifact_reference": {
+      "$ref": "https://toss.software/schemas/common/artifact-envelope.v1.schema.json#/$defs/artifact_revision_reference"
+    },
+    "approval_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "approval_kind", "actor_id", "actor_role", "repository",
+        "source_revision", "source_sha256", "issue_plan", "record_id",
+        "record_revision", "record_sha256", "timestamp", "signature"
+      ],
+      "properties": {
+        "approval_kind": {"const": "GITHUB_ISSUE_PUBLICATION"},
+        "actor_id": {"$ref": "#/$defs/material_string"},
+        "actor_role": {"enum": ["CEO", "USER"]},
+        "repository": {"type": "string", "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9_.-]+$"},
+        "source_revision": {"$ref": "#/$defs/material_string"},
+        "source_sha256": {"$ref": "#/$defs/sha256"},
+        "issue_plan": {"$ref": "#/$defs/artifact_reference"},
+        "record_id": {"$ref": "#/$defs/material_string"},
+        "record_revision": {"type": "integer", "minimum": 1},
+        "record_sha256": {"$ref": "#/$defs/sha256"},
+        "timestamp": {"type": "string", "format": "rfc3339-date-time"},
+        "signature": {"type": "string", "pattern": "^[A-Za-z0-9+/]{86}==$"}
+      }
+    },
+    "authority_registry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "registry_id", "revision", "content_sha256", "actor_id",
+        "public_key_fingerprint"
+      ],
+      "properties": {
+        "registry_id": {"$ref": "#/$defs/material_string"},
+        "revision": {"type": "integer", "minimum": 1},
+        "content_sha256": {"$ref": "#/$defs/sha256"},
+        "actor_id": {"$ref": "#/$defs/material_string"},
+        "public_key_fingerprint": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "mapping": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["local_issue_id", "number", "url", "marker"],
+      "properties": {
+        "local_issue_id": {"type": "string", "pattern": "^ISSUE-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"},
+        "number": {"type": "integer", "minimum": 1},
+        "url": {"type": "string", "pattern": "^https://github\\.com/[^/]+/[^/]+/issues/[1-9][0-9]*$"},
+        "marker": {"$ref": "#/$defs/material_string"}
+      }
+    },
+    "failure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["local_issue_id", "code", "message", "retryable"],
+      "properties": {
+        "local_issue_id": {"type": "string", "pattern": "^ISSUE-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"},
+        "code": {"enum": ["API_UNAVAILABLE", "PERMISSION_DENIED", "RATE_LIMITED"]},
+        "message": {"$ref": "#/$defs/material_string"},
+        "retryable": {"const": true}
+      }
+    },
+    "content": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status", "repository", "source_revision", "source_sha256",
+        "issue_plan", "authority_registry", "approval_record", "mappings", "failures"
+      ],
+      "properties": {
+        "status": {"enum": ["retryable", "complete"]},
+        "repository": {"type": "string", "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9_.-]+$"},
+        "source_revision": {"$ref": "#/$defs/material_string"},
+        "source_sha256": {"$ref": "#/$defs/sha256"},
+        "issue_plan": {"$ref": "#/$defs/artifact_reference"},
+        "authority_registry": {"$ref": "#/$defs/authority_registry"},
+        "approval_record": {"$ref": "#/$defs/approval_record"},
+        "mappings": {"type": "array", "items": {"$ref": "#/$defs/mapping"}},
+        "failures": {
+          "type": "array",
+          "maxItems": 1,
+          "items": {"$ref": "#/$defs/failure"}
+        }
+      }
+    }
+  }
+}

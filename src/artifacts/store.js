@@ -26,7 +26,7 @@ import {
 } from "./errors.js";
 
 const ARTIFACT_ROOT_PARTS=["project-management","artifacts"];
-const ARTIFACT_ID_PATTERN=/^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const ARTIFACT_ID_PATTERN=/^[A-Za-z0-9][A-Za-z0-9:._-]*$/;
 const SHA256_PATTERN=/^[a-f0-9]{64}$/;
 const MAX_REVISION=999999;
 const REVISION_FILE_PATTERN=/^r(\d{6})-([a-f0-9]{64})\.json$/;
@@ -85,10 +85,36 @@ function requireNonEmptyString(value,field) {
 function requireArtifactId(value) {
   if (typeof value!=="string" || !ARTIFACT_ID_PATTERN.test(value)) {
     throw new ArtifactValidationError(
-      "artifact_id must use only letters, numbers, dots, underscores, and hyphens",
+      "artifact_id must match ^[A-Za-z0-9][A-Za-z0-9:._-]*$",
     );
   }
   return value;
+}
+
+function artifactDirectoryName(artifactId) {
+  return encodeURIComponent(requireArtifactId(artifactId));
+}
+
+function artifactIdentityFromDirectoryName(name) {
+  if (ARTIFACT_ID_PATTERN.test(name) && name.includes(":")) {
+    return {artifactId:name,legacy:true};
+  }
+  let artifactId;
+  try {
+    artifactId=decodeURIComponent(name);
+  } catch (error) {
+    throw new ArtifactIntegrityError(
+      `Artifact directory name is not a reversible encoded identity: ${name}`,
+      {cause:error},
+    );
+  }
+  if (!ARTIFACT_ID_PATTERN.test(artifactId) ||
+      encodeURIComponent(artifactId)!==name) {
+    throw new ArtifactIntegrityError(
+      `Artifact directory name is not a canonical encoded identity: ${name}`,
+    );
+  }
+  return {artifactId,legacy:false};
 }
 
 function requireRevision(value,field="revision") {
@@ -505,6 +531,7 @@ async function scanArtifactTree(rootInfo) {
     if (!documentEntry.isDirectory() || !documentTypes.has(documentEntry.name)) {
       throw unexpectedEntry(documentEntry.name,"expected a registered document type directory");
     }
+    const identityDirectories=new Map();
     for (const artifactEntry of await safeReadDirectory(
       rootInfo,
       documentPath,
@@ -517,12 +544,20 @@ async function scanArtifactTree(rootInfo) {
           "symbolic links are forbidden",
         );
       }
-      if (!artifactEntry.isDirectory() || !ARTIFACT_ID_PATTERN.test(artifactEntry.name)) {
+      if (!artifactEntry.isDirectory()) {
         throw unexpectedEntry(
           pathForDisplay(artifactRoot,artifactPath),
           "expected an artifact identity directory",
         );
       }
+      const identity=artifactIdentityFromDirectoryName(artifactEntry.name);
+      const existingDirectory=identityDirectories.get(identity.artifactId);
+      if (existingDirectory!==undefined && existingDirectory!==artifactEntry.name) {
+        throw new ArtifactIntegrityError(
+          `Artifact identity ${identity.artifactId} has ambiguous raw and encoded directories`,
+        );
+      }
+      identityDirectories.set(identity.artifactId,artifactEntry.name);
       for (const fileEntry of await safeReadDirectory(
         rootInfo,
         artifactPath,
@@ -561,6 +596,45 @@ async function scanArtifactTree(rootInfo) {
     finalPaths:finalPaths.sort(),
     temporaryPaths:temporaryPaths.sort(),
   };
+}
+
+async function migrateLegacyArtifactDirectory(rootInfo,documentType,artifactId) {
+  const encodedName=artifactDirectoryName(artifactId);
+  if (encodedName===artifactId || process.platform==="win32") return;
+  const parent=join(rootInfo.lexicalRoot,...ARTIFACT_ROOT_PARTS,documentType);
+  const legacyPath=join(parent,artifactId);
+  const encodedPath=join(parent,encodedName);
+  const legacyStat=await lstatOptional(legacyPath);
+  const encodedStat=await lstatOptional(encodedPath);
+  if (legacyStat) {
+    await assertSafeExistingPath(rootInfo,legacyPath,{
+      kind:"directory",
+      label:"Legacy artifact directory",
+    });
+  }
+  if (encodedStat) {
+    await assertSafeExistingPath(rootInfo,encodedPath,{
+      kind:"directory",
+      label:"Encoded artifact directory",
+    });
+  }
+  if (legacyStat && encodedStat) {
+    throw new ArtifactIntegrityError(
+      `Artifact identity ${artifactId} has ambiguous raw and encoded directories`,
+    );
+  }
+  if (!legacyStat) return;
+  await rename(legacyPath,encodedPath);
+  const migratedStat=await assertSafeExistingPath(rootInfo,encodedPath,{
+    kind:"directory",
+    label:"Migrated artifact directory",
+  });
+  if (!sameFile(legacyStat,migratedStat) || await lstatOptional(legacyPath)) {
+    throw new ArtifactIntegrityError(
+      `Artifact identity ${artifactId} legacy directory migration was not exact`,
+    );
+  }
+  await syncContainingDirectory(rootInfo,parent);
 }
 
 export function createArtifactStore({root,now=() => new Date(),randomId=randomUUID}={}) {
@@ -623,11 +697,19 @@ export function createArtifactStore({root,now=() => new Date(),randomId=randomUU
         `Artifact filename does not match content at ${pathForDisplay(rootInfo.lexicalRoot,path)}`,
       );
     }
+    const directoryName=basename(dirname(path));
+    const directoryIdentity=artifactIdentityFromDirectoryName(directoryName);
+    if (directoryIdentity.artifactId!==value.artifact_id) {
+      throw new ArtifactIntegrityError(
+        `Artifact directory does not match content at ${
+          pathForDisplay(rootInfo.lexicalRoot,path)}`,
+      );
+    }
     const expectedPath=join(
       rootInfo.lexicalRoot,
       ...ARTIFACT_ROOT_PARTS,
       value.document_type,
-      value.artifact_id,
+      directoryName,
       artifactFileName(value.revision,value.content_sha256),
     );
     if (resolve(path)!==resolve(expectedPath)) {
@@ -980,10 +1062,15 @@ export function createArtifactStore({root,now=() => new Date(),randomId=randomUU
     const rootInfo=await prepareRoot(root);
 
     return withStoreLock(rootInfo,async lock => {
+      await migrateLegacyArtifactDirectory(
+        rootInfo,
+        artifact.document_type,
+        artifact.artifact_id,
+      );
       const directory=await ensureContainedDirectory(rootInfo,[
         ...ARTIFACT_ROOT_PARTS,
         artifact.document_type,
-        artifact.artifact_id,
+        artifactDirectoryName(artifact.artifact_id),
       ]);
       await assertArtifactIdDocumentType(
         rootInfo,

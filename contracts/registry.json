@@ -72,6 +72,18 @@
         "record an undeclared or unguarded transition",
         "reinterpret a transition against another source revision"
       ]
+    },
+    {
+      "document_type": "github-publication-result",
+      "schema_version": "acp.v1",
+      "producer": "issue-publisher",
+      "consumers": ["issue-publisher", "human-reviewer"],
+      "allowed_mutations": ["append a new immutable publication-result revision"],
+      "forbidden_actions": [
+        "mutate an existing revision",
+        "claim an unverified GitHub mapping",
+        "change readiness or analysis state"
+      ]
     }
   ]
 }
