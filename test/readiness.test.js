@@ -555,6 +555,83 @@ test("malformed collection members retain exact dependent-rule evidence",() => {
   }
 });
 
+test("structural ADR and audit collection evidence reaches every dependent rule",() => {
+  const cases=[
+    ...[null,42,[]].map(value => ({
+      label:`ADRs ${JSON.stringify(value)}`,
+      artifact:"architecture.adrs",
+      path:"/architecture/adrs",
+      rules:[
+        "PDOR-050-ARCHITECTURE-QUESTIONS",
+        "PDOR-060-APPROVED-ADRS",
+        "PDOR-090-REQUIREMENT-AC-COVERAGE",
+        "PDOR-100-LATEST-SPEC-AUDIT",
+        "PDOR-110-ANALYSIS-STATE",
+      ],
+      mutate(aggregate) {
+        aggregate.architecture.adrs=clone(value);
+      },
+    })),
+    ...[null,42,[]].map(value => ({
+      label:`Spec Audits ${JSON.stringify(value)}`,
+      artifact:"specAudits",
+      path:"/specAudits",
+      rules:[
+        "PDOR-100-LATEST-SPEC-AUDIT",
+        "PDOR-110-ANALYSIS-STATE",
+      ],
+      mutate(aggregate) {
+        aggregate.specAudits=clone(value);
+      },
+    })),
+  ];
+
+  for (const testCase of cases) {
+    const aggregate=passAggregate();
+    testCase.mutate(aggregate);
+    const first=evaluateProjectReadiness(aggregate);
+    const second=evaluateProjectReadiness(clone(aggregate));
+
+    assert.deepEqual(first,second,testCase.label);
+    assert.equal(validateDocument(first,"pdor-result.v1").valid,true,testCase.label);
+    assertDeepFrozen(first);
+    for (const ruleId of testCase.rules) {
+      const failure=first.failures.find(item => item.rule_id===ruleId);
+      assert.ok(failure,`${testCase.label}: ${ruleId}`);
+      assert.deepEqual(failure.evidence.map(item => ({
+        artifact:item.artifact,
+        entity_id:item.entity_id,
+        path:item.path,
+      })),[{
+        artifact:testCase.artifact,
+        entity_id:null,
+        path:testCase.path,
+      }],`${testCase.label}: ${ruleId}`);
+    }
+  }
+
+  const adrsThenAudits=passAggregate();
+  adrsThenAudits.architecture.adrs=[];
+  adrsThenAudits.specAudits=[];
+  const auditsThenAdrs=passAggregate();
+  auditsThenAdrs.specAudits=[];
+  auditsThenAdrs.architecture.adrs=[];
+  assert.deepEqual(
+    evaluateProjectReadiness(adrsThenAudits),
+    evaluateProjectReadiness(auditsThenAdrs),
+  );
+
+  const hashInvalid=passAggregate();
+  hashInvalid.analysisState.content_sha256="0".repeat(64);
+  const hashInvalidResult=evaluateProjectReadiness(hashInvalid);
+  assert.equal(hashInvalidResult.coverage.requirement_ac,1);
+  assert.ok(hashInvalidResult.failures.some(item =>
+    item.rule_id==="PDOR-001-ARTIFACT-INTEGRITY" &&
+    item.evidence.some(item => item.path==="/analysisState/content_sha256")));
+  assert.equal(hashInvalidResult.failures.some(item =>
+    item.rule_id==="PDOR-110-ANALYSIS-STATE"),false);
+});
+
 test("latest audit evidence retains its original index across input order permutations",() => {
   for (const latestFirst of [false,true]) {
     const aggregate=passAggregate();

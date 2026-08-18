@@ -132,6 +132,18 @@ function ruleResult(ruleId,items) {
   };
 }
 
+function canonicalEvidenceItems(items) {
+  const byCanonical=new Map(items.map(item => [canonicalJson(item),item]));
+  return [...byCanonical.keys()].sort().map(key => byCanonical.get(key));
+}
+
+function recordDependencyEvidence(context,key,items) {
+  const existing=context.dependencyEvidence.get(key) ?? [];
+  context.dependencyEvidence.set(
+    key,canonicalEvidenceItems([...existing,...items]),
+  );
+}
+
 function sourceOf(input) {
   const revision=input?.pmAnalysis?.provenance?.source_revision;
   const sha256=input?.pmAnalysis?.provenance?.source_sha256;
@@ -259,7 +271,7 @@ function artifactEntries(input) {
 function integrityRule(context) {
   const {input}=context;
   const items=[];
-  context.schemaEvidence=new Map();
+  context.dependencyEvidence=new Map();
   if (!isPlainObject(input)) {
     return [evidence("pipeline-input",undefined,"/","Artifact aggregate must be a plain object")];
   }
@@ -277,10 +289,18 @@ function integrityRule(context) {
     items.push(evidence("architecture",undefined,"/architecture","Architecture aggregate must be an object"));
   }
   if (!Array.isArray(input.architecture?.adrs) || input.architecture.adrs.length===0) {
-    items.push(evidence("architecture.adrs",undefined,"/architecture/adrs","ADRs must be a non-empty array"));
+    const structural=[evidence(
+      "architecture.adrs",undefined,"/architecture/adrs","ADRs must be a non-empty array",
+    )];
+    items.push(...structural);
+    recordDependencyEvidence(context,"architecture.adrs",structural);
   }
   if (!Array.isArray(input.specAudits) || input.specAudits.length===0) {
-    items.push(evidence("specAudits",undefined,"/specAudits","Spec Audits must be a non-empty array"));
+    const structural=[evidence(
+      "specAudits",undefined,"/specAudits","Spec Audits must be a non-empty array",
+    )];
+    items.push(...structural);
+    recordDependencyEvidence(context,"specAudits",structural);
   }
 
   const contracts=[
@@ -301,11 +321,11 @@ function integrityRule(context) {
   for (const [key,artifact,schemaId,path,contentHash] of contracts) {
     try {
       const result=validationEvidence(key,artifact,schemaId,path,{contentHash});
-      context.schemaEvidence.set(key,result.schemaItems);
+      recordDependencyEvidence(context,key,result.schemaItems);
       items.push(...result.items);
     } catch (error) {
       const fallback=[evidence(key,artifact,path,error.message)];
-      context.schemaEvidence.set(key,fallback);
+      recordDependencyEvidence(context,key,fallback);
       items.push(...fallback);
     }
   }
@@ -313,11 +333,11 @@ function integrityRule(context) {
     const result=validationEvidence(
       "traceGraph",input.traceGraph,"trace-graph.v1","/traceGraph",{contentHash:false},
     );
-    context.schemaEvidence.set("traceGraph",result.schemaItems);
+    recordDependencyEvidence(context,"traceGraph",result.schemaItems);
     items.push(...result.items);
   } catch (error) {
     const fallback=[evidence("traceGraph",undefined,"/traceGraph",error.message)];
-    context.schemaEvidence.set("traceGraph",fallback);
+    recordDependencyEvidence(context,"traceGraph",fallback);
     items.push(...fallback);
   }
 
@@ -1007,7 +1027,7 @@ const RULE_HANDLERS=Object.freeze({
   "PDOR-110-ANALYSIS-STATE":analysisStateRule,
   "PDOR-120-UNRESOLVED-ASSUMPTIONS":assumptionWarningsRule,
 });
-const RULE_SCHEMA_DEPENDENCIES=Object.freeze({
+const RULE_INPUT_DEPENDENCIES=Object.freeze({
   "PDOR-010-PROJECT-FRAMING":["pmAnalysis"],
   "PDOR-020-PRODUCT-DEFINITION":["pmAnalysis"],
   "PDOR-030-SYSTEM-CONTEXT":["pmAnalysis"],
@@ -1018,7 +1038,9 @@ const RULE_SCHEMA_DEPENDENCIES=Object.freeze({
   "PDOR-060-APPROVED-ADRS":["architecture.adrs"],
   "PDOR-070-DELIVERY-RECORDS":["pmAnalysis","issuePlan"],
   "PDOR-080-EPIC-MAP":["pmAnalysis","issuePlan"],
-  "PDOR-090-REQUIREMENT-AC-COVERAGE":["pmAnalysis","issuePlan"],
+  "PDOR-090-REQUIREMENT-AC-COVERAGE":[
+    "pmAnalysis","architecture.artifact","architecture.adrs","issuePlan",
+  ],
   "PDOR-100-LATEST-SPEC-AUDIT":[
     "pmAnalysis","architecture.artifact","architecture.adrs","issuePlan","specAudits",
   ],
@@ -1029,16 +1051,16 @@ const RULE_SCHEMA_DEPENDENCIES=Object.freeze({
   "PDOR-120-UNRESOLVED-ASSUMPTIONS":["pmAnalysis","decisionPackage"],
 });
 
-function dependentSchemaEvidence(context,ruleId) {
-  const dependencies=RULE_SCHEMA_DEPENDENCIES[ruleId] ?? [];
+function dependentInputEvidence(context,ruleId) {
+  const dependencies=RULE_INPUT_DEPENDENCIES[ruleId] ?? [];
   const items=[];
-  for (const [key,evidenceItems] of context.schemaEvidence ?? []) {
+  for (const [key,evidenceItems] of context.dependencyEvidence ?? []) {
     if (dependencies.some(dependency =>
       key===dependency || key.startsWith(`${dependency}[`))) {
       items.push(...evidenceItems);
     }
   }
-  return items;
+  return canonicalEvidenceItems(items);
 }
 
 if (canonicalJson(Object.keys(RULE_HANDLERS).sort())!==canonicalJson([...RULE_IDS].sort())) {
@@ -1086,8 +1108,8 @@ export function evaluateProjectReadiness(artifacts,options={}) {
   for (const rule of RULES.rules) {
     let items;
     try {
-      const schemaItems=dependentSchemaEvidence(context,rule.id);
-      items=schemaItems.length>0 ? schemaItems : RULE_HANDLERS[rule.id](context);
+      const dependencyItems=dependentInputEvidence(context,rule.id);
+      items=dependencyItems.length>0 ? dependencyItems : RULE_HANDLERS[rule.id](context);
     } catch (error) {
       items=[evidence(
         "pipeline-input",undefined,"/",
