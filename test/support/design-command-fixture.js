@@ -140,7 +140,7 @@ export function signedStageApproval(kind,artifacts,overrides={}) {
   const unsigned={
     approval_kind:kind,
     decision:"APPROVED",
-    design_id:"DESIGN-CHECKOUT",
+    design_id:overrides.design_id ?? "DESIGN-CHECKOUT",
     source_revision:overrides.source_revision ?? fixture.source_revision,
     source_sha256:overrides.source_sha256 ?? fixture.source_sha256,
     recommended_level:overrides.recommended_level ?? level,

@@ -70,6 +70,16 @@ test("runtime authority is constructor-bound and captured without reading access
     /accessor, hidden, or unexpected property/,
   );
   assert.equal(reads,0);
+  assert.throws(() => createLifecycleRuntimeProvider({
+    authorityRegistry:{actors:[new Proxy(authorityRegistry().actors[0],{
+      get() {
+        reads+=1;
+        return undefined;
+      },
+    })]},
+    prompt:async () => null,
+  }),/canonical JSON/);
+  assert.equal(reads,0);
 
   const root=await temporaryRoot(t);
   const forged=Object.freeze({

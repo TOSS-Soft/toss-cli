@@ -1,4 +1,5 @@
 import {canonicalJson,sha256Canonical} from "../contracts/acp.js";
+import {registryFromDesignAuthorityCapability} from "../design-runtime-authority.js";
 import {validateDesignArtifact} from "../pipeline/design-contracts.js";
 import {classifyDesignLevel} from "../pipeline/design-level.js";
 import {createDesignOrchestrator} from "../pipeline/design-orchestrator.js";
@@ -130,6 +131,7 @@ function normalizeDesignInput(value) {
 function commitmentKey(row) {
   return canonicalJson({
     expected_document_type:row.expected_document_type,
+    expected_artifact_ref:row.expected_artifact_ref,
     payload_sha256:row.payload_sha256,
   });
 }
@@ -137,6 +139,7 @@ function commitmentKey(row) {
 function graphCommitmentKeys(graph) {
   return graph.map(artifact => canonicalJson({
     expected_document_type:artifact.document_type,
+    expected_artifact_ref:exactReference(artifact),
     payload_sha256:sha256Canonical(artifact),
   })).sort();
 }
@@ -147,7 +150,9 @@ function assertExactReplay(input,previous) {
   const exact=canonicalJson(expected)===canonicalJson(actual);
   const initializedSubset=previous.content.state==="INITIALIZED" && expected.every(key =>
     actual.includes(key));
-  if (!exact && !initializedSubset) {
+  const approvedDowngrade=previous.content.state==="DOWNGRADE_PENDING" &&
+    input.approval_records.some(row => row.approval_kind==="CRITICAL_DOWNGRADE");
+  if (!exact && !initializedSubset && !approvedDowngrade) {
     throw new OrchestrationError(
       "INPUT_STALE","Design payload does not match the exact committed gate input",6,
     );
@@ -200,10 +205,15 @@ function initialFeatureState(featureArtifact,classification,brief,persistedBrief
   const level=classification.effective_level;
   const designId=brief.content.design_id;
   const briefReference=persistedBrief ? exactReference(persistedBrief) : null;
-  const state=level==="NOT_APPLICABLE" ? "NOT_APPLICABLE" : "INITIALIZED";
-  const gate=level==="NOT_APPLICABLE" ? "NOT_APPLICABLE" : "NONE";
+  const downgradePending=classification.requires_downgrade_approval;
+  const state=level==="NOT_APPLICABLE" ? "NOT_APPLICABLE" :
+    downgradePending ? "DOWNGRADE_PENDING" : "INITIALIZED";
+  const gate=level==="NOT_APPLICABLE" ? "NOT_APPLICABLE" :
+    downgradePending ? "CRITICAL_DOWNGRADE_APPROVAL" : "NONE";
   const nextAction=level==="NOT_APPLICABLE" ?
     {command:"toss design status",owner:"DESIGN_SPECIALIST",reason:"Design is not applicable."} :
+    downgradePending ?
+      {command:"toss design approve",owner:"USER",reason:"Critical downgrade approval is required."} :
     {command:"toss design prepare --from <FILE>",owner:"DESIGN_SPECIALIST",reason:"Collect and replay the exact level-specific design graph."};
   const content={
     design_id:designId,
@@ -217,6 +227,7 @@ function initialFeatureState(featureArtifact,classification,brief,persistedBrief
     payload_commitments:[{
       stage:"BRIEF",
       expected_document_type:"design-brief",
+      expected_artifact_ref:exactReference(brief),
       payload_sha256:sha256Canonical(brief),
       status:briefReference ? "PERSISTED" : "COLLECTED",
       artifact_ref:briefReference,
@@ -243,7 +254,7 @@ function initialFeatureState(featureArtifact,classification,brief,persistedBrief
 }
 
 export async function startFeatureDesign(
-  store,featureArtifact,{readOnly=false,authorityRegistry={actors:[]}}={},
+  store,featureArtifact,{readOnly=false,authorityCapability}={},
 ) {
   if (featureArtifact?.document_type!=="feature-delta" ||
       featureArtifact.content?.stage!=="PREPARED") {
@@ -276,6 +287,10 @@ export async function startFeatureDesign(
     persistedBrief=existing ?? await store.append(brief);
   }
   const draft=initialFeatureState(featureArtifact,classification,brief,persistedBrief);
+  const orchestrator=createDesignOrchestrator({
+    authorityRegistry:registryFromDesignAuthorityCapability(authorityCapability),
+  });
+  orchestrator.verifyStateSnapshot({content:draft.content,provenance:draft.provenance});
   let history=[...(await store.list({
     document_type:"design-orchestration-state",artifact_id:draft.artifact_id,
   }))].sort((left,right) => left.revision-right.revision);
@@ -291,11 +306,17 @@ export async function startFeatureDesign(
     );
   }
   if (history.length===0) history=[await store.append(draft)];
-  const orchestrator=createDesignOrchestrator({authorityRegistry});
   const state=verifyStateHistory(orchestrator,history);
+  const blocked=new Set([
+    "CRITICAL_DOWNGRADE_APPROVAL","DIRECTION_APPROVAL",
+    "DESIGN_SYSTEM_APPROVAL","FINAL_APPROVAL",
+  ]).has(state.content.gate);
   return deepFreeze({
-    level:classification.effective_level,
+    level:state.content.classification.effective_level,
     state:state.content.state,
+    gate:state.content.gate,
+    blocked,
+    ...(blocked ? {command_exit_code:4} : {}),
     state_revision:exactReference(state),
     artifact_revisions:state.content.artifact_refs,
   });
@@ -304,7 +325,8 @@ export async function startFeatureDesign(
 function stateResult(artifact,{reused=[],projection=artifact.content}={}) {
   const content=projection;
   const blocked=new Set([
-    "DIRECTION_APPROVAL","DESIGN_SYSTEM_APPROVAL","FINAL_APPROVAL",
+    "CRITICAL_DOWNGRADE_APPROVAL","DIRECTION_APPROVAL",
+    "DESIGN_SYSTEM_APPROVAL","FINAL_APPROVAL",
   ]).has(content.gate);
   const approvedKinds=new Set(content.approvals.map(record => record.approval_kind));
   const approved=[
@@ -356,6 +378,11 @@ async function reconciledStatus(store,artifact) {
       return commitment;
     }
     const reference=exactReference(match);
+    if (canonicalJson(commitment.expected_artifact_ref)!==canonicalJson(reference)) {
+      throw new OrchestrationError(
+        "INPUT_STALE","Design commitment resolved to an unexpected artifact revision",6,
+      );
+    }
     if (commitment.artifact_ref!==null &&
         canonicalJson(commitment.artifact_ref)!==canonicalJson(reference)) {
       throw new OrchestrationError(
@@ -385,6 +412,7 @@ async function stateHistory(store,designId) {
 
 const STATE_SEQUENCE=Object.freeze({
   INITIALIZED:0,
+  DOWNGRADE_PENDING:0,
   DIRECTION_PENDING:1,
   SYSTEM_PENDING:2,
   SYSTEM_APPROVED:3,
@@ -397,6 +425,7 @@ function stateCommitmentIdentity(content) {
   return content.payload_commitments.map(row => canonicalJson({
     stage:row.stage,
     expected_document_type:row.expected_document_type,
+    expected_artifact_ref:row.expected_artifact_ref,
     payload_sha256:row.payload_sha256,
   })).sort();
 }
@@ -419,7 +448,7 @@ function verifyStateHistory(orchestrator,history) {
       );
     }
     if (!previous && (artifact.revision!==1 || !new Set([
-      "INITIALIZED","DIRECTION_PENDING","NOT_APPLICABLE",
+      "INITIALIZED","DOWNGRADE_PENDING","DIRECTION_PENDING","NOT_APPLICABLE",
     ]).has(artifact.content.state))) {
       throw new OrchestrationError(
         "DESIGN_STATE_INVALID","Design state history begins from an illegal root",6,
@@ -430,16 +459,27 @@ function verifyStateHistory(orchestrator,history) {
       const approvals=artifact.content.approvals;
       const priorCommitments=stateCommitmentIdentity(previous.content);
       const commitments=stateCommitmentIdentity(artifact.content);
-      const commitmentContinuity=previous.content.state==="INITIALIZED" ?
+      const commitmentContinuity=previous.content.state==="DOWNGRADE_PENDING" ? true :
+        previous.content.state==="INITIALIZED" ?
         priorCommitments.every(key => commitments.includes(key)) :
         canonicalJson(priorCommitments)===canonicalJson(commitments);
+      const classificationContinuity=
+        canonicalJson(artifact.content.classification)===
+          canonicalJson(previous.content.classification) ||
+        (previous.content.state==="DOWNGRADE_PENDING" &&
+          previous.content.classification.requires_downgrade_approval===true &&
+          artifact.content.classification.requires_downgrade_approval===false &&
+          artifact.content.classification.recommended_level==="CRITICAL" &&
+          artifact.content.classification.effective_level===
+            previous.content.classification.classification_input.requested_level &&
+          canonicalJson(artifact.content.classification.classification_input)===
+            canonicalJson(previous.content.classification.classification_input));
       const rank=STATE_SEQUENCE[artifact.content.state];
       const previousRank=STATE_SEQUENCE[previous.content.state];
       if (artifact.revision!==previous.revision+1 ||
           canonicalJson(artifact.parents)!==canonicalJson([exactReference(previous)]) ||
           canonicalJson(artifact.provenance)!==canonicalJson(previous.provenance) ||
-          canonicalJson(artifact.content.classification)!==
-            canonicalJson(previous.content.classification) ||
+          !classificationContinuity ||
           approvals.length<priorApprovals.length || priorApprovals.some((record,index) =>
             canonicalJson(record)!==canonicalJson(approvals[index])) ||
           !commitmentContinuity || rank!==previousRank+1 ||
@@ -574,10 +614,10 @@ function assertApprovalHistoryTransition(previous,input,commandName) {
     if (commandName==="design.approve") expected=["__PERSISTED_GATE_REQUIRED__"];
   } else if (commandName==="design.approve") {
     expected={
+      CRITICAL_DOWNGRADE_APPROVAL:["CRITICAL_DOWNGRADE"],
       DIRECTION_APPROVAL:["VISUAL_DIRECTION"],
       DESIGN_SYSTEM_APPROVAL:["DESIGN_SYSTEM"],
       FINAL_APPROVAL:[],
-      COMPLETE:[],
     }[previous.content.gate] ?? ["__PERSISTED_GATE_REQUIRED__"];
   }
   if (canonicalJson(additions)!==canonicalJson(expected)) {
@@ -630,7 +670,9 @@ export async function runDesignCommand(command,serviceInput) {
   const store=createVerifiedArtifactCatalog(rawServices.store);
   await store.refresh();
   const orchestrator=createDesignOrchestrator({
-    authorityRegistry:rawServices.authorityRegistry ?? {actors:[]},
+    authorityRegistry:registryFromDesignAuthorityCapability(
+      rawServices.authorityCapability,
+    ),
   });
   if (normalized.name==="design.status") {
     const history=await latestAnyState(store);
@@ -639,6 +681,13 @@ export async function runDesignCommand(command,serviceInput) {
     return status;
   }
   const input=await acquireDesignInput(normalized,rawServices);
+  if (input.approval_records.length>0 && rawServices.authorityCapability===undefined) {
+    throw new OrchestrationError(
+      "DESIGN_RUNTIME_REQUIRED",
+      "Signed design approvals require a constructor-bound authority capability",
+      4,
+    );
+  }
   const result=await runWithInput(normalized,store,input,orchestrator);
   await store.refresh();
   return result;

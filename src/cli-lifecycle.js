@@ -8,84 +8,18 @@ import {
   EXIT_CODES,
   parseCommand,
 } from "./commands/router.js";
+import {
+  createLifecycleRuntimeProvider,
+  DesignRuntimeAuthorityError,
+  lifecycleRuntimeServices,
+} from "./design-runtime-authority.js";
 import {failureResult} from "./output/command-result.js";
 
 const NO_FOLLOW=fs.constants.O_NOFOLLOW ?? 0;
-const TRUSTED_RUNTIME_PROVIDERS=new WeakSet();
 const INPUT_FAMILIES=new Set(["project","feature","design"]);
 const UNIMPLEMENTED_FAMILIES=new Set(["artifacts","validate"]);
 
-class LifecycleRuntimeError extends Error {
-  constructor(code,message,exitCode) {
-    super(message);
-    this.name="LifecycleRuntimeError";
-    this.code=code;
-    this.exitCode=exitCode;
-  }
-}
-
-function canonicalCopy(value,label) {
-  const ancestors=new Set();
-  function copy(item,pathLabel) {
-    if (item===null || typeof item==="string" || typeof item==="boolean") return item;
-    if (typeof item==="number" && Number.isFinite(item)) return item;
-    if (!item || typeof item!=="object" || utilTypes.isProxy(item)) {
-      throw new TypeError(`${pathLabel} must contain only canonical JSON values`);
-    }
-    if (ancestors.has(item)) throw new TypeError(`${pathLabel} must not contain cycles`);
-    ancestors.add(item);
-    try {
-      const array=Array.isArray(item);
-      const prototype=Object.getPrototypeOf(item);
-      if (array ? prototype!==Array.prototype :
-        (prototype!==Object.prototype && prototype!==null)) {
-        throw new TypeError(`${pathLabel} must use canonical JSON prototypes`);
-      }
-      const descriptors=Object.getOwnPropertyDescriptors(item);
-      const keys=Reflect.ownKeys(descriptors);
-      if (keys.some(key => typeof key==="symbol")) {
-        throw new TypeError(`${pathLabel} symbol properties are unsupported`);
-      }
-      if (array) {
-        const names=keys.filter(key => key!=="length").sort((left,right) =>
-          Number(left)-Number(right));
-        if (names.length!==item.length ||
-            names.some((key,index) => key!==String(index))) {
-          throw new TypeError(`${pathLabel} arrays must be dense and closed`);
-        }
-        return names.map(key => {
-          const descriptor=descriptors[key];
-          if (!descriptor.enumerable || !("value" in descriptor)) {
-            throw new TypeError(`${pathLabel} accessor or hidden values are unsupported`);
-          }
-          return copy(descriptor.value,`${pathLabel}[${key}]`);
-        });
-      }
-      const result=Object.create(null);
-      for (const key of keys.sort()) {
-        const descriptor=descriptors[key];
-        if (!descriptor.enumerable || !("value" in descriptor)) {
-          throw new TypeError(`${pathLabel} accessor or hidden values are unsupported`);
-        }
-        result[key]=copy(descriptor.value,`${pathLabel}.${key}`);
-      }
-      return result;
-    } finally {
-      ancestors.delete(item);
-    }
-  }
-  try {
-    return copy(value,label);
-  } catch (error) {
-    throw new TypeError(`${label} must be canonical JSON`,{cause:error});
-  }
-}
-
-function deepFreeze(value) {
-  if (!value || typeof value!=="object" || Object.isFrozen(value)) return value;
-  for (const child of Object.values(value)) deepFreeze(child);
-  return Object.freeze(value);
-}
+export {createLifecycleRuntimeProvider,lifecycleRuntimeServices};
 
 function dataRecord(value,label,allowed,{required=[]}={}) {
   if (!value || typeof value!=="object" || Array.isArray(value) || utilTypes.isProxy(value) ||
@@ -109,40 +43,6 @@ function dataRecord(value,label,allowed,{required=[]}={}) {
     if (!Object.hasOwn(descriptors,key)) throw new TypeError(`${label} requires ${key}`);
   }
   return result;
-}
-
-function callable(value,label) {
-  if (typeof value!=="function" || utilTypes.isProxy(value)) {
-    throw new TypeError(`${label} must be a non-proxy function`);
-  }
-  return value;
-}
-
-export function createLifecycleRuntimeProvider(value) {
-  const record=dataRecord(
-    value,"lifecycle runtime provider configuration",
-    new Set(["authorityRegistry","prompt"]),
-    {required:["authorityRegistry","prompt"]},
-  );
-  const authorityRegistry=deepFreeze(canonicalCopy(
-    record.authorityRegistry,"lifecycle authority registry",
-  ));
-  const prompt=callable(record.prompt,"lifecycle prompt");
-  const provider=Object.freeze({
-    services:() => Object.freeze({authorityRegistry,prompt}),
-  });
-  TRUSTED_RUNTIME_PROVIDERS.add(provider);
-  return provider;
-}
-
-function runtimeServices(provider) {
-  if (provider===undefined) return null;
-  if (!TRUSTED_RUNTIME_PROVIDERS.has(provider)) {
-    throw new LifecycleRuntimeError(
-      "DESIGN_RUNTIME_INVALID","Lifecycle runtime provider is not constructor-bound",4,
-    );
-  }
-  return provider.services();
 }
 
 function readLifecycleInput(base,inputPath) {
@@ -179,17 +79,17 @@ async function lifecycleContext(command,base,runtimeProvider) {
   if (needsInputReader(command)) {
     services.readInput=async inputPath => readLifecycleInput(base,inputPath);
   }
-  const runtime=runtimeServices(runtimeProvider);
+  const runtime=runtimeProvider===undefined ? null :
+    lifecycleRuntimeServices(runtimeProvider);
   if (needsDesignRuntime(command) && !runtime) {
-    throw new LifecycleRuntimeError(
+    throw new DesignRuntimeAuthorityError(
       "DESIGN_RUNTIME_REQUIRED",
       "Interactive or approval design commands require a trusted runtime provider",
-      4,
     );
   }
   if (runtime) {
     services.prompt=runtime.prompt;
-    services.authorityRegistry=runtime.authorityRegistry;
+    services.authorityCapability=runtime.authorityCapability;
   }
   return Object.freeze({services:Object.freeze(services)});
 }

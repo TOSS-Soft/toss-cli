@@ -146,7 +146,8 @@
     "payload_commitment":{
       "type":"object","additionalProperties":false,
       "required":[
-        "stage","expected_document_type","payload_sha256","status","artifact_ref"
+        "stage","expected_document_type","expected_artifact_ref",
+        "payload_sha256","status","artifact_ref"
       ],
       "properties":{
         "stage":{"enum":[
@@ -159,6 +160,7 @@
           "wireframe-plan","visual-direction","design-system","screen-spec",
           "prototype-manifest","usability-evidence","design-audit","design-approval"
         ]},
+        "expected_artifact_ref":{"$ref":"#/$defs/artifact_ref"},
         "payload_sha256":{"$ref":"#/$defs/sha256"},
         "status":{"enum":["COLLECTED","APPROVED","PERSISTED"]},
         "artifact_ref":{"oneOf":[{"$ref":"#/$defs/artifact_ref"},{"type":"null"}]}
@@ -203,12 +205,12 @@
           ]}
         },
         "state":{"enum":[
-          "INITIALIZED","ANALYZED","FLOWS_READY","WIREFRAMES_READY",
+          "INITIALIZED","DOWNGRADE_PENDING","ANALYZED","FLOWS_READY","WIREFRAMES_READY",
           "DIRECTION_PENDING","DIRECTION_APPROVED","SYSTEM_PENDING","SYSTEM_APPROVED",
           "SCREENS_READY","PROTOTYPE_READY","USABILITY_EVIDENCE_READY","AUDITED",
           "FINAL_APPROVAL_PENDING","APPROVED","NOT_APPLICABLE"
         ]},
-        "gate":{"enum":["NONE","DIRECTION_APPROVAL","DESIGN_SYSTEM_APPROVAL","FINAL_APPROVAL","COMPLETE","NOT_APPLICABLE"]},
+        "gate":{"enum":["NONE","CRITICAL_DOWNGRADE_APPROVAL","DIRECTION_APPROVAL","DESIGN_SYSTEM_APPROVAL","FINAL_APPROVAL","COMPLETE","NOT_APPLICABLE"]},
         "artifact_refs":{"type":"array","uniqueItems":true,"items":{"$ref":"#/$defs/artifact_ref"}},
         "payload_commitments":{"type":"array","uniqueItems":true,"items":{"$ref":"#/$defs/payload_commitment"}},
         "approvals":{"type":"array","uniqueItems":true,"items":{"$ref":"#/$defs/signed_approval"}},

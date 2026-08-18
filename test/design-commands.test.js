@@ -3,7 +3,11 @@ import test from "node:test";
 
 import {dispatchCommand,parseCommand} from "../src/commands/router.js";
 import {sha256Canonical} from "../src/contracts/acp.js";
-import {commandStore} from "./support/command-fixture.js";
+import {
+  createLifecycleRuntimeProvider,
+  lifecycleRuntimeServices,
+} from "../src/cli-lifecycle.js";
+import {commandStore,memoryCommandStore} from "./support/command-fixture.js";
 import {
   approvalsFor,
   artifactReference,
@@ -21,12 +25,16 @@ const designModule=await import("../src/commands/design.js").catch(error => {
   throw error;
 });
 const runDesignCommand=designModule.runDesignCommand;
+const authorityCapability=lifecycleRuntimeServices(createLifecycleRuntimeProvider({
+  authorityRegistry:authorityRegistry(),
+  prompt:async () => null,
+})).authorityCapability;
 
 function services(store,input) {
   return {
     artifactStore:store,
     readInput:async () => JSON.stringify(input),
-    authorityRegistry:authorityRegistry(),
+    authorityCapability,
   };
 }
 
@@ -61,6 +69,53 @@ function instrumentStore(delegate,{failAtDesignAppend=Infinity}={}) {
 async function designRows(store) {
   return (await store.list()).filter(row =>
     row.document_type!=="design-orchestration-state");
+}
+
+function graphWithForgedArtifactIdentities(graph) {
+  const forged=[];
+  const byType=new Map();
+  for (const source of graph) {
+    const artifact=structuredClone(source);
+    artifact.artifact_id=`${artifact.document_type}:DESIGN-FORGED`;
+    const remap=reference => artifactReference(byType.get(reference.document_type));
+    artifact.parents=artifact.parents.map(remap);
+    artifact.inputs=artifact.inputs.map(remap);
+    if (artifact.document_type==="design-approval") {
+      artifact.content.graph_manifest=forged.map(artifactReference).sort((left,right) =>
+        JSON.stringify(left).localeCompare(JSON.stringify(right)));
+      artifact.content.graph_root_sha256=sha256Canonical(
+        artifact.content.graph_manifest,
+      );
+    }
+    artifact.content_sha256=sha256Canonical(artifact.content);
+    forged.push(artifact);
+    byType.set(artifact.document_type,artifact);
+  }
+  return forged;
+}
+
+function historyWithForgedCommitments(history,graph) {
+  const byType=new Map(graph.map(row => [row.document_type,row]));
+  const result=[];
+  for (const source of history) {
+    const artifact=structuredClone(source);
+    artifact.content.payload_commitments=artifact.content.payload_commitments.map(row => {
+      const candidate=byType.get(row.expected_document_type);
+      return {
+        ...row,
+        expected_artifact_ref:artifactReference(candidate),
+        payload_sha256:sha256Canonical(candidate),
+        artifact_ref:row.artifact_ref===null ? null : artifactReference(candidate),
+      };
+    });
+    artifact.content.artifact_refs=artifact.content.payload_commitments.filter(row =>
+      row.artifact_ref!==null).map(row => row.artifact_ref);
+    artifact.inputs=artifact.content.artifact_refs;
+    artifact.parents=result.length===0 ? [] : [artifactReference(result.at(-1))];
+    artifact.content_sha256=sha256Canonical(artifact.content);
+    result.push(artifact);
+  }
+  return result;
 }
 
 async function reachSystemGate(store,graph) {
@@ -119,7 +174,7 @@ test("missing or stale gate replay fails before any design or state append",asyn
   await assert.rejects(
     runDesignCommand(
       parsed("prepare",["--continue"]),
-      {artifactStore:store,authorityRegistry:authorityRegistry()},
+      {artifactStore:store,authorityCapability},
     ),
     error => error?.code==="INPUT_REQUIRED",
   );
@@ -184,7 +239,7 @@ test("interrupted physical append resumes idempotently and status stays truthful
   assert.equal(partial.length,2);
   const interruptedStatus=await runDesignCommand(
     parsed("status"),
-    {artifactStore:backing,authorityRegistry:authorityRegistry()},
+    {artifactStore:backing,authorityCapability},
   );
   assert.equal(interruptedStatus.persisted.length,2);
   assert.equal(interruptedStatus.payload_commitments.filter(row =>
@@ -208,7 +263,7 @@ test("interrupted physical append resumes idempotently and status stays truthful
 
   const status=await runDesignCommand(
     parsed("status"),
-    {artifactStore:backing,authorityRegistry:authorityRegistry()},
+    {artifactStore:backing,authorityCapability},
   );
   assert.equal(status.state,"FINAL_APPROVAL_PENDING");
   assert.equal(status.persisted.length,afterResume.length);
@@ -240,6 +295,11 @@ test("the complete design family supports router modes and final approval",async
   assert.equal(final.state,"APPROVED");
   assert.equal(final.gate,"COMPLETE");
   assert.ok(final.artifact_revisions.some(row => row.document_type==="design-approval"));
+  const completeRows=await store.list();
+  await assert.rejects(runDesignCommand(
+    parsed("approve",["--from","design.json"]),services(store,approved),
+  ),error => error?.code==="ILLEGAL_DESIGN_TRANSITION");
+  assert.deepEqual(await store.list(),completeRows);
 
   const interactiveStore=await commandStore(t);
   const promptInput=designCommandInput({artifacts:graph});
@@ -249,12 +309,12 @@ test("the complete design family supports router modes and final approval",async
       assert.equal(request.kind,"design");
       return promptInput;
     },
-    authorityRegistry:authorityRegistry(),
+    authorityCapability,
   });
   assert.equal(prompted.state,"DIRECTION_PENDING");
   await assert.rejects(
     runDesignCommand(parsed("init",["--non-interactive"]),{
-      artifactStore:await commandStore(t),authorityRegistry:authorityRegistry(),
+      artifactStore:await commandStore(t),authorityCapability,
     }),
     error => error?.code==="INPUT_REQUIRED",
   );
@@ -273,6 +333,52 @@ test("approve is illegal without one persisted pending gate and appends nothing"
     ),
     error => error?.code==="ILLEGAL_DESIGN_TRANSITION",
   );
+  assert.deepEqual(await store.list(),before);
+});
+
+test("a raw caller registry cannot authorize a design gate",async t => {
+  const store=await commandStore(t);
+  const graph=graphForLevel();
+  const rawServices=input => ({
+    artifactStore:store,
+    readInput:async () => JSON.stringify(input),
+    authorityRegistry:authorityRegistry(),
+  });
+  await runDesignCommand(
+    parsed("prepare",["--from","design.json"]),
+    rawServices(designCommandInput({artifacts:graph})),
+  );
+  const before=await store.list();
+  const direction=signedStageApproval(
+    "VISUAL_DIRECTION",graph.filter(row => DIRECTION_TYPES.includes(row.document_type)),
+  );
+  await assert.rejects(runDesignCommand(
+    parsed("approve",["--from","design.json"]),
+    rawServices(designCommandInput({artifacts:graph,approvalRecords:[direction]})),
+  ),error => new Set(["DESIGN_RUNTIME_REQUIRED","DESIGN_AUTHORITY_INVALID"]).has(
+    error?.code,
+  ));
+  assert.deepEqual(await store.list(),before);
+
+  let proxyReads=0;
+  const forgedCapabilities=[Object.freeze({}),new Proxy({}, {
+    get() {
+      proxyReads+=1;
+      return undefined;
+    },
+  })];
+  for (const forgedCapability of forgedCapabilities) {
+    await assert.rejects(runDesignCommand(
+      parsed("approve",["--from","design.json"]),{
+        artifactStore:store,
+        readInput:async () => JSON.stringify(designCommandInput({
+          artifacts:graph,approvalRecords:[direction],
+        })),
+        authorityCapability:forgedCapability,
+      },
+    ),error => error?.code==="DESIGN_RUNTIME_INVALID");
+  }
+  assert.equal(proxyReads,0);
   assert.deepEqual(await store.list(),before);
 });
 
@@ -414,12 +520,41 @@ test("design status rejects fabricated semantic completion, crypto, and no-op hi
       forged.content_sha256=sha256Canonical(forged.content);
       await store.append(forged);
       await assert.rejects(runDesignCommand(
-        parsed("status"),{artifactStore:store,authorityRegistry:authorityRegistry()},
+        parsed("status"),{artifactStore:store,authorityCapability},
       ),error => new Set([
         "DESIGN_STATE_INVALID","DESIGN_AUTHORITY_INVALID","INPUT_STALE",
       ]).has(error?.code));
     });
   }
+});
+
+test("design status rejects signed approvals replayed onto different committed artifacts",async t => {
+  const sourceStore=memoryCommandStore();
+  const graph=graphForLevel();
+  const approved=await reachSystemGate(sourceStore,graph);
+  await runDesignCommand(
+    parsed("prepare",["--from","design.json"]),services(sourceStore,approved),
+  );
+  await runDesignCommand(
+    parsed("approve",["--from","design.json"]),services(sourceStore,approved),
+  );
+  const forgedGraph=graphWithForgedArtifactIdentities(graph);
+  const sourceHistory=await sourceStore.list({
+    document_type:"design-orchestration-state",
+  });
+  const forgedHistory=historyWithForgedCommitments(sourceHistory,forgedGraph);
+  const maliciousStore=memoryCommandStore();
+  for (const artifact of forgedGraph) await maliciousStore.append(artifact);
+  for (const artifact of forgedHistory) await maliciousStore.append(artifact);
+
+  await assert.rejects(runDesignCommand(
+    parsed("status"),{
+      artifactStore:maliciousStore,
+      authorityCapability,
+    },
+  ),error => new Set([
+    "DESIGN_AUTHORITY_INVALID","DESIGN_STATE_INVALID","INPUT_STALE",
+  ]).has(error?.code));
 });
 
 test("every design approval gate dispatches as structured blocked exit four",async t => {

@@ -1,8 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import {
+  createLifecycleRuntimeProvider,
+  lifecycleRuntimeServices,
+} from "../src/cli-lifecycle.js";
 import {dispatchCommand} from "../src/commands/router.js";
+import {canonicalJson,sha256Canonical} from "../src/contracts/acp.js";
 import {artifactReference,clone,rehash} from "./support/trace-fixture.js";
+import {
+  authorityRegistry,
+  classificationInput,
+  designCommandInput,
+  graphForLevel,
+  signedStageApproval,
+} from "./support/design-command-fixture.js";
 import {
   commandServices,
   commandStore,
@@ -23,6 +35,11 @@ const projectModule=await import("../src/commands/project.js").catch(error => {
 });
 const runFeatureCommand=featureModule.runFeatureCommand;
 const runProjectCommand=projectModule.runProjectCommand;
+const designModule=await import("../src/commands/design.js").catch(error => {
+  if (error?.code==="ERR_MODULE_NOT_FOUND") return {};
+  throw error;
+});
+const runDesignCommand=designModule.runDesignCommand;
 const commandsAvailable=typeof runFeatureCommand==="function" &&
   typeof runProjectCommand==="function";
 
@@ -43,6 +60,41 @@ async function readyProject(t,{real=false}={}) {
 
 function featureServices(store,input,options) {
   return commandServices(store,input,options);
+}
+
+function downgradedFeatureGraph(input) {
+  const graph=graphForLevel("LITE");
+  const prepared=[];
+  const byType=new Map();
+  for (const source of graph) {
+    const artifact=clone(source);
+    artifact.run_id=input.run_id;
+    artifact.runtime_identity=clone(input.runtime_identity);
+    artifact.created_at=input.created_at;
+    artifact.provenance=clone(input.provenance);
+    const remap=reference => artifactReference(byType.get(reference.document_type));
+    artifact.parents=artifact.parents.map(remap);
+    artifact.inputs=artifact.inputs.map(remap);
+    if (artifact.document_type==="design-brief") {
+      artifact.content.design_id="DESIGN-FEATURE-001";
+      artifact.content.source=input.design_impact.source;
+      artifact.content.purpose=input.design_impact.purpose;
+      artifact.content.success_criteria=clone(input.design_impact.success_criteria);
+      artifact.content.approval_owner=clone(input.design_impact.approval_owner);
+    }
+    if (artifact.document_type==="design-approval") {
+      artifact.content.authority=clone(input.design_impact.approval_owner);
+      artifact.content.graph_manifest=prepared.map(artifactReference).sort((left,right) =>
+        canonicalJson(left).localeCompare(canonicalJson(right)));
+      artifact.content.graph_root_sha256=sha256Canonical(
+        artifact.content.graph_manifest,
+      );
+    }
+    artifact.content_sha256=sha256Canonical(artifact.content);
+    prepared.push(artifact);
+    byType.set(artifact.document_type,artifact);
+  }
+  return prepared;
 }
 
 test("feature add/analyze/prepare creates immutable delta revisions over one exact base",{
@@ -148,6 +200,88 @@ test("UI feature prepare starts a provenance-bound design state without pre-gate
   assert.equal((await store.list({document_type:"design-orchestration-state"})).length,1);
 });
 
+test("Critical feature downgrade starts from one valid pending bootstrap state",{
+  skip:!commandsAvailable,
+},async t => {
+  const {store}=await readyProject(t);
+  const input=featureCommandInput({designImpact:{
+    delivery_targets:["WEB"],
+    affected_surfaces:["SCREEN"],
+    risk_signals:["SECURITY_PRIVACY"],
+    requested_level:"LITE",
+    source:"company_system",
+    purpose:"Protect a user-visible sensitive-data workflow.",
+    success_criteria:["The sensitive flow is usable without weakening privacy."],
+    approval_owner:{role:"CEO",identity:"verified-ceo"},
+  }});
+  const result=await runFeatureCommand(
+    parsedCommand("feature.prepare",{from:"feature.json"}),
+    featureServices(store,input),
+  );
+  assert.equal(result.design.level,"CRITICAL");
+  assert.equal(result.design.state,"DOWNGRADE_PENDING");
+  assert.equal(result.design.gate,"CRITICAL_DOWNGRADE_APPROVAL");
+  assert.equal(result.design.blocked,true);
+  assert.equal(result.design.command_exit_code,4);
+  const states=await store.list({document_type:"design-orchestration-state"});
+  assert.equal(states.length,1);
+  const status=await runFeatureCommand(
+    parsedCommand("feature.status"),featureServices(store,input),
+  );
+  assert.equal(status.design.state,"DOWNGRADE_PENDING");
+
+  const graph=downgradedFeatureGraph(input);
+  const classification=classificationInput({
+    scope:{kind:"feature",id:"FEATURE-001"},
+    delivery_targets:input.design_impact.delivery_targets,
+    affected_surfaces:input.design_impact.affected_surfaces,
+    risk_signals:input.design_impact.risk_signals,
+    requested_level:"LITE",
+    source:input.design_impact.source,
+    purpose:input.design_impact.purpose,
+    success_criteria:input.design_impact.success_criteria,
+    approval_owner:input.design_impact.approval_owner,
+  });
+  const downgrade=signedStageApproval("CRITICAL_DOWNGRADE",graph,{
+    design_id:"DESIGN-FEATURE-001",
+    level:"LITE",
+    recommended_level:"CRITICAL",
+    effective_level:"LITE",
+    from_level:"CRITICAL",
+    to_level:"LITE",
+    source_revision:input.provenance.source_revision,
+    source_sha256:input.provenance.source_sha256,
+  });
+  const replay=designCommandInput({
+    artifacts:graph,approvalRecords:[downgrade],classification,
+  });
+  replay.design_id="DESIGN-FEATURE-001";
+  replay.created_at=input.created_at;
+  replay.run_id=input.run_id;
+  replay.runtime_identity=clone(input.runtime_identity);
+  replay.provenance=clone(input.provenance);
+  const authorityCapability=lifecycleRuntimeServices(createLifecycleRuntimeProvider({
+    authorityRegistry:authorityRegistry(),prompt:async () => null,
+  })).authorityCapability;
+  const advanced=await runDesignCommand(
+    parsedCommand("design.approve",{from:"design.json"}),{
+      artifactStore:store,
+      readInput:async () => JSON.stringify(replay),
+      authorityCapability,
+    },
+  );
+  assert.equal(advanced.level,"LITE");
+  assert.equal(advanced.state,"DIRECTION_PENDING");
+  assert.equal((await store.list({document_type:"design-orchestration-state"})).length,2);
+  const continuedStatus=await runFeatureCommand(
+    parsedCommand("feature.status"),{
+      ...featureServices(store,input),authorityCapability,
+    },
+  );
+  assert.equal(continuedStatus.design.level,"LITE");
+  assert.equal(continuedStatus.design.state,"DIRECTION_PENDING");
+});
+
 test("feature status follows a valid descendant design state instead of comparing it to bootstrap",{
   skip:!commandsAvailable,
 },async t => {
@@ -189,6 +323,13 @@ test("feature status follows a valid descendant design state instead of comparin
     (documentType,index) => ({
       stage:stages[documentType],
       expected_document_type:documentType,
+      expected_artifact_ref:documentType==="design-brief" ?
+        initial.content.payload_commitments[0].expected_artifact_ref : {
+          document_type:documentType,
+          artifact_id:`${documentType}:DESIGN-FEATURE-001`,
+          revision:1,
+          content_sha256:"abcdef12345"[index].repeat(64),
+        },
       payload_sha256:documentType==="design-brief" ?
         initial.content.payload_commitments[0].payload_sha256 :
         "123456789ab"[index].repeat(64),

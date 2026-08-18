@@ -81,8 +81,17 @@ function deepFreeze(value) {
 }
 
 function canonicalCopy(value,label) {
+  const visited=new Set();
+  function rejectProxyTree(item) {
+    if (!item || typeof item!=="object" || visited.has(item)) return;
+    if (utilTypes.isProxy(item)) throw new TypeError("proxies are unsupported");
+    visited.add(item);
+    for (const descriptor of Object.values(Object.getOwnPropertyDescriptors(item))) {
+      if ("value" in descriptor) rejectProxyTree(descriptor.value);
+    }
+  }
   try {
-    if (utilTypes.isProxy(value)) throw new TypeError("proxies are unsupported");
+    rejectProxyTree(value);
     return JSON.parse(canonicalJson(value));
   } catch (error) {
     throw new TypeError(`${label} must be canonical JSON`,{cause:error});
@@ -132,6 +141,34 @@ function uniqueDesignBrief(graph) {
   return briefs[0];
 }
 
+function canonicalPublicKey(value,label) {
+  if (typeof value!=="string" || value.trim().length===0) {
+    throw new TypeError(`${label} must be a non-blank string`);
+  }
+  if (value.replace(/\r\n/gu,"").includes("\r")) {
+    throw new TypeError(`${label} must use LF or CRLF line endings`);
+  }
+  const input=value.replace(/\r\n/gu,"\n");
+  const normalizedInput=input.endsWith("\n") ? input : `${input}\n`;
+  let publicKey;
+  let normalizedPublicKey;
+  try {
+    publicKey=createPublicKey(normalizedInput);
+    normalizedPublicKey=publicKey.export({format:"pem",type:"spki"}).toString();
+  } catch (error) {
+    throw new TypeError(`${label} is not a valid public PEM key`,{cause:error});
+  }
+  if (publicKey.asymmetricKeyType!=="ed25519") {
+    throw new TypeError(`${label} must be an Ed25519 public key`);
+  }
+  if (normalizedInput!==normalizedPublicKey) {
+    throw new TypeError(
+      `${label} must contain exactly one canonical Ed25519 SPKI public PEM block`,
+    );
+  }
+  return publicKey;
+}
+
 function normalizedRegistry(value) {
   const registry=canonicalCopy(value ?? {actors:[]},"design authority registry");
   exactObject(registry,"design authority registry",["actors"]);
@@ -155,10 +192,9 @@ function normalizedRegistry(value) {
         actor.allowed_routes[0].verification_kind!=="A3_VERIFIED_CEO_OR_USER_AUTHORITY") {
       throw new TypeError("design authority registry only accepts the A3 verified route");
     }
-    const publicKey=createPublicKey(actor.public_key);
-    if (publicKey.asymmetricKeyType!=="ed25519") {
-      throw new TypeError("design authority public key must be Ed25519");
-    }
+    const publicKey=canonicalPublicKey(
+      actor.public_key,"design authority public_key",
+    );
     actors.set(actor.actor_id,{...actor,publicKey});
   }
   return actors;
@@ -277,11 +313,9 @@ function assertApproval(record,kind,level,graph,types) {
   }
 }
 
-function exactReferenceTypes(actual,required,allowed) {
-  if (!Array.isArray(actual)) return false;
-  const expected=required.filter(type => allowed.has(type)).sort();
-  const types=actual.map(row => row.document_type);
-  return new Set(types).size===types.length && same(types.sort(),expected);
+function expectedCommitmentReferences(content,allowed) {
+  return content.payload_commitments.filter(row =>
+    allowed.has(row.expected_document_type)).map(row => row.expected_artifact_ref);
 }
 
 function assertStateApproval(record,kind,level,content,provenance,types) {
@@ -290,7 +324,7 @@ function assertStateApproval(record,kind,level,content,provenance,types) {
       record.source_sha256!==provenance.source_sha256 ||
       record.recommended_level!==level || record.effective_level!==level ||
       record.from_level!==null || record.to_level!==null ||
-      !exactReferenceTypes(record.artifact_refs,content.required_artifact_types,types)) {
+      !sameReferenceSet(record.artifact_refs,expectedCommitmentReferences(content,types))) {
     throw new TypeError(`${kind} state approval is not bound to the exact design source`);
   }
 }
@@ -302,10 +336,9 @@ function assertStateDowngrade(record,classification,level,content,provenance) {
       record.source_sha256!==provenance.source_sha256 ||
       record.recommended_level!=="CRITICAL" || record.from_level!=="CRITICAL" ||
       record.to_level!==level || record.effective_level!==level ||
-      !exactReferenceTypes(
-        record.artifact_refs,content.required_artifact_types,
-        new Set(content.required_artifact_types),
-      )) {
+      !sameReferenceSet(record.artifact_refs,expectedCommitmentReferences(
+        content,new Set(content.required_artifact_types),
+      ))) {
     throw new TypeError("critical downgrade state approval is stale or cross-source");
   }
   if (classification.classification_input.requested_level!==level) {
@@ -316,15 +349,20 @@ function assertStateDowngrade(record,classification,level,content,provenance) {
 function commitmentShape(content,{initialized}) {
   const expectedTypes=initialized ? ["design-brief"] : content.required_artifact_types;
   const actualTypes=content.payload_commitments.map(row => row.expected_document_type);
+  const expectedReferences=content.payload_commitments.map(row =>
+    row.expected_artifact_ref);
   if (new Set(actualTypes).size!==actualTypes.length ||
+      new Set(expectedReferences.map(row => canonicalJson(row))).size!==
+        expectedReferences.length ||
       !same([...actualTypes].sort(),[...expectedTypes].sort())) {
     throw new TypeError("design state commitments do not close the required artifact set");
   }
   for (const row of content.payload_commitments) {
     if (STAGE_BY_TYPE[row.expected_document_type]!==row.stage ||
+        row.expected_artifact_ref.document_type!==row.expected_document_type ||
         (row.artifact_ref===null)!==(row.status!=="PERSISTED") ||
         (row.artifact_ref!==null &&
-          row.artifact_ref.document_type!==row.expected_document_type)) {
+          !same(row.artifact_ref,row.expected_artifact_ref))) {
       throw new TypeError("design state commitment status or stage is inconsistent");
     }
   }
@@ -341,6 +379,7 @@ function commitments(graph,persisted,approvedKinds) {
     return {
       stage,
       expected_document_type:artifact.document_type,
+      expected_artifact_ref:artifactRef,
       payload_sha256:sha256Canonical(artifact),
       status:isPersisted ? "PERSISTED" : isApproved ? "APPROVED" : "COLLECTED",
       artifact_ref:isPersisted ? artifactRef : null,
@@ -450,7 +489,10 @@ function assertTargetCommand(targetCommand,result) {
     throw new TypeError("design target command is unsupported");
   }
   if (targetCommand==="design.approve" &&
-      new Set(["DIRECTION_APPROVAL","NOT_APPLICABLE"]).has(result.gate)) {
+      (result.gate==="NOT_APPLICABLE" ||
+        (result.gate==="DIRECTION_APPROVAL" &&
+          !result.next_state_content.approvals.some(row =>
+            row.approval_kind==="CRITICAL_DOWNGRADE")))) {
     throw new TypeError("design approve cannot bypass the current legal gate");
   }
 }
@@ -467,15 +509,20 @@ function verifyStateSnapshot(value,actors) {
   }
   let level=classified.effective_level;
   const expectedKinds=[];
+  let downgradePending=false;
   if (classified.requires_downgrade_approval) {
-    level=classified.classification_input.requested_level;
     const downgrade=approvals.find(row => row.approval_kind==="CRITICAL_DOWNGRADE");
-    assertStateDowngrade(downgrade,classified,level,content,provenance);
-    expectedKinds.push("CRITICAL_DOWNGRADE");
+    if (!downgrade) {
+      downgradePending=true;
+    } else {
+      level=classified.classification_input.requested_level;
+      assertStateDowngrade(downgrade,classified,level,content,provenance);
+      expectedKinds.push("CRITICAL_DOWNGRADE");
+    }
   } else if (kinds.includes("CRITICAL_DOWNGRADE")) {
     throw new TypeError("design state contains an unexpected critical downgrade approval");
   }
-  const expectedClassification={
+  const expectedClassification=downgradePending ? classified : {
     ...classified,effective_level:level,requires_downgrade_approval:false,
   };
   if (!same(content.classification,expectedClassification) ||
@@ -485,8 +532,22 @@ function verifyStateSnapshot(value,actors) {
       content.findings.length!==0) {
     throw new TypeError("design state classification or level requirements are inconsistent");
   }
-  const initialized=content.state==="INITIALIZED";
+  const initialized=new Set(["INITIALIZED","DOWNGRADE_PENDING"]).has(content.state);
   commitmentShape(content,{initialized});
+  if (downgradePending) {
+    if (approvals.length!==0 || content.state!=="DOWNGRADE_PENDING" ||
+        content.gate!=="CRITICAL_DOWNGRADE_APPROVAL" ||
+        content.artifact_refs.length!==0 ||
+        content.payload_commitments[0].status!=="COLLECTED" ||
+        !same(content.next_action,{
+          command:"toss design approve",
+          owner:"USER",
+          reason:"Critical downgrade approval is required.",
+        })) {
+      throw new TypeError("pending Critical downgrade state is inconsistent");
+    }
+    return deepFreeze(snapshot);
+  }
   if (initialized) {
     if (level==="NOT_APPLICABLE" || approvals.length!==0 ||
         content.gate!=="NONE" || content.artifact_refs.length!==0 ||
@@ -634,9 +695,19 @@ export function prepareDesign(context) {
 }
 
 export function createDesignOrchestrator(options={}) {
-  const normalized=canonicalCopy(options,"design orchestrator options");
-  exactObject(normalized,"design orchestrator options",["authorityRegistry"]);
-  const actors=normalizedRegistry(normalized.authorityRegistry);
+  if (!options || typeof options!=="object" || Array.isArray(options) ||
+      utilTypes.isProxy(options) ||
+      !new Set([Object.prototype,null]).has(Object.getPrototypeOf(options))) {
+    throw new TypeError("design orchestrator options must be a plain non-proxy object");
+  }
+  const descriptors=Object.getOwnPropertyDescriptors(options);
+  const keys=Reflect.ownKeys(descriptors);
+  if (keys.length!==1 || keys[0]!=="authorityRegistry" ||
+      !descriptors.authorityRegistry.enumerable ||
+      !("value" in descriptors.authorityRegistry)) {
+    throw new TypeError("design orchestrator options require one authorityRegistry value");
+  }
+  const actors=normalizedRegistry(descriptors.authorityRegistry.value);
   return Object.freeze({
     prepareDesign:context => prepareWithActors(context,actors),
     verifyStateSnapshot:value => verifyStateSnapshot(value,actors),

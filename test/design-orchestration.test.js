@@ -287,6 +287,56 @@ test("prepareDesign rejects undeclared target commands",() => {
   }),/target command|unsupported/i);
 });
 
+test("design authority registry accepts only canonical Ed25519 SPKI public PEM",() => {
+  const privatePem=PRIVATE_KEY.export({format:"pem",type:"pkcs8"}).toString();
+  for (const publicKey of [
+    privatePem,
+    `${PUBLIC_KEY}junk`,
+    `${PUBLIC_KEY}${PUBLIC_KEY}`,
+  ]) assert.throws(() => createDesignOrchestrator({authorityRegistry:{actors:[{
+    actor_id:"verified-ceo",actor_role:"CEO",public_key:publicKey,
+    allowed_routes:[{
+      authority:"A3",verification_kind:"A3_VERIFIED_CEO_OR_USER_AUTHORITY",
+    }],
+  }]}}),/public|SPKI|canonical/i);
+
+  let reads=0;
+  const actor={
+    actor_id:"verified-ceo",actor_role:"CEO",
+    allowed_routes:[{
+      authority:"A3",verification_kind:"A3_VERIFIED_CEO_OR_USER_AUTHORITY",
+    }],
+  };
+  Object.defineProperty(actor,"public_key",{
+    enumerable:true,
+    get() {
+      reads+=1;
+      return PUBLIC_KEY;
+    },
+  });
+  assert.throws(() => createDesignOrchestrator({
+    authorityRegistry:{actors:[actor]},
+  }),/canonical|accessor/i);
+  assert.throws(() => createDesignOrchestrator({
+    authorityRegistry:new Proxy(authorityRegistry(),{
+      get() {
+        reads+=1;
+        return undefined;
+      },
+    }),
+  }),/canonical|proxies/i);
+  const nestedActor=new Proxy(authorityRegistry().actors[0],{
+    get() {
+      reads+=1;
+      return undefined;
+    },
+  });
+  assert.throws(() => createDesignOrchestrator({
+    authorityRegistry:{actors:[nestedActor]},
+  }),/canonical|proxies/i);
+  assert.equal(reads,0);
+});
+
 function stateArtifact() {
   const classification=classifyDesignLevel(classificationInput());
   const content={
@@ -304,6 +354,12 @@ function stateArtifact() {
     payload_commitments:[{
       stage:"BRIEF",
       expected_document_type:"design-brief",
+      expected_artifact_ref:{
+        document_type:"design-brief",
+        artifact_id:"design-brief:DESIGN-CHECKOUT",
+        revision:1,
+        content_sha256:"d".repeat(64),
+      },
       payload_sha256:"c".repeat(64),
       status:"COLLECTED",
       artifact_ref:null,

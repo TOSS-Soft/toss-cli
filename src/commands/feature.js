@@ -159,7 +159,7 @@ async function currentFeature(store,input) {
   return {history,latest};
 }
 
-async function runStages(command,store,input,targetStage,authorityRegistry) {
+async function runStages(command,store,input,targetStage,authorityCapability) {
   const base=await readyBase(store,input.project_id);
   let {history,latest}=await currentFeature(store,input);
   if (latest && !sameBase(latest.content.base_project,base)) {
@@ -177,7 +177,7 @@ async function runStages(command,store,input,targetStage,authorityRegistry) {
   }
   await verifyBaseSnapshot(store,base);
   const design=targetStage==="PREPARED" ? await startFeatureDesign(
-    store,latest,{authorityRegistry:authorityRegistry ?? {actors:[]}},
+    store,latest,{authorityCapability},
   ) : null;
   const result=deepFreeze({
     ...statusResult(latest,reused),
@@ -186,7 +186,7 @@ async function runStages(command,store,input,targetStage,authorityRegistry) {
   return targetStage==="PREPARED" ? blockAutomation(command,result) : result;
 }
 
-async function featureStatus(store,authorityRegistry) {
+async function featureStatus(store,authorityCapability) {
   const latest=await latestAnyFeature(store);
   const input=featureInputFromDelta(latest);
   const base=await readyBase(store,input.project_id);
@@ -197,7 +197,7 @@ async function featureStatus(store,authorityRegistry) {
   }
   const design=latest.content.stage==="PREPARED" ?
     await startFeatureDesign(store,latest,{
-      readOnly:true,authorityRegistry:authorityRegistry ?? {actors:[]},
+      readOnly:true,authorityCapability,
     }) : null;
   return deepFreeze({...statusResult(latest),...(design ? {design} : {})});
 }
@@ -213,7 +213,7 @@ export async function runFeatureCommand(command,serviceInput) {
   const services={...rawServices,store};
   let result;
   if (normalized.name==="feature.status") {
-    result=await featureStatus(services.store,services.authorityRegistry);
+    result=await featureStatus(services.store,services.authorityCapability);
   } else {
     const input=await resolveFeature(normalized,services);
     const target={
@@ -222,7 +222,7 @@ export async function runFeatureCommand(command,serviceInput) {
       "feature.prepare":"PREPARED",
     }[normalized.name];
     result=await runStages(
-      normalized,services.store,input,target,services.authorityRegistry,
+      normalized,services.store,input,target,services.authorityCapability,
     );
   }
   await store.refresh();
