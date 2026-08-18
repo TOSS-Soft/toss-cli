@@ -33,8 +33,9 @@ toss project prepare --continue
 ```
 
 `--from <FILE>` reads JSON or YAML only for commands that show that option.
-Without `--from`, prompt-capable commands run interactively; use
-`--non-interactive` in automation to fail closed instead of being prompted.
+The standalone CLI requires `--from` for input-requiring commands. Interactive
+prompting is available only to an embedding host that injects a prompt service.
+Use `--non-interactive` in automation to fail closed instead of being prompted.
 
 ## Project Lifecycle
 
