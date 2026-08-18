@@ -137,6 +137,14 @@ export function authorityRegistry() {
 
 export function signedStageApproval(kind,artifacts,overrides={}) {
   const level=overrides.level ?? "STANDARD";
+  const artifactCommitments=artifacts.map(artifact => ({
+    artifact_ref:artifactReference(artifact),
+    payload_sha256:sha256Canonical(artifact),
+  })).sort((left,right) => {
+    const leftKey=canonicalJson(left);
+    const rightKey=canonicalJson(right);
+    return leftKey<rightKey ? -1 : leftKey>rightKey ? 1 : 0;
+  });
   const unsigned={
     approval_kind:kind,
     decision:"APPROVED",
@@ -148,6 +156,7 @@ export function signedStageApproval(kind,artifacts,overrides={}) {
     from_level:overrides.from_level ?? null,
     to_level:overrides.to_level ?? null,
     artifact_refs:artifacts.map(artifactReference),
+    artifact_commitments:artifactCommitments,
     authority:"A3",
     verification_kind:"A3_VERIFIED_CEO_OR_USER_AUTHORITY",
     actor_id:"verified-ceo",
@@ -193,4 +202,8 @@ export function approvalsFor(graph) {
     signedStageApproval("VISUAL_DIRECTION",byTypes(DIRECTION_TYPES)),
     signedStageApproval("DESIGN_SYSTEM",byTypes(SYSTEM_TYPES)),
   ];
+}
+
+export function finalApprovalFor(graph) {
+  return signedStageApproval("FINAL",graph);
 }

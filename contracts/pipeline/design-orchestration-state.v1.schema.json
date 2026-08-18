@@ -19,6 +19,14 @@
     "sha256":{"type":"string","pattern":"^[a-f0-9]{64}$"},
     "level":{"enum":["NOT_APPLICABLE","LITE","STANDARD","CRITICAL"]},
     "artifact_ref":{"$ref":"https://toss.software/schemas/common/artifact-envelope.v1.schema.json#/$defs/artifact_revision_reference"},
+    "signed_artifact_commitment":{
+      "type":"object","additionalProperties":false,
+      "required":["artifact_ref","payload_sha256"],
+      "properties":{
+        "artifact_ref":{"$ref":"#/$defs/artifact_ref"},
+        "payload_sha256":{"$ref":"#/$defs/sha256"}
+      }
+    },
     "scope":{
       "type":"object","additionalProperties":false,
       "required":["kind","id"],
@@ -109,11 +117,12 @@
       "required":[
         "approval_kind","decision","design_id","source_revision","source_sha256",
         "recommended_level","effective_level","from_level","to_level","artifact_refs",
+        "artifact_commitments",
         "authority","verification_kind","actor_id","actor_role","record_id",
         "record_revision","record_sha256","timestamp","signature"
       ],
       "properties":{
-        "approval_kind":{"enum":["CRITICAL_DOWNGRADE","VISUAL_DIRECTION","DESIGN_SYSTEM"]},
+        "approval_kind":{"enum":["CRITICAL_DOWNGRADE","VISUAL_DIRECTION","DESIGN_SYSTEM","FINAL"]},
         "decision":{"const":"APPROVED"},
         "design_id":{"type":"string","minLength":1,"pattern":".*\\S.*"},
         "source_revision":{"type":"string","minLength":1,"pattern":".*\\S.*"},
@@ -123,6 +132,10 @@
         "from_level":{"oneOf":[{"$ref":"#/$defs/level"},{"type":"null"}]},
         "to_level":{"oneOf":[{"$ref":"#/$defs/level"},{"type":"null"}]},
         "artifact_refs":{"type":"array","uniqueItems":true,"items":{"$ref":"#/$defs/artifact_ref"}},
+        "artifact_commitments":{
+          "type":"array","uniqueItems":true,
+          "items":{"$ref":"#/$defs/signed_artifact_commitment"}
+        },
         "authority":{"const":"A3"},
         "verification_kind":{"const":"A3_VERIFIED_CEO_OR_USER_AUTHORITY"},
         "actor_id":{"type":"string","minLength":1,"pattern":".*\\S.*"},

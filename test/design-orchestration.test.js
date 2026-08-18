@@ -152,6 +152,14 @@ function trustedPrepareDesign(context) {
 function signedStageApproval(kind,artifacts,overrides={}) {
   assert.equal(typeof designApprovalSigningPayload,"function");
   const level=overrides.level ?? "STANDARD";
+  const artifactCommitments=artifacts.map(artifact => ({
+    artifact_ref:artifactReference(artifact),
+    payload_sha256:sha256Canonical(artifact),
+  })).sort((left,right) => {
+    const leftKey=canonicalJson(left);
+    const rightKey=canonicalJson(right);
+    return leftKey<rightKey ? -1 : leftKey>rightKey ? 1 : 0;
+  });
   const unsigned={
     approval_kind:kind,
     decision:"APPROVED",
@@ -163,6 +171,7 @@ function signedStageApproval(kind,artifacts,overrides={}) {
     from_level:overrides.from_level ?? null,
     to_level:overrides.to_level ?? null,
     artifact_refs:artifacts.map(artifactReference),
+    artifact_commitments:overrides.artifact_commitments ?? artifactCommitments,
     authority:"A3",
     verification_kind:"A3_VERIFIED_CEO_OR_USER_AUTHORITY",
     actor_id:"verified-ceo",
@@ -495,7 +504,7 @@ test("both signed stage gates authorize in-memory validation and topological per
     classification_input:input,
     design_artifacts:graph,
     persisted_artifacts:graph,
-    approval_records:approvals,
+    approval_records:[...approvals,signedStageApproval("FINAL",graph)],
     target_command:"design.approve",
   });
   assert.equal(approved.state,"APPROVED");
@@ -517,6 +526,39 @@ test("signed gate reference sets reject duplicate, missing, and extra members",(
   ];
   for (const artifacts of invalid) {
     const approval=signedStageApproval("VISUAL_DIRECTION",artifacts);
+    assert.throws(() => trustedPrepareDesign({
+      classification_input:input,
+      design_artifacts:graph,
+      persisted_artifacts:[],
+      approval_records:[approval],
+      target_command:"design.prepare",
+    }),/exact design payload/i);
+  }
+});
+
+test("signed payload commitment tuples reject missing, extra, duplicate, and reordered members",() => {
+  const graph=graphForLevel("STANDARD");
+  const input=classificationInput({
+    affected_surfaces:["SCREEN","FLOW","INFORMATION_ARCHITECTURE"],
+    risk_signals:["MULTI_SCREEN"],
+  });
+  const direction=artifactsOfTypes(graph,DIRECTION_TYPES);
+  const canonical=signedStageApproval("VISUAL_DIRECTION",direction)
+    .artifact_commitments;
+  const extra=signedStageApproval(
+    "DESIGN_SYSTEM",artifactsOfTypes(graph,SYSTEM_TYPES),
+  ).artifact_commitments.find(row =>
+    row.artifact_ref.document_type==="design-system");
+  const invalid=[
+    canonical.slice(1),
+    [...canonical,extra],
+    [...canonical,canonical[0]],
+    [...canonical].reverse(),
+  ];
+  for (const artifactCommitments of invalid) {
+    const approval=signedStageApproval("VISUAL_DIRECTION",direction,{
+      artifact_commitments:artifactCommitments,
+    });
     assert.throws(() => trustedPrepareDesign({
       classification_input:input,
       design_artifacts:graph,

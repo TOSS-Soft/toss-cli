@@ -1,6 +1,9 @@
 import {canonicalJson,sha256Canonical} from "../contracts/acp.js";
 import {registryFromDesignAuthorityCapability} from "../design-runtime-authority.js";
-import {validateDesignArtifact} from "../pipeline/design-contracts.js";
+import {
+  validateDesignArtifact,
+  validateDesignSystemRules,
+} from "../pipeline/design-contracts.js";
 import {classifyDesignLevel} from "../pipeline/design-level.js";
 import {createDesignOrchestrator} from "../pipeline/design-orchestrator.js";
 import {
@@ -56,6 +59,20 @@ const STAGES_BY_LEVEL=Object.freeze({
     "DIRECTION","DESIGN_SYSTEM","SCREENS","PROTOTYPE","USABILITY_EVIDENCE",
     "AUDIT","FINAL_APPROVAL",
   ]),
+});
+const INPUT_TYPES_BY_DOCUMENT=Object.freeze({
+  "design-brief":Object.freeze([]),
+  "ux-analysis":Object.freeze(["design-brief"]),
+  "information-architecture":Object.freeze(["design-brief","screen-spec"]),
+  "user-flow":Object.freeze(["design-brief"]),
+  "wireframe-plan":Object.freeze(["design-brief","user-flow","screen-spec"]),
+  "visual-direction":Object.freeze(["design-brief"]),
+  "design-system":Object.freeze(["design-brief"]),
+  "screen-spec":Object.freeze(["design-brief","user-flow","design-system"]),
+  "prototype-manifest":Object.freeze(["screen-spec"]),
+  "usability-evidence":Object.freeze(["user-flow","prototype-manifest"]),
+  "design-audit":Object.freeze(["design-system","screen-spec"]),
+  "design-approval":Object.freeze(["design-audit"]),
 });
 
 function closedRecord(value,label,keys) {
@@ -125,6 +142,7 @@ function normalizeDesignInput(value) {
       );
     }
   }
+  assertResolvedDesignGraph(input.artifacts);
   return deepFreeze(input);
 }
 
@@ -142,6 +160,46 @@ function graphCommitmentKeys(graph) {
     expected_artifact_ref:exactReference(artifact),
     payload_sha256:sha256Canonical(artifact),
   })).sort();
+}
+
+function sameReferenceSet(left,right) {
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length!==right.length) return false;
+  const leftKeys=left.map(row => canonicalJson(row));
+  const rightKeys=right.map(row => canonicalJson(row));
+  if (new Set(leftKeys).size!==leftKeys.length || new Set(rightKeys).size!==rightKeys.length) {
+    return false;
+  }
+  return canonicalJson(leftKeys.sort())===canonicalJson(rightKeys.sort());
+}
+
+function assertResolvedDesignGraph(graph) {
+  if (graph.length===0) return;
+  for (const artifact of graph) {
+    const validation=validateDesignArtifact(artifact,graph);
+    if (!validation.valid) {
+      throw new OrchestrationError(
+        "INPUT_STALE","Resolved design graph failed public artifact validation",6,
+      );
+    }
+  }
+  const rules=validateDesignSystemRules(graph);
+  if (!rules.valid) {
+    throw new OrchestrationError(
+      "INPUT_STALE","Resolved design graph failed public design-system validation",6,
+    );
+  }
+  const byType=new Map(graph.map(artifact => [artifact.document_type,artifact]));
+  for (const artifact of graph) {
+    const dependencyTypes=INPUT_TYPES_BY_DOCUMENT[artifact.document_type];
+    const dependencies=dependencyTypes?.map(type => byType.get(type));
+    if (!dependencyTypes || dependencies.some(row => row===undefined) ||
+        artifact.parents.length!==0 ||
+        !sameReferenceSet(artifact.inputs,dependencies.map(exactReference))) {
+      throw new OrchestrationError(
+        "INPUT_STALE","Resolved design graph violates exact envelope dependencies",6,
+      );
+    }
+  }
 }
 
 function assertExactReplay(input,previous) {
@@ -357,6 +415,7 @@ function stateResult(artifact,{reused=[],projection=artifact.content}={}) {
 
 async function reconciledStatus(store,artifact) {
   const rows=(await store.list({})).filter(row => DESIGN_TYPES.has(row.document_type));
+  const resolved=[];
   const commitments=artifact.content.payload_commitments.map(commitment => {
     const matches=rows.filter(row =>
       row.document_type===commitment.expected_document_type &&
@@ -389,8 +448,10 @@ async function reconciledStatus(store,artifact) {
         "INPUT_STALE","Persisted design state retargets an exact artifact commitment",6,
       );
     }
+    resolved.push(match);
     return {...commitment,status:"PERSISTED",artifact_ref:reference};
   });
+  assertResolvedDesignGraph(resolved);
   const artifactRefs=orderedArtifacts(commitments.filter(row => row.artifact_ref!==null)
     .map(row => row.artifact_ref));
   return stateResult(artifact,{
@@ -617,7 +678,7 @@ function assertApprovalHistoryTransition(previous,input,commandName) {
       CRITICAL_DOWNGRADE_APPROVAL:["CRITICAL_DOWNGRADE"],
       DIRECTION_APPROVAL:["VISUAL_DIRECTION"],
       DESIGN_SYSTEM_APPROVAL:["DESIGN_SYSTEM"],
-      FINAL_APPROVAL:[],
+      FINAL_APPROVAL:["FINAL"],
     }[previous.content.gate] ?? ["__PERSISTED_GATE_REQUIRED__"];
   }
   if (canonicalJson(additions)!==canonicalJson(expected)) {

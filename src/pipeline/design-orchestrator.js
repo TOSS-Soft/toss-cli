@@ -69,6 +69,7 @@ const SYSTEM_TYPES=new Set([...DIRECTION_TYPES,"design-system"]);
 const APPROVAL_KEYS=Object.freeze([
   "approval_kind","decision","design_id","source_revision","source_sha256",
   "recommended_level","effective_level","from_level","to_level","artifact_refs",
+  "artifact_commitments",
   "authority","verification_kind","actor_id","actor_role","record_id",
   "record_revision","record_sha256","timestamp","signature",
 ]);
@@ -131,6 +132,23 @@ function sameReferenceSet(left,right) {
     return false;
   }
   return canonicalJson(leftKeys.sort())===canonicalJson(rightKeys.sort());
+}
+
+function signedArtifactCommitment(artifact) {
+  return {
+    artifact_ref:reference(artifact),
+    payload_sha256:sha256Canonical(artifact),
+  };
+}
+
+function sameCommitmentSet(left,right) {
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length!==right.length) return false;
+  const leftKeys=left.map(commitment => canonicalJson(commitment));
+  const rightKeys=right.map(commitment => canonicalJson(commitment));
+  if (new Set(leftKeys).size!==leftKeys.length || new Set(rightKeys).size!==rightKeys.length) {
+    return false;
+  }
+  return canonicalJson(leftKeys)===canonicalJson(rightKeys.sort());
 }
 
 function uniqueDesignBrief(graph) {
@@ -255,7 +273,9 @@ function levelFromApprovedDowngrade(classification,approvals,graph) {
       record.design_id!==brief?.content?.design_id ||
       record.source_revision!==brief?.provenance?.source_revision ||
       record.source_sha256!==brief?.provenance?.source_sha256 ||
-      !sameReferenceSet(record.artifact_refs,graph.map(reference))) {
+      !sameReferenceSet(record.artifact_refs,graph.map(reference)) ||
+      !sameCommitmentSet(record.artifact_commitments,
+        graph.map(signedArtifactCommitment))) {
     throw new TypeError("critical downgrade approval is required before design can advance");
   }
   return requested;
@@ -301,14 +321,17 @@ function assertPersistedSubset(graph,persisted) {
 }
 
 function assertApproval(record,kind,level,graph,types) {
-  const expected=graph.filter(row => types.has(row.document_type)).map(reference);
+  const selected=graph.filter(row => types.has(row.document_type));
+  const expected=selected.map(reference);
   const brief=uniqueDesignBrief(graph);
   if (!record || record.approval_kind!==kind || record.design_id!==brief.content.design_id ||
       record.source_revision!==brief.provenance.source_revision ||
       record.source_sha256!==brief.provenance.source_sha256 ||
       record.recommended_level!==level || record.effective_level!==level ||
       record.from_level!==null || record.to_level!==null ||
-      !sameReferenceSet(record.artifact_refs,expected)) {
+      !sameReferenceSet(record.artifact_refs,expected) ||
+      !sameCommitmentSet(record.artifact_commitments,
+        selected.map(signedArtifactCommitment))) {
     throw new TypeError(`${kind} approval is not bound to the exact design payload`);
   }
 }
@@ -318,13 +341,23 @@ function expectedCommitmentReferences(content,allowed) {
     allowed.has(row.expected_document_type)).map(row => row.expected_artifact_ref);
 }
 
+function expectedSignedCommitments(content,allowed) {
+  return content.payload_commitments.filter(row =>
+    allowed.has(row.expected_document_type)).map(row => ({
+    artifact_ref:row.expected_artifact_ref,
+    payload_sha256:row.payload_sha256,
+  }));
+}
+
 function assertStateApproval(record,kind,level,content,provenance,types) {
   if (!record || record.approval_kind!==kind || record.design_id!==content.design_id ||
       record.source_revision!==provenance.source_revision ||
       record.source_sha256!==provenance.source_sha256 ||
       record.recommended_level!==level || record.effective_level!==level ||
       record.from_level!==null || record.to_level!==null ||
-      !sameReferenceSet(record.artifact_refs,expectedCommitmentReferences(content,types))) {
+      !sameReferenceSet(record.artifact_refs,expectedCommitmentReferences(content,types)) ||
+      !sameCommitmentSet(record.artifact_commitments,
+        expectedSignedCommitments(content,types))) {
     throw new TypeError(`${kind} state approval is not bound to the exact design source`);
   }
 }
@@ -338,7 +371,8 @@ function assertStateDowngrade(record,classification,level,content,provenance) {
       record.to_level!==level || record.effective_level!==level ||
       !sameReferenceSet(record.artifact_refs,expectedCommitmentReferences(
         content,new Set(content.required_artifact_types),
-      ))) {
+      )) || !sameCommitmentSet(record.artifact_commitments,
+        expectedSignedCommitments(content,new Set(content.required_artifact_types)))) {
     throw new TypeError("critical downgrade state approval is stale or cross-source");
   }
   if (classification.classification_input.requested_level!==level) {
@@ -390,6 +424,7 @@ function commitments(graph,persisted,approvedKinds) {
 function outcome({classification,level,graph,persisted,approvals}) {
   const direction=approvals.find(row => row.approval_kind==="VISUAL_DIRECTION");
   const system=approvals.find(row => row.approval_kind==="DESIGN_SYSTEM");
+  const final=approvals.find(row => row.approval_kind==="FINAL");
   const approved=[];
   let state;
   let gate;
@@ -403,6 +438,7 @@ function outcome({classification,level,graph,persisted,approvals}) {
     blocked=false;
     nextAction={command:"toss design status",owner:"DESIGN_SPECIALIST",reason:"Design is not applicable."};
   } else if (!direction) {
+    if (system || final) throw new TypeError("design approvals are not in canonical gate order");
     state="DIRECTION_PENDING";
     gate="DIRECTION_APPROVAL";
     blocked=true;
@@ -411,6 +447,7 @@ function outcome({classification,level,graph,persisted,approvals}) {
     assertApproval(direction,"VISUAL_DIRECTION",level,graph,DIRECTION_TYPES);
     approved.push("DIRECTION");
     if (!system) {
+      if (final) throw new TypeError("design approvals are not in canonical gate order");
       state="SYSTEM_PENDING";
       gate="DESIGN_SYSTEM_APPROVAL";
       blocked=true;
@@ -424,6 +461,13 @@ function outcome({classification,level,graph,persisted,approvals}) {
       const nonFinalTypes=graph.filter(row => row.document_type!=="design-approval")
         .map(row => row.document_type);
       const allNonFinalPersisted=nonFinalTypes.every(type => persistedTypes.has(type));
+      if (final) {
+        assertApproval(final,"FINAL",level,graph,new Set(REQUIRED_TYPES[level]));
+        approved.push("FINAL_APPROVAL");
+        if (!allNonFinalPersisted) {
+          throw new TypeError("final approval cannot precede exact non-final persistence");
+        }
+      }
       if (persisted.length===0 || !allNonFinalPersisted) {
         state="SYSTEM_APPROVED";
         gate="NONE";
@@ -435,7 +479,7 @@ function outcome({classification,level,graph,persisted,approvals}) {
           reason:persisted.length===0 ? "Replay the exact approved payload for persistence." :
             "Resume exact approved payload persistence.",
         };
-      } else if (!persisted.some(row => row.document_type==="design-approval")) {
+      } else if (!final || !persisted.some(row => row.document_type==="design-approval")) {
         state="FINAL_APPROVAL_PENDING";
         gate="FINAL_APPROVAL";
         blocked=true;
@@ -573,6 +617,7 @@ function verifyStateSnapshot(value,actors) {
   }
   const direction=approvals.find(row => row.approval_kind==="VISUAL_DIRECTION");
   const system=approvals.find(row => row.approval_kind==="DESIGN_SYSTEM");
+  const final=approvals.find(row => row.approval_kind==="FINAL");
   if (direction) {
     assertStateApproval(direction,"VISUAL_DIRECTION",level,content,provenance,DIRECTION_TYPES);
     expectedKinds.push("VISUAL_DIRECTION");
@@ -581,6 +626,13 @@ function verifyStateSnapshot(value,actors) {
     if (!direction) throw new TypeError("design-system approval cannot precede direction");
     assertStateApproval(system,"DESIGN_SYSTEM",level,content,provenance,SYSTEM_TYPES);
     expectedKinds.push("DESIGN_SYSTEM");
+  }
+  if (final) {
+    if (!system) throw new TypeError("final approval cannot precede design-system approval");
+    assertStateApproval(
+      final,"FINAL",level,content,provenance,new Set(content.required_artifact_types),
+    );
+    expectedKinds.push("FINAL");
   }
   if (!same(kinds,expectedKinds)) {
     throw new TypeError("design state approvals are not one canonical ordered history");
@@ -629,7 +681,7 @@ function verifyStateSnapshot(value,actors) {
           "Replay the exact approved payload for persistence." :
           "Resume exact approved payload persistence.",
       };
-    } else if (!persistedTypes.has("design-approval")) {
+    } else if (!final || !persistedTypes.has("design-approval")) {
       expectedState="FINAL_APPROVAL_PENDING";
       expectedGate="FINAL_APPROVAL";
       expectedAction={

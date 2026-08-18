@@ -15,6 +15,7 @@ import {
   classificationInput,
   designCommandInput,
   DIRECTION_TYPES,
+  finalApprovalFor,
   graphForLevel,
   signedStageApproval,
   SYSTEM_TYPES,
@@ -36,6 +37,13 @@ function services(store,input) {
     readInput:async () => JSON.stringify(input),
     authorityCapability,
   };
+}
+
+function withFinalApproval(graph,input) {
+  return designCommandInput({
+    artifacts:graph,
+    approvalRecords:[...input.approval_records,finalApprovalFor(graph)],
+  });
 }
 
 function parsed(name,options=[]) {
@@ -111,6 +119,33 @@ function historyWithForgedCommitments(history,graph) {
     artifact.content.artifact_refs=artifact.content.payload_commitments.filter(row =>
       row.artifact_ref!==null).map(row => row.artifact_ref);
     artifact.inputs=artifact.content.artifact_refs;
+    artifact.parents=result.length===0 ? [] : [artifactReference(result.at(-1))];
+    artifact.content_sha256=sha256Canonical(artifact.content);
+    result.push(artifact);
+  }
+  return result;
+}
+
+function historyWithResignedCommitments(history,graph) {
+  const selectedArtifacts=(kind) => kind==="VISUAL_DIRECTION" ?
+    graph.filter(row => DIRECTION_TYPES.includes(row.document_type)) :
+    kind==="DESIGN_SYSTEM" ?
+      graph.filter(row => SYSTEM_TYPES.includes(row.document_type)) : graph;
+  const remapped=historyWithForgedCommitments(history,graph);
+  const result=[];
+  for (const source of remapped) {
+    const artifact=structuredClone(source);
+    artifact.content.approvals=artifact.content.approvals.map(record =>
+      signedStageApproval(record.approval_kind,selectedArtifacts(record.approval_kind),{
+        design_id:record.design_id,
+        source_revision:record.source_revision,
+        source_sha256:record.source_sha256,
+        recommended_level:record.recommended_level,
+        effective_level:record.effective_level,
+        from_level:record.from_level,
+        to_level:record.to_level,
+        record_id:record.record_id,
+      }));
     artifact.parents=result.length===0 ? [] : [artifactReference(result.at(-1))];
     artifact.content_sha256=sha256Canonical(artifact.content);
     result.push(artifact);
@@ -290,14 +325,15 @@ test("the complete design family supports router modes and final approval",async
   assert.equal(prepared.state,"FINAL_APPROVAL_PENDING");
   const final=await runDesignCommand(
     parsed("approve",["--from","design.json"]),
-    services(store,approved),
+    services(store,withFinalApproval(graph,approved)),
   );
   assert.equal(final.state,"APPROVED");
   assert.equal(final.gate,"COMPLETE");
   assert.ok(final.artifact_revisions.some(row => row.document_type==="design-approval"));
   const completeRows=await store.list();
   await assert.rejects(runDesignCommand(
-    parsed("approve",["--from","design.json"]),services(store,approved),
+    parsed("approve",["--from","design.json"]),
+    services(store,withFinalApproval(graph,approved)),
   ),error => error?.code==="ILLEGAL_DESIGN_TRANSITION");
   assert.deepEqual(await store.list(),completeRows);
 
@@ -536,7 +572,8 @@ test("design status rejects signed approvals replayed onto different committed a
     parsed("prepare",["--from","design.json"]),services(sourceStore,approved),
   );
   await runDesignCommand(
-    parsed("approve",["--from","design.json"]),services(sourceStore,approved),
+    parsed("approve",["--from","design.json"]),
+    services(sourceStore,withFinalApproval(graph,approved)),
   );
   const forgedGraph=graphWithForgedArtifactIdentities(graph);
   const sourceHistory=await sourceStore.list({
@@ -555,6 +592,70 @@ test("design status rejects signed approvals replayed onto different committed a
   ),error => new Set([
     "DESIGN_AUTHORITY_INVALID","DESIGN_STATE_INVALID","INPUT_STALE",
   ]).has(error?.code));
+});
+
+test("design status rejects signed approvals replayed onto rewritten envelope dependencies",async () => {
+  const sourceStore=memoryCommandStore();
+  const graph=graphForLevel();
+  const approved=await reachSystemGate(sourceStore,graph);
+  await runDesignCommand(
+    parsed("prepare",["--from","design.json"]),services(sourceStore,approved),
+  );
+  await runDesignCommand(
+    parsed("approve",["--from","design.json"]),
+    services(sourceStore,withFinalApproval(graph,approved)),
+  );
+  const rewrittenGraph=graph.map(source => ({
+    ...structuredClone(source),
+    parents:[],
+    inputs:[],
+  }));
+  assert.equal(graph.reduce(
+    (count,row) => count+row.parents.length+row.inputs.length,0,
+  ),16);
+  const sourceHistory=await sourceStore.list({
+    document_type:"design-orchestration-state",
+  });
+  const rewrittenHistory=historyWithForgedCommitments(sourceHistory,rewrittenGraph);
+  const maliciousStore=memoryCommandStore();
+  for (const artifact of rewrittenGraph) await maliciousStore.append(artifact);
+  for (const artifact of rewrittenHistory) await maliciousStore.append(artifact);
+
+  await assert.rejects(runDesignCommand(
+    parsed("status"),{
+      artifactStore:maliciousStore,
+      authorityCapability,
+    },
+  ),error => new Set([
+    "DESIGN_AUTHORITY_INVALID","DESIGN_STATE_INVALID","INPUT_STALE",
+  ]).has(error?.code));
+});
+
+test("design status rejects an authority-signed but dependency-invalid resolved graph",async () => {
+  const sourceStore=memoryCommandStore();
+  const graph=graphForLevel();
+  const approved=await reachSystemGate(sourceStore,graph);
+  await runDesignCommand(
+    parsed("prepare",["--from","design.json"]),services(sourceStore,approved),
+  );
+  await runDesignCommand(
+    parsed("approve",["--from","design.json"]),
+    services(sourceStore,withFinalApproval(graph,approved)),
+  );
+  const rewrittenGraph=graph.map(source => ({
+    ...structuredClone(source),parents:[],inputs:[],
+  }));
+  const sourceHistory=await sourceStore.list({
+    document_type:"design-orchestration-state",
+  });
+  const rewrittenHistory=historyWithResignedCommitments(sourceHistory,rewrittenGraph);
+  const maliciousStore=memoryCommandStore();
+  for (const artifact of rewrittenGraph) await maliciousStore.append(artifact);
+  for (const artifact of rewrittenHistory) await maliciousStore.append(artifact);
+
+  await assert.rejects(runDesignCommand(
+    parsed("status"),{artifactStore:maliciousStore,authorityCapability},
+  ),error => error?.code==="INPUT_STALE");
 });
 
 test("every design approval gate dispatches as structured blocked exit four",async t => {

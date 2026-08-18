@@ -10,6 +10,7 @@ import {
   authorityRegistry,
   designCommandInput,
   DIRECTION_TYPES,
+  finalApprovalFor,
   graphForLevel,
   signedStageApproval,
 } from "./support/design-command-fixture.js";
@@ -109,7 +110,10 @@ test("runtime-composed interactive CLI completes signed gates and never prompts 
     designCommandInput({artifacts:graph,approvalRecords:[direction]}),
     designCommandInput({artifacts:graph,approvalRecords:approved}),
     designCommandInput({artifacts:graph,approvalRecords:approved}),
-    designCommandInput({artifacts:graph,approvalRecords:approved}),
+    designCommandInput({
+      artifacts:graph,
+      approvalRecords:[...approved,finalApprovalFor(graph)],
+    }),
   ];
   let promptCalls=0;
   const runtimeProvider=createLifecycleRuntimeProvider({
