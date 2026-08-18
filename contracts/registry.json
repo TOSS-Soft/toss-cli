@@ -74,6 +74,30 @@
       ]
     },
     {
+      "document_type": "project-input",
+      "schema_version": "acp.v1",
+      "producer": "orchestrator",
+      "consumers": ["orchestrator", "human-reviewer"],
+      "allowed_mutations": ["append a new immutable project-input revision"],
+      "forbidden_actions": [
+        "mutate an existing revision",
+        "treat supplied material as an approval or authority attestation",
+        "change a PM-owned, architect-owned, or auditor-owned artifact"
+      ]
+    },
+    {
+      "document_type": "feature-delta",
+      "schema_version": "acp.v1",
+      "producer": "orchestrator",
+      "consumers": ["orchestrator", "spec-auditor", "human-reviewer"],
+      "allowed_mutations": ["append a new immutable feature-delta revision"],
+      "forbidden_actions": [
+        "mutate an existing revision",
+        "change any base project artifact or analysis state",
+        "claim authority over PM-owned, architect-owned, or auditor-owned entities"
+      ]
+    },
+    {
       "document_type": "github-publication-result",
       "schema_version": "acp.v1",
       "producer": "issue-publisher",

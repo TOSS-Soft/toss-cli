@@ -241,6 +241,18 @@ function handlerFor(context,name) {
   return Object.getOwnPropertyDescriptor(context.handlers,name)?.value ?? null;
 }
 
+async function builtinHandler(name) {
+  if (name.startsWith("project.")) {
+    const {runProjectCommand}=await import("./project.js");
+    return runProjectCommand;
+  }
+  if (name.startsWith("feature.")) {
+    const {runFeatureCommand}=await import("./feature.js");
+    return runFeatureCommand;
+  }
+  return null;
+}
+
 async function dispatchTrace(command,context) {
   const {runTraceCommand}=await import("./trace.js");
   const traceContext=Object.create(null);
@@ -323,7 +335,8 @@ export async function dispatchCommand(command,context={}) {
         await dispatchTrace(normalized,normalizedContext),
       ));
     }
-    const handler=handlerFor(normalizedContext,normalized.name);
+    const handler=handlerFor(normalizedContext,normalized.name) ??
+      await builtinHandler(normalized.name);
     if (!handler) {
       return result(EXIT_CODES.NOT_IMPLEMENTED,failureResult({
         code:"COMMAND_NOT_IMPLEMENTED",
@@ -333,7 +346,11 @@ export async function dispatchCommand(command,context={}) {
     const data=await Reflect.apply(
       handler,undefined,[normalized,normalizedContext.services],
     );
-    return result(EXIT_CODES.SUCCESS,successResult(data));
+    const succeeded=successResult(data);
+    const exitCode=succeeded.data?.blocked===true &&
+      succeeded.data?.command_exit_code===EXIT_CODES.BLOCKED ?
+      EXIT_CODES.BLOCKED : EXIT_CODES.SUCCESS;
+    return result(exitCode,succeeded);
   } catch (error) {
     const failure=closedFailure(error);
     return result(failure.exitCode,failure.result);

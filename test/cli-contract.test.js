@@ -770,9 +770,10 @@ test("trace dispatch maps stable input and store categories to documented exit c
   }
 });
 
-test("every declared future command dispatches to the safe unavailable result",async () => {
+test("every remaining declared future command dispatches to the safe unavailable result",async () => {
   for (const row of commandMatrix) {
-    if (row.name==="trace" || row.argv.includes("--apply")) continue;
+    if (row.name==="trace" || row.name.startsWith("project.") ||
+        row.name.startsWith("feature.") || row.argv.includes("--apply")) continue;
     const dispatched=await dispatchCommand(parseCommand(row.argv),{});
     assert.equal(dispatched.exitCode,EXIT_CODES.NOT_IMPLEMENTED,row.name);
     assert.equal(dispatched.result.error.code,"COMMAND_NOT_IMPLEMENTED",row.name);
@@ -911,6 +912,7 @@ test("legacy fast scaffold keeps nonalphabetic names and explicit scaffold optio
   assert.equal(fs.existsSync(path.join(destination,"project.json")),true);
 
   const lifecycle=runCli(["project","status"],{cwd:directory});
-  assert.equal(lifecycle.status,EXIT_CODES.NOT_IMPLEMENTED,lifecycle.stderr);
+  assert.equal(lifecycle.status,EXIT_CODES.INVALID_INPUT,lifecycle.stderr);
+  assert.match(lifecycle.stderr,/persisted project input/i);
   assert.equal(fs.existsSync(path.join(directory,"project","project.json")),false);
 });

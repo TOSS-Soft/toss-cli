@@ -22,6 +22,8 @@ const schemaDefinitions=[
   ["trace-result.v1","../../contracts/pipeline/trace-result.v1.schema.json"],
   ["command-result.v1","../../contracts/pipeline/command-result.v1.schema.json"],
   ["transition-event.v1","../../contracts/pipeline/transition-event.v1.schema.json"],
+  ["project-input.v1","../../contracts/pipeline/project-input.v1.schema.json"],
+  ["feature-delta.v1","../../contracts/pipeline/feature-delta.v1.schema.json"],
   ["pdor-result.v1","../../contracts/pipeline/pdor-result.v1.schema.json"],
   ["github-publication-result.v1","../../contracts/pipeline/github-publication-result.v1.schema.json"],
 ];
