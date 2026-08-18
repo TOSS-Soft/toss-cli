@@ -47,6 +47,21 @@
         "signature": {"type": "string", "pattern": "^[A-Za-z0-9+/]{86}==$"}
       }
     },
+    "authority_registry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "registry_id", "revision", "content_sha256", "actor_id",
+        "public_key_fingerprint"
+      ],
+      "properties": {
+        "registry_id": {"$ref": "#/$defs/material_string"},
+        "revision": {"type": "integer", "minimum": 1},
+        "content_sha256": {"$ref": "#/$defs/sha256"},
+        "actor_id": {"$ref": "#/$defs/material_string"},
+        "public_key_fingerprint": {"$ref": "#/$defs/sha256"}
+      }
+    },
     "mapping": {
       "type": "object",
       "additionalProperties": false,
@@ -64,7 +79,7 @@
       "required": ["local_issue_id", "code", "message", "retryable"],
       "properties": {
         "local_issue_id": {"type": "string", "pattern": "^ISSUE-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"},
-        "code": {"$ref": "#/$defs/material_string"},
+        "code": {"enum": ["API_UNAVAILABLE", "PERMISSION_DENIED", "RATE_LIMITED"]},
         "message": {"$ref": "#/$defs/material_string"},
         "retryable": {"const": true}
       }
@@ -74,7 +89,7 @@
       "additionalProperties": false,
       "required": [
         "status", "repository", "source_revision", "source_sha256",
-        "issue_plan", "approval_record", "mappings", "failures"
+        "issue_plan", "authority_registry", "approval_record", "mappings", "failures"
       ],
       "properties": {
         "status": {"enum": ["retryable", "complete"]},
@@ -82,9 +97,14 @@
         "source_revision": {"$ref": "#/$defs/material_string"},
         "source_sha256": {"$ref": "#/$defs/sha256"},
         "issue_plan": {"$ref": "#/$defs/artifact_reference"},
+        "authority_registry": {"$ref": "#/$defs/authority_registry"},
         "approval_record": {"$ref": "#/$defs/approval_record"},
         "mappings": {"type": "array", "items": {"$ref": "#/$defs/mapping"}},
-        "failures": {"type": "array", "items": {"$ref": "#/$defs/failure"}}
+        "failures": {
+          "type": "array",
+          "maxItems": 1,
+          "items": {"$ref": "#/$defs/failure"}
+        }
       }
     }
   }

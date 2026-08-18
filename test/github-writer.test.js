@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
-import {createPrivateKey,sign as signDetached} from "node:crypto";
+import {
+  createHash,
+  createPrivateKey,
+  createPublicKey,
+  generateKeyPairSync,
+  sign as signDetached,
+} from "node:crypto";
 import {mkdtemp,readFile,rm} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
@@ -110,7 +116,38 @@ function readyContext({twoIssues=false}={}) {
   };
 }
 
-function authorityFor(context,overrides={}) {
+function publicKeyFingerprint(publicKey=PUBLIC_KEY) {
+  return createHash("sha256").update(createPublicKey(publicKey).export({
+    type:"spki",
+    format:"der",
+  })).digest("hex");
+}
+
+function trustedAuthorityRegistry(overrides={}) {
+  const unsigned={
+    schema_version:"github-publication-authority-registry.v1",
+    registry_id:"toss-github-publication-authorities",
+    revision:7,
+    actors:[{
+      actor_id:"verified-publisher",
+      actor_role:"USER",
+      public_key:PUBLIC_KEY,
+      public_key_fingerprint:publicKeyFingerprint(),
+      allowed_publications:[
+        {approval_kind:"GITHUB_ISSUE_PUBLICATION",repository:"TOSS-Soft/toss-cli"},
+        {approval_kind:"GITHUB_ISSUE_PUBLICATION",repository:"TOSS-Soft/other-repo"},
+      ],
+    }],
+    ...overrides,
+  };
+  return {...unsigned,content_sha256:sha256Canonical(unsigned)};
+}
+
+function configuredWriter({adapter,store,authorityRegistry=trustedAuthorityRegistry()}) {
+  return createGitHubWriter({adapter,store,authorityRegistry});
+}
+
+function signedApprovalFor(context,overrides={},privateKey=PRIVATE_KEY) {
   const plan=context.artifacts.issuePlan;
   const approval={
     approval_kind:"GITHUB_ISSUE_PUBLICATION",
@@ -131,26 +168,17 @@ function authorityFor(context,overrides={}) {
     ...approval,
   };
   return {
-    authorityRegistry:{
-      actors:[{
-        actor_id:"verified-publisher",
-        actor_role:"USER",
-        public_key:PUBLIC_KEY,
-        allowed_publications:[{
-          approval_kind:"GITHUB_ISSUE_PUBLICATION",
-          repository:context.repository,
-        }],
-      }],
-    },
-    approval:{
-      ...approval,
-      signature:signDetached(
-        null,
-        Buffer.from(canonicalJson(payload),"utf8"),
-        PRIVATE_KEY,
-      ).toString("base64"),
-    },
+    ...approval,
+    signature:signDetached(
+      null,
+      Buffer.from(canonicalJson(payload),"utf8"),
+      privateKey,
+    ).toString("base64"),
   };
+}
+
+function authorityFor(context,overrides={},privateKey=PRIVATE_KEY) {
+  return signedApprovalFor(context,overrides,privateKey);
 }
 
 function fakeAdapter({failCreateAt,seed=[]}={}) {
@@ -240,7 +268,7 @@ test("preview is deterministic, complete, deeply frozen, and makes no injected c
   const context=readyContext();
   const adapter=fakeAdapter();
   const store=fakeStore();
-  const writer=createGitHubWriter({adapter,store});
+  const writer=configuredWriter({adapter,store});
 
   const first=await writer.preview(context);
   const second=await writer.preview(clone(context));
@@ -269,7 +297,7 @@ test("blocked readiness and apply false cannot reach adapter or store",async () 
   const ready=readyContext();
   const adapter=fakeAdapter();
   const store=fakeStore();
-  const writer=createGitHubWriter({adapter,store});
+  const writer=configuredWriter({adapter,store});
 
   await assert.rejects(
     writer.publish(blocked,{apply:true,authority:authorityFor(blocked)}),
@@ -285,39 +313,39 @@ test("blocked readiness and apply false cannot reach adapter or store",async () 
 test("apply requires a trusted source, plan, repository, role, record, and signature bound approval",async () => {
   const context=readyContext();
   for (const [name,mutate] of [
-    ["authority",authority => ({approved:true})],
+    ["authority|approval",authority => ({approved:true})],
     ["signature",authority => {
-      authority.approval.signature=`A${authority.approval.signature.slice(1)}`;
+      authority.signature=`A${authority.signature.slice(1)}`;
       return authority;
     }],
     ["signature",authority => {
-      authority.approval.signature="invalid";
+      authority.signature="invalid";
       return authority;
     }],
     ["source",authority => {
-      authority.approval.source_revision="another-source";
+      authority.source_revision="another-source";
       return authority;
     }],
     ["plan",authority => {
-      authority.approval.issue_plan.revision=2;
+      authority.issue_plan.revision=2;
       return authority;
     }],
     ["repository",authority => {
-      authority.approval.repository="TOSS-Soft/another-repo";
+      authority.repository="TOSS-Soft/another-repo";
       return authority;
     }],
     ["role",authority => {
-      authority.approval.actor_role="CEO";
+      authority.actor_role="CEO";
       return authority;
     }],
     ["signature",authority => {
-      authority.approval.record_revision=2;
+      authority.record_revision=2;
       return authority;
     }],
   ]) {
     const adapter=fakeAdapter();
     const store=fakeStore();
-    const writer=createGitHubWriter({adapter,store});
+    const writer=configuredWriter({adapter,store});
     const authority=mutate(authorityFor(context));
     await assert.rejects(
       writer.publish(context,{apply:true,authority}),
@@ -329,23 +357,26 @@ test("apply requires a trusted source, plan, repository, role, record, and signa
   }
 });
 
-test("the external authority registry rejects malformed decision routes and ambiguous keys",async () => {
+test("the configured authority registry rejects malformed decision routes and ambiguous keys",async () => {
   const context=readyContext();
   for (const [label,mutate,pattern] of [
-    ["route",authority => {
-      authority.authorityRegistry.actors[0].allowed_routes="package-selected";
-      return authority;
+    ["route",registry => {
+      registry.actors[0].allowed_routes="package-selected";
+      return registry;
     },/allowed_routes/i],
-    ["key bundle",authority => {
-      authority.authorityRegistry.actors[0].public_key=`${PUBLIC_KEY}${PUBLIC_KEY}`;
-      return authority;
+    ["key bundle",registry => {
+      registry.actors[0].public_key=`${PUBLIC_KEY}${PUBLIC_KEY}`;
+      return registry;
     },/exactly one canonical ed25519/i],
   ]) {
-    const authority=mutate(authorityFor(context));
+    const registry=mutate(trustedAuthorityRegistry());
+    delete registry.content_sha256;
+    registry.content_sha256=sha256Canonical(registry);
     const adapter=fakeAdapter();
     const store=fakeStore();
     await assert.rejects(
-      createGitHubWriter({adapter,store}).publish(context,{apply:true,authority}),
+      async () => configuredWriter({adapter,store,authorityRegistry:registry})
+        .publish(context,{apply:true,authority:authorityFor(context)}),
       pattern,
       label,
     );
@@ -354,11 +385,61 @@ test("the external authority registry rejects malformed decision routes and ambi
   }
 });
 
+test("a caller-supplied Ed25519 key cannot establish publication trust",async () => {
+  const context=readyContext();
+  const {privateKey,publicKey}=generateKeyPairSync("ed25519");
+  const attackerKey=publicKey.export({format:"pem",type:"spki"}).toString();
+  const attackerAuthority={
+    authorityRegistry:{
+      actors:[{
+        actor_id:"verified-publisher",
+        actor_role:"USER",
+        public_key:attackerKey,
+        allowed_publications:[{
+          approval_kind:"GITHUB_ISSUE_PUBLICATION",
+          repository:context.repository,
+        }],
+      }],
+    },
+    approval:signedApprovalFor(context,{},privateKey),
+  };
+  const adapter=fakeAdapter();
+  const store=fakeStore();
+
+  await assert.rejects(
+    configuredWriter({adapter,store}).publish(context,{
+      apply:true,
+      authority:attackerAuthority,
+    }),
+    /authority|approval|trusted|unsupported field/i,
+  );
+  assert.deepEqual(adapter.calls,[]);
+  assert.deepEqual(store.calls,[]);
+});
+
+test("publication records exact immutable trusted registry and key provenance",async () => {
+  const context=readyContext();
+  const authorityRegistry=trustedAuthorityRegistry();
+  const result=await configuredWriter({
+    adapter:fakeAdapter(),
+    store:fakeStore(),
+    authorityRegistry,
+  }).publish(context,{apply:true,authority:authorityFor(context)});
+
+  assert.deepEqual(result.artifact.content.authority_registry,{
+    registry_id:authorityRegistry.registry_id,
+    revision:authorityRegistry.revision,
+    content_sha256:authorityRegistry.content_sha256,
+    actor_id:"verified-publisher",
+    public_key_fingerprint:publicKeyFingerprint(),
+  });
+});
+
 test("rerun discovers markers before mutation and never creates duplicate issues",async () => {
   const context=readyContext();
   const adapter=fakeAdapter();
   const store=fakeStore();
-  const writer=createGitHubWriter({adapter,store});
+  const writer=configuredWriter({adapter,store});
 
   const first=await writer.publish(context,{apply:true,authority:authorityFor(context)});
   const second=await writer.publish(context,{apply:true,authority:authorityFor(context)});
@@ -373,11 +454,106 @@ test("rerun discovers markers before mutation and never creates duplicate issues
     adapter.calls.findIndex(call => call.method==="createIssue"));
 });
 
+test("all markers reconcile before any mutation when a later issue is duplicated",async () => {
+  const context=readyContext({twoIssues:true});
+  const preview=await configuredWriter({adapter:fakeAdapter(),store:fakeStore()})
+    .preview(context);
+  const later=preview.operations[1];
+  const duplicate={
+    repository:later.repository,
+    marker:later.marker,
+    title:later.title,
+    body:later.body,
+    labels:later.labels,
+    milestone:later.milestone,
+    number:202,
+    url:"https://github.com/TOSS-Soft/toss-cli/issues/202",
+  };
+  const adapter=fakeAdapter({seed:[
+    duplicate,
+    {...duplicate,number:203,url:"https://github.com/TOSS-Soft/toss-cli/issues/203"},
+  ]});
+  const store=fakeStore();
+
+  await assert.rejects(
+    configuredWriter({adapter,store}).publish(context,{
+      apply:true,
+      authority:authorityFor(context),
+    }),
+    /duplicate|multiple|conflict/i,
+  );
+  assert.equal(adapter.created.length,0);
+  assert.equal(adapter.updated.length,0);
+  assert.equal(store.calls.some(call => call.method==="append"),false);
+});
+
+test("create result must exactly match the desired remote issue before persistence",async () => {
+  const context=readyContext();
+  const adapter=fakeAdapter();
+  const createIssue=adapter.createIssue;
+  adapter.createIssue=async payload => ({
+    ...await createIssue(payload),
+    title:"GitHub returned a different title",
+  });
+  const store=fakeStore();
+
+  await assert.rejects(
+    configuredWriter({adapter,store}).publish(context,{
+      apply:true,
+      authority:authorityFor(context),
+    }),
+    /create result|desired|match/i,
+  );
+  assert.equal(store.artifacts.length,0);
+});
+
+test("update result must exactly match desired fields and an exact update reruns idempotently",async () => {
+  const context=readyContext();
+  const preview=await configuredWriter({adapter:fakeAdapter(),store:fakeStore()})
+    .preview(context);
+  const desired=preview.operations[0];
+  const stale={
+    repository:desired.repository,
+    marker:desired.marker,
+    title:"stale title",
+    body:desired.body,
+    labels:desired.labels,
+    milestone:desired.milestone,
+    number:101,
+    url:"https://github.com/TOSS-Soft/toss-cli/issues/101",
+  };
+  const mismatched=fakeAdapter({seed:[stale]});
+  const updateIssue=mismatched.updateIssue;
+  mismatched.updateIssue=async (number,payload) => ({
+    ...await updateIssue(number,payload),
+    body:"GitHub returned a different body",
+  });
+  const mismatchedStore=fakeStore();
+  await assert.rejects(
+    configuredWriter({adapter:mismatched,store:mismatchedStore}).publish(context,{
+      apply:true,
+      authority:authorityFor(context),
+    }),
+    /update result|desired|match/i,
+  );
+  assert.equal(mismatchedStore.artifacts.length,0);
+
+  const adapter=fakeAdapter({seed:[stale]});
+  const store=fakeStore();
+  const writer=configuredWriter({adapter,store});
+  const first=await writer.publish(context,{apply:true,authority:authorityFor(context)});
+  const second=await writer.publish(context,{apply:true,authority:authorityFor(context)});
+  assert.equal(first.status,"complete");
+  assert.deepEqual(second.mappings,first.mappings);
+  assert.equal(adapter.updated.length,1);
+  assert.equal(adapter.created.length,0);
+});
+
 test("a partial rate-limit failure persists verified facts and resumes only missing creates",async () => {
   const context=readyContext({twoIssues:true});
   const adapter=fakeAdapter({failCreateAt:2});
   const store=fakeStore();
-  const writer=createGitHubWriter({adapter,store});
+  const writer=configuredWriter({adapter,store});
 
   const partial=await writer.publish(context,{apply:true,authority:authorityFor(context)});
   assert.equal(partial.status,"retryable");
@@ -397,7 +573,7 @@ test("a partial rate-limit failure persists verified facts and resumes only miss
     adapter.created.push(issue);
     return clone(issue);
   };
-  const resumed=createGitHubWriter({adapter:resumedAdapter,store});
+  const resumed=configuredWriter({adapter:resumedAdapter,store});
   const complete=await resumed.publish(context,{apply:true,authority:authorityFor(context)});
 
   assert.equal(complete.status,"complete");
@@ -412,7 +588,7 @@ test("remote create success followed by local append failure recovers by marker"
   const context=readyContext();
   const adapter=fakeAdapter();
   const failingStore=fakeStore({failAppendAt:1});
-  const writer=createGitHubWriter({adapter,store:failingStore});
+  const writer=configuredWriter({adapter,store:failingStore});
 
   await assert.rejects(
     writer.publish(context,{apply:true,authority:authorityFor(context)}),
@@ -421,7 +597,7 @@ test("remote create success followed by local append failure recovers by marker"
   assert.equal(adapter.created.length,1);
 
   const recoveredStore=fakeStore();
-  const recovered=createGitHubWriter({adapter,store:recoveredStore});
+  const recovered=configuredWriter({adapter,store:recoveredStore});
   const result=await recovered.publish(context,{apply:true,authority:authorityFor(context)});
 
   assert.equal(result.status,"complete");
@@ -431,18 +607,23 @@ test("remote create success followed by local append failure recovers by marker"
 
 test("duplicate markers and conflicting local history fail closed before mutation",async () => {
   const context=readyContext();
-  const preview=await createGitHubWriter({adapter:fakeAdapter(),store:fakeStore()})
+  const preview=await configuredWriter({adapter:fakeAdapter(),store:fakeStore()})
     .preview(context);
   const operation=preview.operations[0];
   const duplicate={
-    ...operation,
+    repository:operation.repository,
+    marker:operation.marker,
+    title:operation.title,
+    body:operation.body,
+    labels:operation.labels,
+    milestone:operation.milestone,
     number:101,
     url:"https://github.com/TOSS-Soft/toss-cli/issues/101",
     marker:operation.marker,
   };
   const adapter=fakeAdapter({seed:[duplicate,{...duplicate,number:102,url:"https://github.com/TOSS-Soft/toss-cli/issues/102"}]});
   const store=fakeStore();
-  const writer=createGitHubWriter({adapter,store});
+  const writer=configuredWriter({adapter,store});
 
   await assert.rejects(
     writer.publish(context,{apply:true,authority:authorityFor(context)}),
@@ -464,7 +645,7 @@ test("adapter and store contracts reject accessor methods without triggering the
   };
 
   assert.throws(
-    () => createGitHubWriter({adapter,store:fakeStore()}),
+    () => configuredWriter({adapter,store:fakeStore()}),
     /accessor|data property/i,
   );
   assert.equal(accessorCalls,0);
@@ -475,7 +656,7 @@ test("adapter and store contracts reject accessor methods without triggering the
     enumerable:false,
   });
   assert.throws(
-    () => createGitHubWriter({adapter:nonEnumerable,store:fakeStore()}),
+    () => configuredWriter({adapter:nonEnumerable,store:fakeStore()}),
     /enumerable data property/i,
   );
 });
@@ -492,7 +673,7 @@ test("classified API, permission, and rate-limit failures return stable retryabl
       throw error;
     };
     const store=fakeStore();
-    const result=await createGitHubWriter({adapter,store}).publish(context,{
+    const result=await configuredWriter({adapter,store}).publish(context,{
       apply:true,
       authority:authorityFor(context),
     });
@@ -503,6 +684,88 @@ test("classified API, permission, and rate-limit failures return stable retryabl
     assert.equal(validateDocument(result.artifact,"github-publication-result.v1").valid,true);
     assert.deepEqual(context,before);
   }
+});
+
+test("adapter retryable booleans cannot expand the closed retryable code registry",async () => {
+  const context=readyContext();
+  const adapter=fakeAdapter();
+  adapter.createIssue=async () => {
+    const error=new Error("adapter called a validation failure retryable");
+    error.code="VALIDATION_FAILED";
+    error.retryable=true;
+    throw error;
+  };
+  const store=fakeStore();
+
+  await assert.rejects(
+    configuredWriter({adapter,store}).publish(context,{
+      apply:true,
+      authority:authorityFor(context),
+    }),
+    error => error?.code==="VALIDATION_FAILED" &&
+      !Object.hasOwn(error,"result"),
+  );
+  assert.equal(store.artifacts.length,0);
+
+  const validStore=fakeStore();
+  const validAdapter=fakeAdapter();
+  validAdapter.createIssue=async () => {
+    const error=new Error("rate limit");
+    error.code="RATE_LIMITED";
+    error.retryable=true;
+    throw error;
+  };
+  const valid=await configuredWriter({adapter:validAdapter,store:validStore})
+    .publish(context,{apply:true,authority:authorityFor(context)});
+  const forged=clone(valid.artifact);
+  forged.content.failures[0].code="VALIDATION_FAILED";
+  rehash(forged);
+  const validation=validateDocument(forged,"github-publication-result.v1");
+  assert.equal(validation.valid,false);
+  assert.match(
+    validation.errors.map(error => error.message).join("\n"),
+    /allowed values|enum/i,
+  );
+});
+
+test("an append echo without exact verified persistence is rejected",async () => {
+  const context=readyContext();
+  const store=fakeStore();
+  store.append=async draft => {
+    store.calls.push({method:"append",draft:clone(draft)});
+    return clone(draft);
+  };
+
+  await assert.rejects(
+    configuredWriter({adapter:fakeAdapter(),store}).publish(context,{
+      apply:true,
+      authority:authorityFor(context),
+    }),
+    /verify|persist|artifact store/i,
+  );
+  assert.equal(store.calls.filter(call => call.method==="append").length,1);
+  assert.ok(store.calls.some(call => call.method==="verify"));
+  assert.equal(store.artifacts.length,0);
+});
+
+test("remote issue boundaries reject unknown enumerable fields",async () => {
+  const context=readyContext();
+  const adapter=fakeAdapter();
+  const createIssue=adapter.createIssue;
+  adapter.createIssue=async payload => ({
+    ...await createIssue(payload),
+    unexpected_remote_fact:true,
+  });
+  const store=fakeStore();
+
+  await assert.rejects(
+    configuredWriter({adapter,store}).publish(context,{
+      apply:true,
+      authority:authorityFor(context),
+    }),
+    /unsupported field|unknown field|closed/i,
+  );
+  assert.equal(store.artifacts.length,0);
 });
 
 test("malformed adapter and store return accessors fail closed without triggering them",async () => {
@@ -524,7 +787,7 @@ test("malformed adapter and store return accessors fail closed without triggerin
   const adapter=fakeAdapter();
   adapter.findByMarker=async () => [badRemote];
   await assert.rejects(
-    createGitHubWriter({adapter,store:fakeStore()}).publish(context,{
+    configuredWriter({adapter,store:fakeStore()}).publish(context,{
       apply:true,authority:authorityFor(context),
     }),
     /canonical json/i,
@@ -545,7 +808,7 @@ test("malformed adapter and store return accessors fail closed without triggerin
   store.list=async () => listed;
   const untouched=fakeAdapter();
   await assert.rejects(
-    createGitHubWriter({adapter:untouched,store}).publish(context,{
+    configuredWriter({adapter:untouched,store}).publish(context,{
       apply:true,authority:authorityFor(context),
     }),
     /canonical json|history/i,
@@ -557,7 +820,7 @@ test("malformed adapter and store return accessors fail closed without triggerin
 test("immutable approval records cannot replay across repositories",async () => {
   const firstContext=readyContext();
   const store=fakeStore();
-  await createGitHubWriter({adapter:fakeAdapter(),store}).publish(firstContext,{
+  await configuredWriter({adapter:fakeAdapter(),store}).publish(firstContext,{
     apply:true,authority:authorityFor(firstContext),
   });
   const secondContext=readyContext();
@@ -565,7 +828,7 @@ test("immutable approval records cannot replay across repositories",async () => 
   const adapter=fakeAdapter();
 
   await assert.rejects(
-    createGitHubWriter({adapter,store}).publish(secondContext,{
+    configuredWriter({adapter,store}).publish(secondContext,{
       apply:true,authority:authorityFor(secondContext),
     }),
     /approval record.*replay|approval record.*conflict/i,
@@ -576,7 +839,7 @@ test("immutable approval records cannot replay across repositories",async () => 
 test("conflicting mapping revisions and unknown publication versions fail before GitHub access",async () => {
   const context=readyContext();
   const firstStore=fakeStore();
-  const first=await createGitHubWriter({adapter:fakeAdapter(),store:firstStore})
+  const first=await configuredWriter({adapter:fakeAdapter(),store:firstStore})
     .publish(context,{apply:true,authority:authorityFor(context)});
   const conflicting=clone(first.artifact);
   conflicting.revision=2;
@@ -586,7 +849,8 @@ test("conflicting mapping revisions and unknown publication versions fail before
   rehash(conflicting);
   const adapter=fakeAdapter();
   await assert.rejects(
-    createGitHubWriter({adapter,store:fakeStore({seed:[first.artifact,conflicting]})})
+    configuredWriter({adapter,store:fakeStore({seed:[first.artifact,conflicting]})
+      })
       .publish(context,{apply:true,authority:authorityFor(context)}),
     /mapping conflicts/i,
   );
@@ -596,24 +860,115 @@ test("conflicting mapping revisions and unknown publication versions fail before
   unknown.schema_version="acp.v2";
   const unknownAdapter=fakeAdapter();
   await assert.rejects(
-    createGitHubWriter({adapter:unknownAdapter,store:fakeStore({seed:[unknown]})})
+    configuredWriter({adapter:unknownAdapter,store:fakeStore({seed:[unknown]})})
       .publish(context,{apply:true,authority:authorityFor(context)}),
     /unknown publication-result version|corrupt/i,
   );
   assert.deepEqual(unknownAdapter.calls,[]);
 });
 
+test("every historical approval is authenticated against immutable registry provenance",async () => {
+  const context=readyContext();
+  const firstStore=fakeStore();
+  const first=await configuredWriter({adapter:fakeAdapter(),store:firstStore})
+    .publish(context,{apply:true,authority:authorityFor(context)});
+  const tampered=clone(first.artifact);
+  tampered.content.approval_record.signature=
+    `A${tampered.content.approval_record.signature.slice(1)}`;
+  rehash(tampered);
+  const adapter=fakeAdapter();
+
+  await assert.rejects(
+    configuredWriter({adapter,store:fakeStore({seed:[tampered]})}).publish(context,{
+      apply:true,
+      authority:authorityFor(context,{record_id:"PUB-APPROVAL-002"}),
+    }),
+    /historical approval|signature|registry provenance/i,
+  );
+  assert.deepEqual(adapter.calls,[]);
+});
+
+test("history requires exact gate inputs, cumulative sorted mappings, and coherent failures",async () => {
+  const context=readyContext({twoIssues:true});
+  const partialStore=fakeStore();
+  await configuredWriter({adapter:fakeAdapter({failCreateAt:2}),store:partialStore})
+    .publish(context,{apply:true,authority:authorityFor(context)});
+  assert.equal(partialStore.artifacts.length,2);
+
+  const inputTamper=clone(partialStore.artifacts.at(-1));
+  inputTamper.inputs=[artifactReference(context.artifacts.issuePlan)];
+  const inputAdapter=fakeAdapter();
+  await assert.rejects(
+    configuredWriter({adapter:inputAdapter,store:fakeStore({seed:[
+      partialStore.artifacts[0],inputTamper,
+    ]})}).publish(context,{
+      apply:true,
+      authority:authorityFor(context,{record_id:"PUB-APPROVAL-INPUTS"}),
+    }),
+    /exact.*plan.*audit.*state|gate inputs/i,
+  );
+  assert.deepEqual(inputAdapter.calls,[]);
+
+  const dropped=clone(partialStore.artifacts.at(-1));
+  dropped.content.mappings=[];
+  rehash(dropped);
+  const droppedAdapter=fakeAdapter();
+  await assert.rejects(
+    configuredWriter({adapter:droppedAdapter,store:fakeStore({seed:[
+      partialStore.artifacts[0],dropped,
+    ]})}).publish(context,{
+      apply:true,
+      authority:authorityFor(context,{record_id:"PUB-APPROVAL-DROPPED"}),
+    }),
+    /cumulative|mapping.*superset/i,
+  );
+  assert.deepEqual(droppedAdapter.calls,[]);
+
+  const conflictingFailure=clone(partialStore.artifacts.at(-1));
+  conflictingFailure.content.failures[0].local_issue_id="ISSUE-001";
+  rehash(conflictingFailure);
+  const failureAdapter=fakeAdapter();
+  await assert.rejects(
+    configuredWriter({adapter:failureAdapter,store:fakeStore({seed:[
+      partialStore.artifacts[0],conflictingFailure,
+    ]})}).publish(context,{
+      apply:true,
+      authority:authorityFor(context,{record_id:"PUB-APPROVAL-FAILURE"}),
+    }),
+    /failure.*mapped|status.*failure/i,
+  );
+  assert.deepEqual(failureAdapter.calls,[]);
+
+  const completeStore=fakeStore();
+  await configuredWriter({adapter:fakeAdapter(),store:completeStore})
+    .publish(context,{apply:true,authority:authorityFor(context)});
+  const reversed=clone(completeStore.artifacts.at(-1));
+  reversed.content.mappings.reverse();
+  rehash(reversed);
+  const sortedAdapter=fakeAdapter();
+  await assert.rejects(
+    configuredWriter({adapter:sortedAdapter,store:fakeStore({seed:[
+      ...completeStore.artifacts.slice(0,-1),reversed,
+    ]})}).publish(context,{
+      apply:true,
+      authority:authorityFor(context,{record_id:"PUB-APPROVAL-SORT"}),
+    }),
+    /mapping.*sorted|canonical.*mapping/i,
+  );
+  assert.deepEqual(sortedAdapter.calls,[]);
+});
+
 test("corrupt completion claims and missing plan lineage fail before GitHub access",async () => {
   const context=readyContext({twoIssues:true});
   const partialStore=fakeStore();
-  await createGitHubWriter({adapter:fakeAdapter({failCreateAt:2}),store:partialStore})
+  await configuredWriter({adapter:fakeAdapter({failCreateAt:2}),store:partialStore})
     .publish(context,{apply:true,authority:authorityFor(context)});
   const forgedComplete=clone(partialStore.artifacts[0]);
   forgedComplete.content.status="complete";
   rehash(forgedComplete);
   const completionAdapter=fakeAdapter();
   await assert.rejects(
-    createGitHubWriter({
+    configuredWriter({
       adapter:completionAdapter,
       store:fakeStore({seed:[forgedComplete]}),
     }).publish(context,{apply:true,authority:authorityFor(context)}),
@@ -625,11 +980,11 @@ test("corrupt completion claims and missing plan lineage fail before GitHub acce
   missingInput.inputs=[];
   const lineageAdapter=fakeAdapter();
   await assert.rejects(
-    createGitHubWriter({
+    configuredWriter({
       adapter:lineageAdapter,
       store:fakeStore({seed:[missingInput]}),
     }).publish(context,{apply:true,authority:authorityFor(context)}),
-    /input.*issue plan|issue plan.*input/i,
+    /gate inputs.*exact plan.*audit.*state/i,
   );
   assert.deepEqual(lineageAdapter.calls,[]);
 });
@@ -644,7 +999,7 @@ test("repository identity rejects URL and whitespace variants before injected ca
     context.repository=repository;
     const adapter=fakeAdapter();
     const store=fakeStore();
-    const writer=createGitHubWriter({adapter,store});
+    const writer=configuredWriter({adapter,store});
     await assert.rejects(writer.preview(context),/canonical owner\/name/i);
     assert.deepEqual(adapter.calls,[]);
     assert.deepEqual(store.calls,[]);
@@ -672,7 +1027,7 @@ test("publication result persists through the real immutable artifact store",asy
   await store.append(recordedProvenance(context.artifacts.specAudits[0]));
   await store.append(recordedProvenance(context.artifacts.analysisState));
 
-  const result=await createGitHubWriter({adapter:fakeAdapter(),store}).publish(context,{
+  const result=await configuredWriter({adapter:fakeAdapter(),store}).publish(context,{
     apply:true,authority:authorityFor(context),
   });
   const persisted=await store.verify(artifactReference(result.artifact));

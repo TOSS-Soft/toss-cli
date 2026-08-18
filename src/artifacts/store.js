@@ -91,6 +91,29 @@ function requireArtifactId(value) {
   return value;
 }
 
+function artifactDirectoryName(artifactId) {
+  return encodeURIComponent(requireArtifactId(artifactId));
+}
+
+function artifactIdFromDirectoryName(name) {
+  let artifactId;
+  try {
+    artifactId=decodeURIComponent(name);
+  } catch (error) {
+    throw new ArtifactIntegrityError(
+      `Artifact directory name is not a reversible encoded identity: ${name}`,
+      {cause:error},
+    );
+  }
+  if (!ARTIFACT_ID_PATTERN.test(artifactId) ||
+      encodeURIComponent(artifactId)!==name) {
+    throw new ArtifactIntegrityError(
+      `Artifact directory name is not a canonical encoded identity: ${name}`,
+    );
+  }
+  return artifactId;
+}
+
 function requireRevision(value,field="revision") {
   if (!Number.isSafeInteger(value) || value<1) {
     throw new ArtifactValidationError(`${field} must be a positive integer`);
@@ -517,12 +540,13 @@ async function scanArtifactTree(rootInfo) {
           "symbolic links are forbidden",
         );
       }
-      if (!artifactEntry.isDirectory() || !ARTIFACT_ID_PATTERN.test(artifactEntry.name)) {
+      if (!artifactEntry.isDirectory()) {
         throw unexpectedEntry(
           pathForDisplay(artifactRoot,artifactPath),
           "expected an artifact identity directory",
         );
       }
+      artifactIdFromDirectoryName(artifactEntry.name);
       for (const fileEntry of await safeReadDirectory(
         rootInfo,
         artifactPath,
@@ -627,7 +651,7 @@ export function createArtifactStore({root,now=() => new Date(),randomId=randomUU
       rootInfo.lexicalRoot,
       ...ARTIFACT_ROOT_PARTS,
       value.document_type,
-      value.artifact_id,
+      artifactDirectoryName(value.artifact_id),
       artifactFileName(value.revision,value.content_sha256),
     );
     if (resolve(path)!==resolve(expectedPath)) {
@@ -983,7 +1007,7 @@ export function createArtifactStore({root,now=() => new Date(),randomId=randomUU
       const directory=await ensureContainedDirectory(rootInfo,[
         ...ARTIFACT_ROOT_PARTS,
         artifact.document_type,
-        artifact.artifact_id,
+        artifactDirectoryName(artifact.artifact_id),
       ]);
       await assertArtifactIdDocumentType(
         rootInfo,

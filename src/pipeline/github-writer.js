@@ -1,4 +1,4 @@
-import {createPublicKey,verify as verifyDetached} from "node:crypto";
+import {createHash,createPublicKey,verify as verifyDetached} from "node:crypto";
 
 import {canonicalJson,sha256Canonical} from "../contracts/acp.js";
 import {validateDocument} from "../contracts/validator.js";
@@ -19,6 +19,7 @@ const SHA256_PATTERN=/^[a-f0-9]{64}$/;
 const SIGNATURE_PATTERN=/^[A-Za-z0-9+/]{86}==$/;
 const APPROVAL_KIND="GITHUB_ISSUE_PUBLICATION";
 const SIGNING_DOMAIN="toss.github-issue-publication.authority-approval.v1";
+const AUTHORITY_REGISTRY_VERSION="github-publication-authority-registry.v1";
 const PUBLICATION_ROLES=new Set(["CEO","USER"]);
 const AUTHORITY_ROLES=new Set(["ARCHITECT","SPECIALIST","CEO","USER"]);
 const DECISION_ROUTES=Object.freeze({
@@ -230,15 +231,33 @@ function canonicalizePublicKey(value,label) {
   return key;
 }
 
-function canonicalAuthority(value,context) {
-  const authority=canonicalCopy(value,"GitHub publication authority");
-  requireClosedObject(
-    authority,
-    ["authorityRegistry","approval"],
-    "GitHub publication authority",
-  );
-  const registry=authority.authorityRegistry;
-  requireClosedObject(registry,["actors"],"Trusted publication authority registry");
+function publicKeyFingerprint(key) {
+  return createHash("sha256").update(key.export({
+    type:"spki",
+    format:"der",
+  })).digest("hex");
+}
+
+function canonicalAuthorityRegistry(value) {
+  const registry=canonicalCopy(value,"Trusted publication authority registry");
+  requireClosedObject(registry,[
+    "schema_version","registry_id","revision","actors","content_sha256",
+  ],"Trusted publication authority registry");
+  if (registry.schema_version!==AUTHORITY_REGISTRY_VERSION) {
+    throw new TypeError("Trusted publication authority registry version is unsupported");
+  }
+  requiredText(registry.registry_id,"Trusted publication authority registry registry_id");
+  if (!Number.isSafeInteger(registry.revision) || registry.revision<1) {
+    throw new TypeError("Trusted publication authority registry revision must be positive");
+  }
+  if (typeof registry.content_sha256!=="string" ||
+      !SHA256_PATTERN.test(registry.content_sha256)) {
+    throw new TypeError("Trusted publication authority registry content hash is invalid");
+  }
+  const {content_sha256:contentHash,...unsignedRegistry}=registry;
+  if (sha256Canonical(unsignedRegistry)!==contentHash) {
+    throw new TypeError("Trusted publication authority registry content hash does not match");
+  }
   if (!Array.isArray(registry.actors) || registry.actors.length===0) {
     throw new TypeError("Trusted publication authority registry requires actors");
   }
@@ -246,9 +265,14 @@ function canonicalAuthority(value,context) {
   for (const [index,actor] of registry.actors.entries()) {
     const label=`Trusted publication authority registry actor ${index}`;
     if (!isPlainObject(actor)) throw new TypeError(`${label} must be a closed plain object`);
-    const allowed=["actor_id","actor_role","public_key","allowed_publications","allowed_routes"];
+    const allowed=[
+      "actor_id","actor_role","public_key","public_key_fingerprint",
+      "allowed_publications","allowed_routes",
+    ];
     rejectUnknownFields(actor,allowed,label);
-    for (const field of ["actor_id","actor_role","public_key","allowed_publications"]) {
+    for (const field of [
+      "actor_id","actor_role","public_key","public_key_fingerprint","allowed_publications",
+    ]) {
       if (!Object.hasOwn(actor,field)) throw new TypeError(`${label} requires ${field}`);
     }
     const actorId=requiredText(actor.actor_id,`${label}.actor_id`);
@@ -293,14 +317,32 @@ function canonicalAuthority(value,context) {
         routes.add(routeKey);
       }
     }
+    const publicKey=canonicalizePublicKey(actor.public_key,`${label}.public_key`);
+    const fingerprint=publicKeyFingerprint(publicKey);
+    if (actor.public_key_fingerprint!==fingerprint) {
+      throw new TypeError(`${label}.public_key_fingerprint does not match public key`);
+    }
     actors.set(actorId,{
       actor_role:actorRole,
-      public_key:canonicalizePublicKey(actor.public_key,`${label}.public_key`),
+      public_key:publicKey,
+      public_key_fingerprint:fingerprint,
       publications,
     });
   }
 
-  const approval=authority.approval;
+  return {
+    registry:deepFreeze(registry),
+    actors,
+    provenance:Object.freeze({
+      registry_id:registry.registry_id,
+      revision:registry.revision,
+      content_sha256:registry.content_sha256,
+    }),
+  };
+}
+
+function canonicalApproval(value,expected,trusted) {
+  const approval=canonicalCopy(value,"GitHub publication approval");
   const approvalFields=[
     "approval_kind","actor_id","actor_role","repository","source_revision",
     "source_sha256","issue_plan","record_id","record_revision","record_sha256",
@@ -315,19 +357,18 @@ function canonicalAuthority(value,context) {
   if (!PUBLICATION_ROLES.has(approval.actor_role)) {
     throw new TypeError("GitHub publication approval role is not allowed");
   }
-  if (approval.repository!==context.repository) {
+  if (approval.repository!==expected.repository) {
     throw new TypeError("GitHub publication approval repository does not match context");
   }
-  const plan=context.artifacts.issuePlan;
-  if (approval.source_revision!==plan.provenance.source_revision ||
-      approval.source_sha256!==plan.provenance.source_sha256) {
+  if (approval.source_revision!==expected.source_revision ||
+      approval.source_sha256!==expected.source_sha256) {
     throw new TypeError("GitHub publication approval source does not match current source");
   }
   const planReference=exactArtifactReference(
     approval.issue_plan,
     "GitHub publication approval issue plan",
   );
-  if (!same(planReference,exactReference(plan))) {
+  if (!same(planReference,expected.issue_plan)) {
     throw new TypeError("GitHub publication approval plan does not match current issue plan");
   }
   requiredText(approval.record_id,"GitHub publication approval record_id");
@@ -359,7 +400,7 @@ function canonicalAuthority(value,context) {
       Buffer.from(approval.signature,"base64").toString("base64")!==approval.signature) {
     throw new TypeError("GitHub publication approval signature is invalid");
   }
-  const actor=actors.get(approval.actor_id);
+  const actor=trusted.actors.get(approval.actor_id);
   if (!actor) throw new TypeError("GitHub publication approval actor is not trusted");
   if (actor.actor_role!==approval.actor_role) {
     throw new TypeError("GitHub publication approval role does not match registry");
@@ -384,7 +425,14 @@ function canonicalAuthority(value,context) {
     verified=false;
   }
   if (!verified) throw new TypeError("GitHub publication approval signature is invalid");
-  return {registry,approval};
+  return {
+    approval:deepFreeze(approval),
+    authority_registry:Object.freeze({
+      ...trusted.provenance,
+      actor_id:approval.actor_id,
+      public_key_fingerprint:actor.public_key_fingerprint,
+    }),
+  };
 }
 
 function issueMarker(repository,plan,localIssueId) {
@@ -513,7 +561,7 @@ function validatePublicationArtifact(artifact,label) {
   }
 }
 
-function validateHistorySemantics(history) {
+function validateHistorySemantics(history,trustedRegistry) {
   const identities=new Set();
   const byArtifact=new Map();
   const localFacts=new Map();
@@ -529,6 +577,24 @@ function validateHistorySemantics(history) {
     byArtifact.get(groupKey).push(artifact);
 
     const approval=artifact.content.approval_record;
+    let verifiedApproval;
+    try {
+      verifiedApproval=canonicalApproval(approval,{
+        repository:artifact.content.repository,
+        source_revision:artifact.content.source_revision,
+        source_sha256:artifact.content.source_sha256,
+        issue_plan:artifact.content.issue_plan,
+      },trustedRegistry);
+    } catch (error) {
+      throw new GitHubPublicationError("Historical publication approval signature is invalid",{
+        cause:error,
+      });
+    }
+    if (!same(artifact.content.authority_registry,verifiedApproval.authority_registry)) {
+      throw new GitHubPublicationError(
+        "Historical publication authority registry provenance conflicts with trusted registry",
+      );
+    }
     const approvalKey=canonicalJson({
       record_id:approval.record_id,
       record_revision:approval.record_revision,
@@ -540,11 +606,13 @@ function validateHistorySemantics(history) {
     approvals.set(approvalKey,approval);
 
     const seenLocals=new Set();
+    const orderedLocals=[];
     for (const mapping of artifact.content.mappings) {
       if (seenLocals.has(mapping.local_issue_id)) {
         throw new GitHubPublicationError("Publication result duplicates a local issue mapping");
       }
       seenLocals.add(mapping.local_issue_id);
+      orderedLocals.push(mapping.local_issue_id);
       const fact={
         repository:artifact.content.repository,
         source_revision:artifact.content.source_revision,
@@ -569,9 +637,35 @@ function validateHistorySemantics(history) {
         map.set(key,fact);
       }
     }
+    if (!same(orderedLocals,[...orderedLocals].sort())) {
+      throw new GitHubPublicationError("Publication result mappings must be canonically sorted");
+    }
+    const failureKeys=[];
+    const failureIssueIds=new Set();
+    for (const failure of artifact.content.failures) {
+      if (seenLocals.has(failure.local_issue_id)) {
+        throw new GitHubPublicationError("Publication failure cannot identify an already mapped issue");
+      }
+      if (failureIssueIds.has(failure.local_issue_id)) {
+        throw new GitHubPublicationError("Publication result duplicates a failed local issue");
+      }
+      failureIssueIds.add(failure.local_issue_id);
+      failureKeys.push(`${failure.local_issue_id}\u0000${failure.code}`);
+    }
+    if (new Set(failureKeys).size!==failureKeys.length ||
+        !same(failureKeys,[...failureKeys].sort())) {
+      throw new GitHubPublicationError("Publication failures must be unique and canonically sorted");
+    }
+    if (artifact.content.failures.length>1) {
+      throw new GitHubPublicationError("Publication result may record only one active failure");
+    }
+    if (artifact.content.status==="complete" && artifact.content.failures.length!==0) {
+      throw new GitHubPublicationError("Complete publication result cannot contain failures");
+    }
   }
   for (const revisions of byArtifact.values()) {
     revisions.sort((left,right) => left.revision-right.revision);
+    let cumulative=new Map();
     for (const [index,artifact] of revisions.entries()) {
       if (artifact.revision!==index+1) {
         throw new GitHubPublicationError("Publication store history has a stale or missing revision");
@@ -583,11 +677,22 @@ function validateHistorySemantics(history) {
           !same(artifact.parents[0],exactReference(revisions[index-1])))) {
         throw new GitHubPublicationError("Publication result parent history is corrupt");
       }
+      const current=new Map(artifact.content.mappings.map(mapping => [
+        mapping.local_issue_id,mapping,
+      ]));
+      for (const [localIssueId,mapping] of cumulative) {
+        if (!current.has(localIssueId) || !same(current.get(localIssueId),mapping)) {
+          throw new GitHubPublicationError(
+            "Publication result mappings must be a cumulative immutable superset",
+          );
+        }
+      }
+      cumulative=current;
     }
   }
 }
 
-async function loadHistory(store) {
+async function loadHistory(store,trustedRegistry) {
   let listed;
   try {
     listed=canonicalCopy(
@@ -624,7 +729,7 @@ async function loadHistory(store) {
     }
     history.push(artifact);
   }
-  validateHistorySemantics(history);
+  validateHistorySemantics(history,trustedRegistry);
   return history.sort((left,right) =>
     left.artifact_id.localeCompare(right.artifact_id) || left.revision-right.revision,
   );
@@ -637,13 +742,18 @@ function publicationArtifactId(context) {
   }).slice(0,24)}`;
 }
 
-function currentHistory(history,context) {
+function currentHistory(history,context,gates) {
   const id=publicationArtifactId(context);
   const plan=exactReference(context.artifacts.issuePlan);
   const source=context.artifacts.issuePlan.provenance;
   const issueIds=context.artifacts.issuePlan.content.issues.map(issue => issue.id).sort();
   const allowedIssueIds=new Set(issueIds);
   const revisions=history.filter(artifact => artifact.artifact_id===id);
+  const exactInputs=[
+    exactReference(plan),
+    exactReference(gates.audit),
+    exactReference(context.artifacts.analysisState),
+  ].sort((left,right) => canonicalJson(left).localeCompare(canonicalJson(right)));
   for (const artifact of revisions) {
     if (artifact.content.repository!==context.repository ||
         !same(artifact.content.issue_plan,plan) ||
@@ -651,9 +761,9 @@ function currentHistory(history,context) {
         artifact.content.source_sha256!==source.source_sha256) {
       throw new GitHubPublicationError("Publication history mixes stale source or issue-plan facts");
     }
-    if (artifact.inputs.filter(reference => same(reference,plan)).length!==1) {
+    if (!same(artifact.inputs,exactInputs)) {
       throw new GitHubPublicationError(
-        "Publication result inputs must contain the exact issue plan once",
+        "Publication result gate inputs must be the exact plan, audit, and state references",
       );
     }
     const mappedIds=artifact.content.mappings.map(mapping => mapping.local_issue_id).sort();
@@ -683,6 +793,11 @@ function currentHistory(history,context) {
         "Publication completion claim does not contain the exact issue mappings",
       );
     }
+    if (artifact.content.status==="retryable" && same(mappedIds,issueIds)) {
+      throw new GitHubPublicationError(
+        "Retryable publication result cannot contain every completed mapping",
+      );
+    }
   }
   return revisions.sort((left,right) => left.revision-right.revision);
 }
@@ -701,7 +816,7 @@ function mappingsFromHistory(history) {
   return mappings;
 }
 
-function publicationContent(context,approval,mappings,failures,status) {
+function publicationContent(context,authority,mappings,failures,status) {
   const plan=context.artifacts.issuePlan;
   return {
     status,
@@ -709,7 +824,8 @@ function publicationContent(context,approval,mappings,failures,status) {
     source_revision:plan.provenance.source_revision,
     source_sha256:plan.provenance.source_sha256,
     issue_plan:exactReference(plan),
-    approval_record:approval,
+    authority_registry:authority.authority_registry,
+    approval_record:authority.approval,
     mappings:[...mappings.values()].sort((left,right) =>
       left.local_issue_id.localeCompare(right.local_issue_id),
     ),
@@ -775,8 +891,24 @@ async function persist(store,context,gates,approval,current,content) {
   if (!same(appended,draft)) {
     throw new GitHubPublicationError("Artifact store returned a conflicting appended result");
   }
-  current.push(appended);
-  return appended;
+  let verified;
+  try {
+    verified=canonicalCopy(
+      await store.verify(exactReference(appended)),
+      "Verified appended publication result",
+    );
+  } catch (error) {
+    throw new GitHubPublicationError(
+      "Artifact store verification failed after publication append",
+      {code:"ARTIFACT_STORE_FAILED",cause:error},
+    );
+  }
+  validatePublicationArtifact(verified,"Verified appended publication result");
+  if (!same(verified,appended)) {
+    throw new GitHubPublicationError("Artifact store returned conflicting verified persistence");
+  }
+  current.push(verified);
+  return verified;
 }
 
 function operationPayload(operation) {
@@ -811,15 +943,11 @@ function mappingFor(operation,remote) {
 function retryableFailure(error,localIssueId) {
   const codeDescriptor=error && typeof error==="object" ?
     Object.getOwnPropertyDescriptor(error,"code") : undefined;
-  const retryableDescriptor=error && typeof error==="object" ?
-    Object.getOwnPropertyDescriptor(error,"retryable") : undefined;
   const messageDescriptor=error && typeof error==="object" ?
     Object.getOwnPropertyDescriptor(error,"message") : undefined;
   const rawCode=codeDescriptor && "value" in codeDescriptor ? codeDescriptor.value : undefined;
-  const retryable=retryableDescriptor && "value" in retryableDescriptor ?
-    retryableDescriptor.value===true : false;
-  if (!retryable && !RETRYABLE_CODES.has(rawCode)) return undefined;
-  const code=typeof rawCode==="string" && rawCode.length>0 ? rawCode : "API_UNAVAILABLE";
+  if (!RETRYABLE_CODES.has(rawCode)) return undefined;
+  const code=rawCode;
   const message=messageDescriptor && "value" in messageDescriptor &&
     typeof messageDescriptor.value==="string" && messageDescriptor.value.length>0 ?
     messageDescriptor.value : "GitHub publication failed with a retryable error";
@@ -845,13 +973,14 @@ function publicResult(context,preview,status,mappings,failures,artifact) {
   return deepFreeze(canonicalCopy(result,"GitHub publication result"));
 }
 
-export function createGitHubWriter({adapter,store}={}) {
+export function createGitHubWriter({adapter,store,authorityRegistry}={}) {
   const github=validateGitHubAdapter(adapter);
   const artifacts=validateStore(store);
+  const configuredAuthority=canonicalAuthorityRegistry(authorityRegistry);
 
   async function preview(value) {
     const context=canonicalContext(value);
-    assertIndependentGates(context,{actors:[]});
+    assertIndependentGates(context,configuredAuthority.registry);
     return previewFor(context);
   }
 
@@ -859,14 +988,20 @@ export function createGitHubWriter({adapter,store}={}) {
     const context=canonicalContext(value);
     if (apply!==true) {
       if (apply!==false) throw new TypeError("GitHub publication apply must be a boolean");
-      assertIndependentGates(context,{actors:[]});
+      assertIndependentGates(context,configuredAuthority.registry);
       return previewFor(context);
     }
-    const trusted=canonicalAuthority(authority,context);
-    const gates=assertIndependentGates(context,trusted.registry);
+    const plan=context.artifacts.issuePlan;
+    const trusted=canonicalApproval(authority,{
+      repository:context.repository,
+      source_revision:plan.provenance.source_revision,
+      source_sha256:plan.provenance.source_sha256,
+      issue_plan:exactReference(plan),
+    },configuredAuthority);
+    const gates=assertIndependentGates(context,configuredAuthority.registry);
     const desired=previewFor(context);
-    const history=await loadHistory(artifacts);
-    const current=currentHistory(history,context);
+    const history=await loadHistory(artifacts,configuredAuthority);
+    const current=currentHistory(history,context,gates);
     const approvalKey=canonicalJson({
       record_id:trusted.approval.record_id,
       record_revision:trusted.approval.record_revision,
@@ -884,6 +1019,7 @@ export function createGitHubWriter({adapter,store}={}) {
     const mappings=mappingsFromHistory(current);
     let latest=current.at(-1);
 
+    const reconciled=[];
     for (const operation of desired.operations) {
       const payload=operationPayload(operation);
       let matches;
@@ -895,9 +1031,7 @@ export function createGitHubWriter({adapter,store}={}) {
       } catch (error) {
         const failure=retryableFailure(error,operation.local_issue_id);
         if (!failure) throw error;
-        const content=publicationContent(
-          context,trusted.approval,mappings,[failure],"retryable",
-        );
+        const content=publicationContent(context,trusted,mappings,[failure],"retryable");
         latest=await persist(artifacts,context,gates,trusted.approval,current,content);
         return publicResult(context,desired,"retryable",mappings,[failure],latest);
       }
@@ -920,6 +1054,12 @@ export function createGitHubWriter({adapter,store}={}) {
           `GitHub marker conflicts with immutable mapping for ${operation.local_issue_id}`,
         );
       }
+      reconciled.push({operation,payload,recorded,remote});
+    }
+
+    for (const reconciliation of reconciled) {
+      const {operation,payload,recorded}=reconciliation;
+      let {remote}=reconciliation;
       try {
         if (!remote) {
           remote=normalizeRemoteIssue(await github.createIssue(payload),{
@@ -927,19 +1067,29 @@ export function createGitHubWriter({adapter,store}={}) {
             marker:operation.marker,
             label:`GitHub create result for ${operation.local_issue_id}`,
           });
+          if (!remoteMatches(remote,payload)) {
+            throw new GitHubPublicationError(
+              `GitHub create result does not exactly match desired issue for ${
+                operation.local_issue_id}`,
+            );
+          }
         } else if (!remoteMatches(remote,payload)) {
           remote=normalizeRemoteIssue(await github.updateIssue(remote.number,payload),{
             repository:context.repository,
             marker:operation.marker,
             label:`GitHub update result for ${operation.local_issue_id}`,
           });
+          if (!remoteMatches(remote,payload)) {
+            throw new GitHubPublicationError(
+              `GitHub update result does not exactly match desired issue for ${
+                operation.local_issue_id}`,
+            );
+          }
         }
       } catch (error) {
         const failure=retryableFailure(error,operation.local_issue_id);
         if (!failure) throw error;
-        const content=publicationContent(
-          context,trusted.approval,mappings,[failure],"retryable",
-        );
+        const content=publicationContent(context,trusted,mappings,[failure],"retryable");
         latest=await persist(artifacts,context,gates,trusted.approval,current,content);
         return publicResult(context,desired,"retryable",mappings,[failure],latest);
       }
@@ -951,7 +1101,7 @@ export function createGitHubWriter({adapter,store}={}) {
       }
       mappings.set(operation.local_issue_id,mapping);
       const status=mappings.size===desired.operations.length ? "complete" : "retryable";
-      const content=publicationContent(context,trusted.approval,mappings,[],status);
+      const content=publicationContent(context,trusted,mappings,[],status);
       latest=await persist(artifacts,context,gates,trusted.approval,current,content);
     }
     return publicResult(context,desired,"complete",mappings,[],latest);

@@ -4,6 +4,7 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  rename,
   rm,
   stat,
   symlink,
@@ -69,7 +70,7 @@ function artifactPath(root,artifact) {
     "project-management",
     "artifacts",
     artifact.document_type,
-    artifact.artifact_id,
+    encodeURIComponent(artifact.artifact_id),
     `r${String(artifact.revision).padStart(6,"0")}-${artifact.content_sha256}.json`,
   );
 }
@@ -98,8 +99,8 @@ test("append persists a content-addressed revision and is idempotent",async (t) 
   ]);
 });
 
-test("contract-valid colon artifact IDs survive every public store read boundary",async (t) => {
-  const {store}=await createTestStore(t);
+test("contract-valid colon artifact IDs use a reversible filesystem-safe identity",async (t) => {
+  const {root,store}=await createTestStore(t);
   const appended=await store.append(draft({
     artifact_id:"spec-audit:ISSUE-PLAN-001",
     run_id:"run-colon-artifact-001",
@@ -112,6 +113,29 @@ test("contract-valid colon artifact IDs survive every public store read boundary
     appended,
   ]);
   assert.deepEqual(await store.recover(),{removed:[]});
+  const typePath=join(artifactRoot(root),appended.document_type);
+  assert.deepEqual(await readdir(typePath),["spec-audit%3AISSUE-PLAN-001"]);
+  assert.equal((await stat(artifactPath(root,appended))).isFile(),true);
+  await assert.rejects(stat(join(typePath,appended.artifact_id)));
+});
+
+test("encoded artifact directories cannot collide with public IDs or noncanonical encodings",async (t) => {
+  const {root,store}=await createTestStore(t);
+  const appended=await store.append(draft({
+    artifact_id:"spec-audit:ISSUE-PLAN-001",
+    run_id:"run-colon-collision-001",
+  }));
+  await assert.rejects(store.append(draft({
+    artifact_id:"spec-audit%3AISSUE-PLAN-001",
+    run_id:"run-encoded-collision-001",
+  })),/artifact_id must match/i);
+
+  const typePath=join(artifactRoot(root),appended.document_type);
+  await rename(
+    join(typePath,"spec-audit%3AISSUE-PLAN-001"),
+    join(typePath,"spec-audit%3aISSUE-PLAN-001"),
+  );
+  await assert.rejects(store.list(),/noncanonical|artifact directory|unexpected/i);
 });
 
 test("append rejects overwritten revisions and unresolved exact references",async (t) => {

@@ -58,6 +58,12 @@ function normalizeLabels(value,label) {
 export function normalizeRemoteIssue(value,{repository,marker,label="GitHub issue"}) {
   const issue=canonicalCopy(value,label);
   if (!isPlainObject(issue)) throw new TypeError(`${label} must be a plain object`);
+  const fields=[
+    "body","labels","marker","milestone","number","repository","title","url",
+  ];
+  if (canonicalJson(Object.keys(issue).sort())!==canonicalJson(fields)) {
+    throw new TypeError(`${label} must be a closed object without unsupported fields`);
+  }
   if (!Number.isSafeInteger(issue.number) || issue.number<1) {
     throw new TypeError(`${label}.number must be a positive safe integer`);
   }
@@ -65,7 +71,7 @@ export function normalizeRemoteIssue(value,{repository,marker,label="GitHub issu
   if (issue.url!==expectedUrl) {
     throw new TypeError(`${label}.url must identify issue ${issue.number} in ${repository}`);
   }
-  if (issue.repository!==undefined && issue.repository!==repository) {
+  if (issue.repository!==repository) {
     throw new TypeError(`${label}.repository conflicts with ${repository}`);
   }
   if (issue.marker!==marker) throw new TypeError(`${label}.marker conflicts with discovery marker`);
