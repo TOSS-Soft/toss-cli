@@ -116,6 +116,33 @@ function readyContext({twoIssues=false}={}) {
   };
 }
 
+function rebuildReadyContext(context) {
+  const {artifacts}=context;
+  const upstream={
+    pmAnalysis:artifacts.pmAnalysis,
+    architecture:artifacts.architecture,
+    issuePlan:artifacts.issuePlan,
+  };
+  const specAudit=auditSpecification(upstream).artifact;
+  artifacts.specAudits=[specAudit];
+  artifacts.traceGraph=buildTraceGraph(upstream);
+  const stateContent=transition("SPEC_AUDIT","AUDIT_PASSED",{
+    source_revision:artifacts.pmAnalysis.provenance.source_revision,
+    source_sha256:artifacts.pmAnalysis.provenance.source_sha256,
+    artifacts:{
+      pm_analysis:artifacts.pmAnalysis,
+      architecture:artifacts.architecture.artifact,
+      adrs:artifacts.architecture.adrs,
+      issue_plan:artifacts.issuePlan,
+      spec_audit:specAudit,
+    },
+  });
+  artifacts.analysisState.inputs=clone(stateContent.input_artifacts);
+  artifacts.analysisState.content=clone(stateContent);
+  rehash(artifacts.analysisState);
+  return context;
+}
+
 function publicKeyFingerprint(publicKey=PUBLIC_KEY) {
   return createHash("sha256").update(createPublicKey(publicKey).export({
     type:"spki",
@@ -487,6 +514,110 @@ test("all markers reconcile before any mutation when a later issue is duplicated
   assert.equal(store.calls.some(call => call.method==="append"),false);
 });
 
+test("two local markers cannot claim the same remote number or URL during preflight",async () => {
+  const context=readyContext({twoIssues:true});
+  const adapter=fakeAdapter();
+  const store=fakeStore();
+  const preview=await configuredWriter({adapter,store}).preview(context);
+  const byMarker=new Map(preview.operations.map(operation => [operation.marker,operation]));
+  adapter.findByMarker=async marker => {
+    adapter.calls.push({method:"findByMarker",marker});
+    const operation=byMarker.get(marker);
+    return [{
+      repository:operation.repository,
+      marker,
+      title:operation.title,
+      body:operation.body,
+      labels:operation.labels,
+      milestone:operation.milestone,
+      number:101,
+      url:"https://github.com/TOSS-Soft/toss-cli/issues/101",
+    }];
+  };
+
+  await assert.rejects(
+    configuredWriter({adapter,store}).publish(context,{
+      apply:true,
+      authority:authorityFor(context),
+    }),
+    /remote.*number|remote.*url|multiple local|collision|conflict/i,
+  );
+  assert.equal(adapter.created.length,0);
+  assert.equal(adapter.updated.length,0);
+  assert.equal(store.calls.some(call => call.method==="append"),false);
+});
+
+test("preflight rejects a remote identity claimed by immutable history from another plan",async () => {
+  const firstContext=readyContext();
+  const store=fakeStore();
+  await configuredWriter({adapter:fakeAdapter(),store}).publish(firstContext,{
+    apply:true,
+    authority:authorityFor(firstContext),
+  });
+  const appendCount=store.calls.filter(call => call.method==="append").length;
+
+  const context=readyContext();
+  context.artifacts.issuePlan.artifact_id="ISSUE-PLAN-002";
+  rehash(context.artifacts.issuePlan);
+  rebuildReadyContext(context);
+  const preview=await configuredWriter({adapter:fakeAdapter(),store:fakeStore()})
+    .preview(context);
+  const operation=preview.operations[0];
+  const adapter=fakeAdapter({seed:[{
+    repository:operation.repository,
+    marker:operation.marker,
+    title:operation.title,
+    body:operation.body,
+    labels:operation.labels,
+    milestone:operation.milestone,
+    number:101,
+    url:"https://github.com/TOSS-Soft/toss-cli/issues/101",
+  }]});
+  const record={record_id:"PUB-APPROVAL-002",revision:1};
+
+  await assert.rejects(
+    configuredWriter({adapter,store}).publish(context,{
+      apply:true,
+      authority:authorityFor(context,{
+        record_id:record.record_id,
+        record_sha256:sha256Canonical(record),
+      }),
+    }),
+    /immutable.*number|immutable.*url|multiple local|collision|conflict/i,
+  );
+  assert.equal(adapter.created.length,0);
+  assert.equal(adapter.updated.length,0);
+  assert.equal(store.calls.filter(call => call.method==="append").length,appendCount);
+});
+
+test("a prospective create mapping is validated against whole history before append",async () => {
+  const context=readyContext({twoIssues:true});
+  const adapter=fakeAdapter();
+  const store=fakeStore();
+  adapter.createIssue=async payload => {
+    adapter.calls.push({method:"createIssue",payload:clone(payload)});
+    const issue={
+      ...clone(payload),
+      number:101,
+      url:"https://github.com/TOSS-Soft/toss-cli/issues/101",
+    };
+    adapter.created.push(issue);
+    return clone(issue);
+  };
+
+  await assert.rejects(
+    configuredWriter({adapter,store}).publish(context,{
+      apply:true,
+      authority:authorityFor(context),
+    }),
+    /mapping.*number|mapping.*url|history|collision|conflict/i,
+  );
+  assert.equal(adapter.created.length,2);
+  assert.equal(store.artifacts.length,1);
+  assert.deepEqual(store.artifacts[0].content.mappings.map(mapping =>
+    mapping.local_issue_id),["ISSUE-001"]);
+});
+
 test("create result must exactly match the desired remote issue before persistence",async () => {
   const context=readyContext();
   const adapter=fakeAdapter();
@@ -547,6 +678,68 @@ test("update result must exactly match desired fields and an exact update reruns
   assert.deepEqual(second.mappings,first.mappings);
   assert.equal(adapter.updated.length,1);
   assert.equal(adapter.created.length,0);
+});
+
+test("a find outage after completion retains the complete artifact and reruns cleanly",async () => {
+  const context=readyContext();
+  const adapter=fakeAdapter();
+  const store=fakeStore();
+  const complete=await configuredWriter({adapter,store})
+    .publish(context,{apply:true,authority:authorityFor(context)});
+  const appendCount=store.calls.filter(call => call.method==="append").length;
+  const findByMarker=adapter.findByMarker;
+  adapter.findByMarker=async marker => {
+    adapter.calls.push({method:"findByMarker",marker});
+    const error=new Error("temporary find outage");
+    error.code="API_UNAVAILABLE";
+    error.retryable=true;
+    throw error;
+  };
+
+  const outage=await configuredWriter({adapter,store})
+    .publish(context,{apply:true,authority:authorityFor(context)});
+  assert.equal(outage.status,"retryable");
+  assert.deepEqual(outage.artifact,complete.artifact);
+  assert.equal(store.calls.filter(call => call.method==="append").length,appendCount);
+
+  adapter.findByMarker=findByMarker;
+  const rerun=await configuredWriter({adapter,store})
+    .publish(context,{apply:true,authority:authorityFor(context)});
+  assert.equal(rerun.status,"complete");
+  assert.deepEqual(rerun.artifact,complete.artifact);
+  assert.equal(store.calls.filter(call => call.method==="append").length,appendCount);
+});
+
+test("an update outage after completion retains the complete artifact and reruns cleanly",async () => {
+  const context=readyContext();
+  const adapter=fakeAdapter();
+  const store=fakeStore();
+  const complete=await configuredWriter({adapter,store})
+    .publish(context,{apply:true,authority:authorityFor(context)});
+  const appendCount=store.calls.filter(call => call.method==="append").length;
+  adapter.remote[0].title="stale after completion";
+  const updateIssue=adapter.updateIssue;
+  adapter.updateIssue=async (number,payload) => {
+    adapter.calls.push({method:"updateIssue",number,payload:clone(payload)});
+    const error=new Error("temporary update outage");
+    error.code="RATE_LIMITED";
+    error.retryable=true;
+    throw error;
+  };
+
+  const outage=await configuredWriter({adapter,store})
+    .publish(context,{apply:true,authority:authorityFor(context)});
+  assert.equal(outage.status,"retryable");
+  assert.deepEqual(outage.artifact,complete.artifact);
+  assert.equal(store.calls.filter(call => call.method==="append").length,appendCount);
+
+  adapter.updateIssue=updateIssue;
+  const rerun=await configuredWriter({adapter,store})
+    .publish(context,{apply:true,authority:authorityFor(context)});
+  assert.equal(rerun.status,"complete");
+  assert.deepEqual(rerun.artifact,complete.artifact);
+  assert.equal(adapter.updated.length,1);
+  assert.equal(store.calls.filter(call => call.method==="append").length,appendCount);
 });
 
 test("a partial rate-limit failure persists verified facts and resumes only missing creates",async () => {

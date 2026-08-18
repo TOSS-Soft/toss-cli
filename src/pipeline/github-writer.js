@@ -868,7 +868,16 @@ function publicationDraft(context,gates,approval,current,content) {
   };
 }
 
-async function persist(store,context,gates,approval,current,content) {
+async function persist(
+  store,
+  context,
+  gates,
+  approval,
+  current,
+  history,
+  trustedRegistry,
+  content,
+) {
   const previous=current.at(-1);
   if (previous && same(previous.content,content)) return previous;
   const draft=publicationDraft(context,gates,approval,current,content);
@@ -878,6 +887,7 @@ async function persist(store,context,gates,approval,current,content) {
       `Publication result construction failed: ${validation.errors[0]?.message}`,
     );
   }
+  validateHistorySemantics([...history,draft],trustedRegistry);
   let appended;
   try {
     appended=canonicalCopy(await store.append(draft),"Appended publication result");
@@ -908,6 +918,7 @@ async function persist(store,context,gates,approval,current,content) {
     throw new GitHubPublicationError("Artifact store returned conflicting verified persistence");
   }
   current.push(verified);
+  history.push(verified);
   return verified;
 }
 
@@ -938,6 +949,22 @@ function mappingFor(operation,remote) {
     url:remote.url,
     marker:operation.marker,
   };
+}
+
+function claimMapping(mapping,owner,numberClaims,urlClaims,label) {
+  for (const [identity,value,claims] of [
+    ["number",mapping.number,numberClaims],
+    ["URL",mapping.url,urlClaims],
+  ]) {
+    const claimedBy=claims.get(value);
+    if (claimedBy!==undefined && claimedBy.key!==owner.key) {
+      throw new GitHubPublicationError(
+        `${label} ${identity} is claimed by multiple local issues: ${
+          claimedBy.label} and ${owner.label}`,
+      );
+    }
+    claims.set(value,owner);
+  }
 }
 
 function retryableFailure(error,localIssueId) {
@@ -1018,6 +1045,41 @@ export function createGitHubWriter({adapter,store,authorityRegistry}={}) {
     }
     const mappings=mappingsFromHistory(current);
     let latest=current.at(-1);
+    const numberClaims=new Map();
+    const urlClaims=new Map();
+    const ownerFor=(issuePlan,localIssueId) => ({
+      key:canonicalJson({issue_plan:issuePlan,local_issue_id:localIssueId}),
+      label:`${issuePlan.artifact_id}@${issuePlan.revision}:${localIssueId}`,
+    });
+    const currentPlan=exactReference(context.artifacts.issuePlan);
+    for (const artifact of history) {
+      for (const mapping of artifact.content.mappings) {
+        claimMapping(
+          mapping,
+          ownerFor(artifact.content.issue_plan,mapping.local_issue_id),
+          numberClaims,
+          urlClaims,
+          "Immutable publication mapping",
+        );
+      }
+    }
+
+    async function transientResult(failure) {
+      if (mappings.has(failure.local_issue_id)) {
+        if (!latest) {
+          throw new GitHubPublicationError(
+            "Publication mappings exist without an immutable result artifact",
+          );
+        }
+        return publicResult(context,desired,"retryable",mappings,[failure],latest);
+      }
+      const content=publicationContent(context,trusted,mappings,[failure],"retryable");
+      latest=await persist(
+        artifacts,context,gates,trusted.approval,current,history,
+        configuredAuthority,content,
+      );
+      return publicResult(context,desired,"retryable",mappings,[failure],latest);
+    }
 
     const reconciled=[];
     for (const operation of desired.operations) {
@@ -1031,9 +1093,7 @@ export function createGitHubWriter({adapter,store,authorityRegistry}={}) {
       } catch (error) {
         const failure=retryableFailure(error,operation.local_issue_id);
         if (!failure) throw error;
-        const content=publicationContent(context,trusted,mappings,[failure],"retryable");
-        latest=await persist(artifacts,context,gates,trusted.approval,current,content);
-        return publicResult(context,desired,"retryable",mappings,[failure],latest);
+        return transientResult(failure);
       }
       if (matches.length>1) {
         throw new GitHubPublicationError(
@@ -1052,6 +1112,15 @@ export function createGitHubWriter({adapter,store,authorityRegistry}={}) {
             recorded.marker!==remote.marker)) {
         throw new GitHubPublicationError(
           `GitHub marker conflicts with immutable mapping for ${operation.local_issue_id}`,
+        );
+      }
+      if (remote) {
+        claimMapping(
+          mappingFor(operation,remote),
+          ownerFor(currentPlan,operation.local_issue_id),
+          numberClaims,
+          urlClaims,
+          "Remote preflight mapping",
         );
       }
       reconciled.push({operation,payload,recorded,remote});
@@ -1089,11 +1158,16 @@ export function createGitHubWriter({adapter,store,authorityRegistry}={}) {
       } catch (error) {
         const failure=retryableFailure(error,operation.local_issue_id);
         if (!failure) throw error;
-        const content=publicationContent(context,trusted,mappings,[failure],"retryable");
-        latest=await persist(artifacts,context,gates,trusted.approval,current,content);
-        return publicResult(context,desired,"retryable",mappings,[failure],latest);
+        return transientResult(failure);
       }
       const mapping=mappingFor(operation,remote);
+      claimMapping(
+        mapping,
+        ownerFor(currentPlan,operation.local_issue_id),
+        numberClaims,
+        urlClaims,
+        "Verified remote mapping",
+      );
       if (recorded && !same(recorded,mapping)) {
         throw new GitHubPublicationError(
           `Verified remote fact conflicts with mapping for ${operation.local_issue_id}`,
@@ -1102,7 +1176,10 @@ export function createGitHubWriter({adapter,store,authorityRegistry}={}) {
       mappings.set(operation.local_issue_id,mapping);
       const status=mappings.size===desired.operations.length ? "complete" : "retryable";
       const content=publicationContent(context,trusted,mappings,[],status);
-      latest=await persist(artifacts,context,gates,trusted.approval,current,content);
+      latest=await persist(
+        artifacts,context,gates,trusted.approval,current,history,
+        configuredAuthority,content,
+      );
     }
     return publicResult(context,desired,"complete",mappings,[],latest);
   }

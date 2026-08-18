@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {
+  copyFile,
   mkdir,
   mkdtemp,
   readFile,
@@ -136,6 +137,67 @@ test("encoded artifact directories cannot collide with public IDs or noncanonica
     join(typePath,"spec-audit%3aISSUE-PLAN-001"),
   );
   await assert.rejects(store.list(),/noncanonical|artifact directory|unexpected/i);
+});
+
+test("legacy raw-colon directories remain readable and migrate before a new revision",async (t) => {
+  const {root,store}=await createTestStore(t);
+  const first=await store.append(draft({
+    artifact_id:"spec-audit:ISSUE-PLAN-001",
+    run_id:"run-legacy-colon-001",
+  }));
+  const encodedDirectory=dirname(artifactPath(root,first));
+  const rawDirectory=join(dirname(encodedDirectory),first.artifact_id);
+  await rename(encodedDirectory,rawDirectory);
+
+  assert.deepEqual(await store.get(reference(first)),first);
+  assert.deepEqual(await store.verify(reference(first)),first);
+  assert.deepEqual(await store.list({artifact_id:first.artifact_id}),[first]);
+  assert.deepEqual(await store.recover(),{removed:[]});
+
+  const second=await store.append(withoutContentHash(draft({
+    artifact_id:first.artifact_id,
+    run_id:"run-legacy-colon-002",
+    parents:[reference(first)],
+    content:{entities:[{
+      id:"REQ-001",
+      kind:"requirement",
+      meaning:"Legacy identity migrated safely",
+    }]},
+  })));
+  assert.equal(second.revision,2);
+  assert.deepEqual(await store.get(reference(first)),first);
+  assert.deepEqual(await store.verify(reference(second)),second);
+  assert.deepEqual(await store.list({artifact_id:first.artifact_id}),[first,second]);
+  assert.equal((await stat(artifactPath(root,first))).isFile(),true);
+  assert.equal((await stat(artifactPath(root,second))).isFile(),true);
+  await assert.rejects(stat(rawDirectory));
+});
+
+test("raw and encoded directories for one public ID are rejected as ambiguous",async (t) => {
+  const {root,store}=await createTestStore(t);
+  const appended=await store.append(draft({
+    artifact_id:"spec-audit:ISSUE-PLAN-001",
+    run_id:"run-colon-ambiguity-001",
+  }));
+  const encodedFile=artifactPath(root,appended);
+  const rawDirectory=join(dirname(dirname(encodedFile)),appended.artifact_id);
+  await mkdir(rawDirectory);
+  await copyFile(encodedFile,join(rawDirectory,basename(encodedFile)));
+
+  await assert.rejects(store.list(),/ambiguous|collision|multiple directories/i);
+  await assert.rejects(store.get(reference(appended)),/ambiguous|collision|multiple directories/i);
+  await assert.rejects(store.recover(),/ambiguous|collision|multiple directories/i);
+});
+
+test("legacy discovery still rejects unsafe or encoded public identities",async (t) => {
+  const {root,store}=await createTestStore(t);
+  const typePath=join(artifactRoot(root),"pm-analysis");
+  await mkdir(join(typePath,"unsafe%2Fidentity"),{recursive:true});
+
+  await assert.rejects(
+    store.list(),
+    /artifact directory|canonical encoded identity|reversible encoded identity/i,
+  );
 });
 
 test("append rejects overwritten revisions and unresolved exact references",async (t) => {

@@ -95,7 +95,10 @@ function artifactDirectoryName(artifactId) {
   return encodeURIComponent(requireArtifactId(artifactId));
 }
 
-function artifactIdFromDirectoryName(name) {
+function artifactIdentityFromDirectoryName(name) {
+  if (ARTIFACT_ID_PATTERN.test(name) && name.includes(":")) {
+    return {artifactId:name,legacy:true};
+  }
   let artifactId;
   try {
     artifactId=decodeURIComponent(name);
@@ -111,7 +114,7 @@ function artifactIdFromDirectoryName(name) {
       `Artifact directory name is not a canonical encoded identity: ${name}`,
     );
   }
-  return artifactId;
+  return {artifactId,legacy:false};
 }
 
 function requireRevision(value,field="revision") {
@@ -528,6 +531,7 @@ async function scanArtifactTree(rootInfo) {
     if (!documentEntry.isDirectory() || !documentTypes.has(documentEntry.name)) {
       throw unexpectedEntry(documentEntry.name,"expected a registered document type directory");
     }
+    const identityDirectories=new Map();
     for (const artifactEntry of await safeReadDirectory(
       rootInfo,
       documentPath,
@@ -546,7 +550,14 @@ async function scanArtifactTree(rootInfo) {
           "expected an artifact identity directory",
         );
       }
-      artifactIdFromDirectoryName(artifactEntry.name);
+      const identity=artifactIdentityFromDirectoryName(artifactEntry.name);
+      const existingDirectory=identityDirectories.get(identity.artifactId);
+      if (existingDirectory!==undefined && existingDirectory!==artifactEntry.name) {
+        throw new ArtifactIntegrityError(
+          `Artifact identity ${identity.artifactId} has ambiguous raw and encoded directories`,
+        );
+      }
+      identityDirectories.set(identity.artifactId,artifactEntry.name);
       for (const fileEntry of await safeReadDirectory(
         rootInfo,
         artifactPath,
@@ -585,6 +596,45 @@ async function scanArtifactTree(rootInfo) {
     finalPaths:finalPaths.sort(),
     temporaryPaths:temporaryPaths.sort(),
   };
+}
+
+async function migrateLegacyArtifactDirectory(rootInfo,documentType,artifactId) {
+  const encodedName=artifactDirectoryName(artifactId);
+  if (encodedName===artifactId || process.platform==="win32") return;
+  const parent=join(rootInfo.lexicalRoot,...ARTIFACT_ROOT_PARTS,documentType);
+  const legacyPath=join(parent,artifactId);
+  const encodedPath=join(parent,encodedName);
+  const legacyStat=await lstatOptional(legacyPath);
+  const encodedStat=await lstatOptional(encodedPath);
+  if (legacyStat) {
+    await assertSafeExistingPath(rootInfo,legacyPath,{
+      kind:"directory",
+      label:"Legacy artifact directory",
+    });
+  }
+  if (encodedStat) {
+    await assertSafeExistingPath(rootInfo,encodedPath,{
+      kind:"directory",
+      label:"Encoded artifact directory",
+    });
+  }
+  if (legacyStat && encodedStat) {
+    throw new ArtifactIntegrityError(
+      `Artifact identity ${artifactId} has ambiguous raw and encoded directories`,
+    );
+  }
+  if (!legacyStat) return;
+  await rename(legacyPath,encodedPath);
+  const migratedStat=await assertSafeExistingPath(rootInfo,encodedPath,{
+    kind:"directory",
+    label:"Migrated artifact directory",
+  });
+  if (!sameFile(legacyStat,migratedStat) || await lstatOptional(legacyPath)) {
+    throw new ArtifactIntegrityError(
+      `Artifact identity ${artifactId} legacy directory migration was not exact`,
+    );
+  }
+  await syncContainingDirectory(rootInfo,parent);
 }
 
 export function createArtifactStore({root,now=() => new Date(),randomId=randomUUID}={}) {
@@ -647,11 +697,19 @@ export function createArtifactStore({root,now=() => new Date(),randomId=randomUU
         `Artifact filename does not match content at ${pathForDisplay(rootInfo.lexicalRoot,path)}`,
       );
     }
+    const directoryName=basename(dirname(path));
+    const directoryIdentity=artifactIdentityFromDirectoryName(directoryName);
+    if (directoryIdentity.artifactId!==value.artifact_id) {
+      throw new ArtifactIntegrityError(
+        `Artifact directory does not match content at ${
+          pathForDisplay(rootInfo.lexicalRoot,path)}`,
+      );
+    }
     const expectedPath=join(
       rootInfo.lexicalRoot,
       ...ARTIFACT_ROOT_PARTS,
       value.document_type,
-      artifactDirectoryName(value.artifact_id),
+      directoryName,
       artifactFileName(value.revision,value.content_sha256),
     );
     if (resolve(path)!==resolve(expectedPath)) {
@@ -1004,6 +1062,11 @@ export function createArtifactStore({root,now=() => new Date(),randomId=randomUU
     const rootInfo=await prepareRoot(root);
 
     return withStoreLock(rootInfo,async lock => {
+      await migrateLegacyArtifactDirectory(
+        rootInfo,
+        artifact.document_type,
+        artifact.artifact_id,
+      );
       const directory=await ensureContainedDirectory(rootInfo,[
         ...ARTIFACT_ROOT_PARTS,
         artifact.document_type,
