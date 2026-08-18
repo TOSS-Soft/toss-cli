@@ -1,0 +1,81 @@
+{
+  "schema_version": "pdor-rules.v1",
+  "document_type": "pdor-rules",
+  "rules": [
+    {
+      "id": "PDOR-001-ARTIFACT-INTEGRITY",
+      "severity": "blocking",
+      "description": "Every supplied pipeline artifact is canonical, known-version, schema-valid, hash-valid, uniquely identified, exact-source, and linked to the exact authoritative upstream revisions."
+    },
+    {
+      "id": "PDOR-010-PROJECT-FRAMING",
+      "severity": "blocking",
+      "description": "Goals, project scope, and non-goals are defined."
+    },
+    {
+      "id": "PDOR-020-PRODUCT-DEFINITION",
+      "severity": "blocking",
+      "description": "Actors, functional requirements, non-functional requirements, and business rules are defined."
+    },
+    {
+      "id": "PDOR-030-SYSTEM-CONTEXT",
+      "severity": "blocking",
+      "description": "Domains, major flows, integrations, and constraints are defined."
+    },
+    {
+      "id": "PDOR-040-BLOCKING-DECISIONS",
+      "severity": "blocking",
+      "description": "The independently verified unresolved P0/P1/P2 decision count is zero.",
+      "policy": {
+        "blocking_severities": ["P0", "P1", "P2"],
+        "warning_severities": ["P3", "P4"],
+        "package_required_when": "blocking-question-present",
+        "supplied_package_requires": [
+          "external-authority-verification",
+          "exact-cover-all-pm-questions",
+          "exact-retained-pm-fields"
+        ]
+      }
+    },
+    {
+      "id": "PDOR-050-ARCHITECTURE-QUESTIONS",
+      "severity": "blocking",
+      "description": "Every architecture question is resolved and linked to an ADR."
+    },
+    {
+      "id": "PDOR-060-APPROVED-ADRS",
+      "severity": "blocking",
+      "description": "Required ADRs exist and are accepted and approved."
+    },
+    {
+      "id": "PDOR-070-DELIVERY-RECORDS",
+      "severity": "blocking",
+      "description": "Dependencies, risks, and assumptions are recorded."
+    },
+    {
+      "id": "PDOR-080-EPIC-MAP",
+      "severity": "blocking",
+      "description": "The authoritative epic-to-issue map is complete."
+    },
+    {
+      "id": "PDOR-090-REQUIREMENT-AC-COVERAGE",
+      "severity": "blocking",
+      "description": "Requirement-to-acceptance-criterion coverage is exactly 100 percent."
+    },
+    {
+      "id": "PDOR-100-LATEST-SPEC-AUDIT",
+      "severity": "blocking",
+      "description": "The latest exact-source Spec Audit equals a fresh independent audit and has status PASS."
+    },
+    {
+      "id": "PDOR-110-ANALYSIS-STATE",
+      "severity": "blocking",
+      "description": "Current analysis-state evidence is an exact-source verified AUDIT_PASSED transition to READY_FOR_ISSUES."
+    },
+    {
+      "id": "PDOR-120-UNRESOLVED-ASSUMPTIONS",
+      "severity": "warning",
+      "description": "Unresolved P3/P4 assumptions remain visible without masking blocking failures."
+    }
+  ]
+}

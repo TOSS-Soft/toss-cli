@@ -21,6 +21,7 @@ const schemaDefinitions=[
   ["trace-graph.v1","../../contracts/pipeline/trace-graph.v1.schema.json"],
   ["trace-result.v1","../../contracts/pipeline/trace-result.v1.schema.json"],
   ["transition-event.v1","../../contracts/pipeline/transition-event.v1.schema.json"],
+  ["pdor-result.v1","../../contracts/pipeline/pdor-result.v1.schema.json"],
 ];
 
 function loadSchema(path) {

@@ -1,0 +1,50 @@
+[
+  {
+    "rule_id": "PDOR-001-ARTIFACT-INTEGRITY",
+    "mutation": "unknown-pm-version"
+  },
+  {
+    "rule_id": "PDOR-010-PROJECT-FRAMING",
+    "mutation": "missing-project-scope"
+  },
+  {
+    "rule_id": "PDOR-020-PRODUCT-DEFINITION",
+    "mutation": "missing-actors"
+  },
+  {
+    "rule_id": "PDOR-030-SYSTEM-CONTEXT",
+    "mutation": "missing-integrations"
+  },
+  {
+    "rule_id": "PDOR-040-BLOCKING-DECISIONS",
+    "mutation": "unresolved-p2-question"
+  },
+  {
+    "rule_id": "PDOR-050-ARCHITECTURE-QUESTIONS",
+    "mutation": "pending-architecture-question"
+  },
+  {
+    "rule_id": "PDOR-060-APPROVED-ADRS",
+    "mutation": "pending-adr"
+  },
+  {
+    "rule_id": "PDOR-070-DELIVERY-RECORDS",
+    "mutation": "missing-risks"
+  },
+  {
+    "rule_id": "PDOR-080-EPIC-MAP",
+    "mutation": "missing-epic-map"
+  },
+  {
+    "rule_id": "PDOR-090-REQUIREMENT-AC-COVERAGE",
+    "mutation": "uncovered-requirement"
+  },
+  {
+    "rule_id": "PDOR-100-LATEST-SPEC-AUDIT",
+    "mutation": "non-pass-audit"
+  },
+  {
+    "rule_id": "PDOR-110-ANALYSIS-STATE",
+    "mutation": "incompatible-analysis-state"
+  }
+]

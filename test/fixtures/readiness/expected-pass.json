@@ -1,0 +1,10 @@
+{
+  "schema_version": "pdor-result.v1",
+  "document_type": "pdor-result",
+  "rules_version": "pdor-rules.v1",
+  "ready_for_issue_generation": true,
+  "failure_rule_ids": [],
+  "warning_rule_ids": [
+    "PDOR-120-UNRESOLVED-ASSUMPTIONS"
+  ]
+}
