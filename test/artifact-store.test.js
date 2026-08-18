@@ -98,6 +98,22 @@ test("append persists a content-addressed revision and is idempotent",async (t) 
   ]);
 });
 
+test("contract-valid colon artifact IDs survive every public store read boundary",async (t) => {
+  const {store}=await createTestStore(t);
+  const appended=await store.append(draft({
+    artifact_id:"spec-audit:ISSUE-PLAN-001",
+    run_id:"run-colon-artifact-001",
+  }));
+  const exact=reference(appended);
+
+  assert.equal((await store.get(exact)).artifact_id,"spec-audit:ISSUE-PLAN-001");
+  assert.equal((await store.verify(exact)).artifact_id,"spec-audit:ISSUE-PLAN-001");
+  assert.deepEqual(await store.list({artifact_id:"spec-audit:ISSUE-PLAN-001"}),[
+    appended,
+  ]);
+  assert.deepEqual(await store.recover(),{removed:[]});
+});
+
 test("append rejects overwritten revisions and unresolved exact references",async (t) => {
   const {store}=await createTestStore(t);
   const first=await store.append(draft());

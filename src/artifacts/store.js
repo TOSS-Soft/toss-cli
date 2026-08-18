@@ -26,7 +26,7 @@ import {
 } from "./errors.js";
 
 const ARTIFACT_ROOT_PARTS=["project-management","artifacts"];
-const ARTIFACT_ID_PATTERN=/^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const ARTIFACT_ID_PATTERN=/^[A-Za-z0-9][A-Za-z0-9:._-]*$/;
 const SHA256_PATTERN=/^[a-f0-9]{64}$/;
 const MAX_REVISION=999999;
 const REVISION_FILE_PATTERN=/^r(\d{6})-([a-f0-9]{64})\.json$/;
@@ -85,7 +85,7 @@ function requireNonEmptyString(value,field) {
 function requireArtifactId(value) {
   if (typeof value!=="string" || !ARTIFACT_ID_PATTERN.test(value)) {
     throw new ArtifactValidationError(
-      "artifact_id must use only letters, numbers, dots, underscores, and hyphens",
+      "artifact_id must match ^[A-Za-z0-9][A-Za-z0-9:._-]*$",
     );
   }
   return value;

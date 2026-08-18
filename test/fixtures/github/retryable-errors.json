@@ -1,0 +1,5 @@
+[
+  {"code":"RATE_LIMITED","message":"GitHub rate limit exceeded","retryable":true},
+  {"code":"PERMISSION_DENIED","message":"GitHub permission denied","retryable":true},
+  {"code":"API_UNAVAILABLE","message":"GitHub API unavailable","retryable":true}
+]
