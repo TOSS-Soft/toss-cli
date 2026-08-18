@@ -40,6 +40,7 @@ function compareText(left,right) {
 
 function sameStringSet(left,right) {
   return Array.isArray(left) && Array.isArray(right) &&
+    new Set(left).size===left.length && new Set(right).size===right.length &&
     canonicalJson([...left].sort(compareText))===canonicalJson([...right].sort(compareText));
 }
 
@@ -944,7 +945,9 @@ function bindingFindings(graph) {
           sameStringSet(exception.scope.state_ids,application.state_ids) &&
           sameStringSet(exception.scope.component_ids,application.component_ids) &&
           exactComponents && exactStates &&
-          canonicalJson(exception.scope)===canonicalJson(authorization.grant.scope) &&
+          sameStringSet(exception.scope.screen_ids,authorization.grant.scope.screen_ids) &&
+          sameStringSet(exception.scope.state_ids,authorization.grant.scope.state_ids) &&
+          sameStringSet(exception.scope.component_ids,authorization.grant.scope.component_ids) &&
           canonicalJson(exception.provenance)===canonicalJson(system.provenance) &&
           Date.parse(exception.valid_until)>=graphTime &&
           Date.parse(exception.valid_until)>=Date.parse(authorization.approval.content.approved_at);

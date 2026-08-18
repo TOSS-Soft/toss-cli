@@ -519,11 +519,71 @@ function approvedExceptionGraph() {
   return rebuildGraph(graph);
 }
 
+function multiMemberApprovedExceptionGraph() {
+  let graph=approvedExceptionGraph();
+  const system=graph.find(artifact => artifact.document_type==="design-system");
+  const screen=graph.find(artifact => artifact.document_type==="screen-spec");
+  const approval=graph.find(artifact => artifact.document_type==="design-approval");
+  system.content.components.push({
+    component_id:"COMP-LINK",name:"Link",states:["default"],
+    rule_ids:["RULE-COLOR-PRIMARY"],
+  });
+  screen.content.component_refs.push(entityReference(system,"COMP-LINK"));
+  for (const state of screen.content.states) state.component_ids.push("COMP-LINK");
+  const scope={
+    screen_ids:["SCREEN-CHECKOUT"],
+    state_ids:["STATE-DEFAULT","STATE-SUCCESS"],
+    component_ids:["COMP-BUTTON","COMP-LINK"],
+  };
+  system.content.exceptions[0].scope=clone(scope);
+  screen.content.rule_applications[0].state_ids=clone(scope.state_ids);
+  screen.content.rule_applications[0].component_ids=clone(scope.component_ids);
+  approval.content.exception_grants[0].scope=clone(scope);
+  return rebuildGraph(graph);
+}
+
 test("only an exact approved unexpired human exception grant authorizes an override",async () => {
   const {validateDesignSystemRules}=await import("../src/pipeline/design-contracts.js");
   const graph=approvedExceptionGraph();
   assert.equal(validateDesignSystemRules(graph).valid,true,
     JSON.stringify(validateDesignSystemRules(graph).findings));
+});
+
+test("approved exception scope comparison is order-independent and duplicate-aware",async t => {
+  const {validateDesignSystemRules}=await import("../src/pipeline/design-contracts.js");
+  await t.test("differently ordered human grant is the same exact scope",() => {
+    let graph=multiMemberApprovedExceptionGraph();
+    const grant=graph.find(artifact =>
+      artifact.document_type==="design-approval").content.exception_grants[0];
+    grant.scope.screen_ids.reverse();
+    grant.scope.state_ids.reverse();
+    grant.scope.component_ids.reverse();
+    graph=rebuildGraph(graph);
+    const result=validateDesignSystemRules(graph);
+    assert.equal(result.valid,true,JSON.stringify(result.findings));
+  });
+
+  const cases=[
+    ["duplicate screen",scope => scope.screen_ids.push("SCREEN-CHECKOUT")],
+    ["missing screen",scope => { scope.screen_ids=[]; }],
+    ["extra screen",scope => scope.screen_ids.push("SCREEN-OTHER")],
+    ["duplicate state",scope => scope.state_ids.push("STATE-DEFAULT")],
+    ["missing state",scope => { scope.state_ids=["STATE-DEFAULT"]; }],
+    ["extra state",scope => scope.state_ids.push("STATE-OTHER")],
+    ["duplicate component",scope => scope.component_ids.push("COMP-BUTTON")],
+    ["missing component",scope => { scope.component_ids=["COMP-BUTTON"]; }],
+    ["extra component",scope => scope.component_ids.push("COMP-OTHER")],
+  ];
+  for (const [name,mutate] of cases) await t.test(name,() => {
+    let graph=multiMemberApprovedExceptionGraph();
+    const grant=graph.find(artifact =>
+      artifact.document_type==="design-approval").content.exception_grants[0];
+    mutate(grant.scope);
+    graph=rebuildGraph(graph);
+    const result=validateDesignSystemRules(graph);
+    assert.equal(result.valid,false);
+    assert.ok(findingTypes(result).includes("APPROVED_EXCEPTION_INVALID"));
+  });
 });
 
 test("rejected, wrong-authority, expired, wrong-scope, wrong-revision and replayed grants fail",async t => {
