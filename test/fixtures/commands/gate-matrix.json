@@ -1,0 +1,13 @@
+[
+  {"name":"unresolved P0-P2 decision","gate":"decision","expected_exit":4},
+  {"name":"pending ADR approval","gate":"architecture","expected_exit":4},
+  {"name":"failed spec audit","gate":"audit","expected_exit":5},
+  {"name":"stale spec audit","gate":"audit","expected_exit":4},
+  {"name":"failed PDoR","gate":"readiness","expected_exit":4},
+  {"name":"missing publication approval","gate":"approval","expected_exit":4},
+  {"name":"invalid publication approval","gate":"approval","expected_exit":4},
+  {"name":"stale publication approval","gate":"approval","expected_exit":4},
+  {"name":"replayed publication approval","gate":"approval","expected_exit":6},
+  {"name":"artifact store conflict","gate":"store","expected_exit":6},
+  {"name":"remote marker duplicate","gate":"remote","expected_exit":6}
+]

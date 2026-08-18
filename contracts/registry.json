@@ -108,6 +108,30 @@
         "claim an unverified GitHub mapping",
         "change readiness or analysis state"
       ]
+    },
+    {
+      "document_type": "decision-answer",
+      "schema_version": "acp.v1",
+      "producer": "human-authority",
+      "consumers": ["orchestrator", "readiness-evaluator", "human-reviewer"],
+      "allowed_mutations": ["append one exact immutable answer record"],
+      "forbidden_actions": [
+        "mutate an existing revision",
+        "change the source decision package or question",
+        "select or embed a trusted public key"
+      ]
+    },
+    {
+      "document_type": "adr-approval",
+      "schema_version": "acp.v1",
+      "producer": "human-authority",
+      "consumers": ["orchestrator", "readiness-evaluator", "human-reviewer"],
+      "allowed_mutations": ["append one exact immutable ADR approval record"],
+      "forbidden_actions": [
+        "mutate an existing revision",
+        "change an Architect-owned ADR",
+        "select or embed a trusted public key"
+      ]
     }
   ]
 }

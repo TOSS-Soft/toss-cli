@@ -151,13 +151,15 @@ On success, `ok` is `true`, `data` is any canonical JSON value, and `error` is
 object `{ "code": "STABLE_CODE", "message": "Actionable message" }`.
 Envelope and error objects reject additional properties.
 
-Project and feature orchestration have one scoped blocked-data outcome because
-the exact decision/ADR package or feature findings must remain machine-visible.
-It uses the existing data branch (`ok: true`, `error: null`) with closed fields
-`blocked: true` and `command_exit_code: 4`; the dispatcher and process still
-return exit code 4. This is a blocked operational outcome, not a claim that the
-requested preparation completed. Interactive stops retain the same canonical
-package/findings without `command_exit_code`.
+Lifecycle orchestration has scoped nonzero data outcomes when an exact
+decision/ADR package, feature findings, readiness evidence, or completed audit
+findings must remain machine-visible. They use the existing data branch
+(`ok: true`, `error: null`) with `blocked: true` and a closed
+`command_exit_code` of 4, 5, or 6. The dispatcher and process preserve that
+code. Other values are ignored and successful data exits 0. This is an
+operational gate, validation, or conflict outcome, not a claim that the
+requested preparation or publication completed. Interactive stops may retain
+the same canonical package/findings without `command_exit_code`.
 
 `successResult(data)` and `failureResult(error)` cross a canonical JSON
 boundary and recursively freeze their result. They MUST reject `undefined`,

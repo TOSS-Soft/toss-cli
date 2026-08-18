@@ -25,6 +25,8 @@ const SCHEMA_BY_TYPE=Object.freeze({
   "transition-event":"transition-event.v1",
   "project-input":"project-input.v1",
   "feature-delta":"feature-delta.v1",
+  "decision-answer":"decision-answer.v1",
+  "adr-approval":"adr-approval.v1",
 });
 
 export class OrchestrationError extends Error {

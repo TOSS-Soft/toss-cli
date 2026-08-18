@@ -250,6 +250,30 @@ async function builtinHandler(name) {
     const {runFeatureCommand}=await import("./feature.js");
     return runFeatureCommand;
   }
+  if (name.startsWith("decisions.")) {
+    const {runDecisionsCommand}=await import("./decisions.js");
+    return runDecisionsCommand;
+  }
+  if (name.startsWith("architecture.")) {
+    const {runArchitectureCommand}=await import("./architecture.js");
+    return runArchitectureCommand;
+  }
+  if (name==="plan.show") {
+    const {runPlanCommand}=await import("./plan.js");
+    return runPlanCommand;
+  }
+  if (name==="audit.run") {
+    const {runAuditCommand}=await import("./audit.js");
+    return runAuditCommand;
+  }
+  if (name==="readiness.check") {
+    const {runReadinessCommand}=await import("./readiness.js");
+    return runReadinessCommand;
+  }
+  if (name.startsWith("issues.")) {
+    const {runIssuesCommand}=await import("./issues.js");
+    return runIssuesCommand;
+  }
   return null;
 }
 
@@ -347,9 +371,13 @@ export async function dispatchCommand(command,context={}) {
       handler,undefined,[normalized,normalizedContext.services],
     );
     const succeeded=successResult(data);
-    const exitCode=succeeded.data?.blocked===true &&
-      succeeded.data?.command_exit_code===EXIT_CODES.BLOCKED ?
-      EXIT_CODES.BLOCKED : EXIT_CODES.SUCCESS;
+    const commandExitCode=succeeded.data?.blocked===true ?
+      succeeded.data?.command_exit_code : undefined;
+    const exitCode=[
+      EXIT_CODES.BLOCKED,
+      EXIT_CODES.VALIDATION_FAILED,
+      EXIT_CODES.CONFLICT,
+    ].includes(commandExitCode) ? commandExitCode : EXIT_CODES.SUCCESS;
     return result(exitCode,succeeded);
   } catch (error) {
     const failure=closedFailure(error);

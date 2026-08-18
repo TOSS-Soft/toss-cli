@@ -426,7 +426,7 @@ test("Task 14 dispatch lazily invokes project commands and preserves command-res
   assert.equal(dispatched.result.schema_version,"command-result.v1");
   assert.equal(dispatched.result.ok,true);
 
-  const future=await dispatchCommand(parseCommand(["issues","preview"]),{});
+  const future=await dispatchCommand(parseCommand(["artifacts","list"]),{});
   assert.equal(future.exitCode,69);
   assert.equal(future.result.error.code,"COMMAND_NOT_IMPLEMENTED");
 });

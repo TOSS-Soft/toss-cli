@@ -374,7 +374,7 @@ test("failureResult trusts native Errors but rejects proxies without observable 
 });
 
 test("dispatchCommand fails safely for declared commands without handlers",async () => {
-  const command=parseCommand(["readiness","check","--json"]);
+  const command=parseCommand(["artifacts","list","--json"]);
   const dispatched=await dispatchCommand(command,{});
 
   assert.equal(dispatched.exitCode,EXIT_CODES.NOT_IMPLEMENTED);
@@ -414,7 +414,7 @@ test("dispatchCommand invokes only an explicit own data-function handler",async 
 });
 
 test("dispatchCommand ignores inherited context injection without invoking getters",async t => {
-  const command=parseCommand(["readiness","check"]);
+  const command=parseCommand(["artifacts","list"]);
   const originalHandlers=Object.getOwnPropertyDescriptor(Object.prototype,"handlers");
   const originalServices=Object.getOwnPropertyDescriptor(Object.prototype,"services");
   t.after(() => {
@@ -429,7 +429,7 @@ test("dispatchCommand ignores inherited context injection without invoking gette
     configurable:true,
     enumerable:false,
     value:{
-      "readiness.check":async () => {
+      "artifacts.list":async () => {
         inheritedHandlerCalls+=1;
         return {ready:true};
       },
@@ -445,7 +445,7 @@ test("dispatchCommand ignores inherited context injection without invoking gette
     enumerable:false,
     get() {
       inheritedHandlerReads+=1;
-      return {"readiness.check":async () => ({ready:true})};
+      return {"artifacts.list":async () => ({ready:true})};
     },
   });
   dispatched=await dispatchCommand(command,{});
@@ -463,7 +463,7 @@ test("dispatchCommand ignores inherited context injection without invoking gette
   });
   dispatched=await dispatchCommand(command,{
     handlers:{
-      "readiness.check":async (_command,services) => ({
+      "artifacts.list":async (_command,services) => ({
         serviceWasAbsent:services===undefined,
       }),
     },
@@ -773,7 +773,10 @@ test("trace dispatch maps stable input and store categories to documented exit c
 test("every remaining declared future command dispatches to the safe unavailable result",async () => {
   for (const row of commandMatrix) {
     if (row.name==="trace" || row.name.startsWith("project.") ||
-        row.name.startsWith("feature.") || row.argv.includes("--apply")) continue;
+        row.name.startsWith("feature.") || row.name.startsWith("decisions.") ||
+        row.name.startsWith("architecture.") || row.name==="plan.show" ||
+        row.name==="audit.run" || row.name==="readiness.check" ||
+        row.name.startsWith("issues.")) continue;
     const dispatched=await dispatchCommand(parseCommand(row.argv),{});
     assert.equal(dispatched.exitCode,EXIT_CODES.NOT_IMPLEMENTED,row.name);
     assert.equal(dispatched.result.error.code,"COMMAND_NOT_IMPLEMENTED",row.name);
@@ -818,7 +821,7 @@ test("CLI usage failures are deterministic and JSON failures use stdout",() => {
   assert.equal(unknownHelp.status,EXIT_CODES.USAGE);
   assert.match(unknownHelp.stderr,/unknown command/i);
 
-  const unavailable=runCli(["readiness","check","--json"]);
+  const unavailable=runCli(["artifacts","list","--json"]);
   assert.equal(unavailable.status,EXIT_CODES.NOT_IMPLEMENTED);
   assert.equal(unavailable.stderr,"");
   const result=JSON.parse(unavailable.stdout);
@@ -870,7 +873,7 @@ import {register} from "node:module";
 register(${JSON.stringify(new URL(`file://${loader}`).href)});
 `,"utf8");
 
-  const result=runCli(["readiness","check","--json"],{imports:[register]});
+  const result=runCli(["artifacts","list","--json"],{imports:[register]});
   assert.equal(result.status,EXIT_CODES.NOT_IMPLEMENTED,result.stderr);
   assert.equal(JSON.parse(result.stdout).schema_version,"command-result.v1");
 });
