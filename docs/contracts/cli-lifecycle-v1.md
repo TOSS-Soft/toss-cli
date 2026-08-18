@@ -82,7 +82,7 @@ MUST fail with `USAGE` before a handler or store is called.
 
 Prompt-capable commands operate interactively by default. With
 `--non-interactive`, their parsed `interactive` property is `false` and a
-handler MUST return a closed failure instead of prompting for missing input.
+handler MUST return a closed nonzero outcome instead of prompting for missing input.
 Commands not marked prompt-capable reject `--non-interactive`; callers do not
 need to restate non-interactivity for commands that never prompt.
 
@@ -116,9 +116,10 @@ bad input.
 ### Human mode
 
 Without `--json`, successful lifecycle output is written to stdout. Actionable
-usage, validation, blocked, conflict, unavailable, and internal errors are
-written to stderr. A command MUST NOT claim success text when its exit code is
-non-zero.
+usage, validation, conflict, unavailable, and internal errors are written to
+stderr. Structured project/feature blocked-data outcomes are written to stdout
+so their package or findings are retained, while still exiting 4. A command
+MUST NOT claim success text when its exit code is non-zero.
 
 ### JSON mode
 
@@ -149,6 +150,14 @@ On success, `ok` is `true`, `data` is any canonical JSON value, and `error` is
 `null`. On failure, `ok` is `false`, `data` is `null`, and `error` is the closed
 object `{ "code": "STABLE_CODE", "message": "Actionable message" }`.
 Envelope and error objects reject additional properties.
+
+Project and feature orchestration have one scoped blocked-data outcome because
+the exact decision/ADR package or feature findings must remain machine-visible.
+It uses the existing data branch (`ok: true`, `error: null`) with closed fields
+`blocked: true` and `command_exit_code: 4`; the dispatcher and process still
+return exit code 4. This is a blocked operational outcome, not a claim that the
+requested preparation completed. Interactive stops retain the same canonical
+package/findings without `command_exit_code`.
 
 `successResult(data)` and `failureResult(error)` cross a canonical JSON
 boundary and recursively freeze their result. They MUST reject `undefined`,

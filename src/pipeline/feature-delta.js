@@ -29,6 +29,12 @@ const SHAPES=Object.freeze({
   runtime_identity:new Set(["kind","name","version"]),
 });
 const BLOCKING=new Set(["P0","P1","P2"]);
+const ADR_REQUIRED_FINDING=Object.freeze({
+  id:"FEATURE-ADR-REQUIRED",
+  severity:"P2",
+  owner:"ARCHITECT",
+  message:"The feature declares a new ADR requirement, but no exact approved ADR evidence is authorized.",
+});
 
 function exactRecord(value,label,keys) {
   const copied=canonicalCopy(value,label);
@@ -120,6 +126,9 @@ export function normalizeFeatureInput(value) {
   for (const finding of input.findings) {
     const normalized=exactRecord(finding,"feature finding",SHAPES.finding);
     text(normalized.id,"feature finding id");
+    if (normalized.id===ADR_REQUIRED_FINDING.id) {
+      throw new TypeError(`${ADR_REQUIRED_FINDING.id} is reserved for derived ADR readiness`);
+    }
     text(normalized.message,"feature finding message");
     if (!new Set(["P0","P1","P2","P3","P4"]).has(normalized.severity) ||
         !new Set(["PM","ARCHITECT","PM_FINALIZATION","USER"]).has(normalized.owner)) {
@@ -152,9 +161,34 @@ export function featureInputFromDelta(artifact) {
   });
 }
 
+function sourceProjection(input) {
+  return {
+    project_id:input.project_id,
+    feature_id:input.feature_id,
+    provenance:input.provenance,
+    request:input.request,
+    impact_analysis:input.impact_analysis,
+    requirement_delta:input.requirement_delta,
+    architecture_impact:input.architecture_impact,
+    issue_plan_delta:input.issue_plan_delta,
+    findings:input.findings,
+  };
+}
+
+export function featureSourceProjection(value) {
+  return deepFreeze(canonicalCopy(sourceProjection(value),"feature source projection"));
+}
+
+function effectiveFindings(input) {
+  const supplied=input.findings.filter(finding => finding.id!==ADR_REQUIRED_FINDING.id);
+  return input.architecture_impact.requires_adr ?
+    [...supplied,ADR_REQUIRED_FINDING] : [...supplied];
+}
+
 function deltaContent(input,stage,base) {
-  const failures=input.findings.filter(finding => BLOCKING.has(finding.severity));
-  const warnings=input.findings.filter(finding => !BLOCKING.has(finding.severity));
+  const evaluated=effectiveFindings(input);
+  const failures=evaluated.filter(finding => BLOCKING.has(finding.severity));
+  const warnings=evaluated.filter(finding => !BLOCKING.has(finding.severity));
   const ready=failures.length===0;
   const status=failures.length>0 ? "FAIL" : warnings.length>0 ? "WARN" : "PASS";
   const next=stage==="ADDED" ? "feature analyze" :
@@ -172,7 +206,7 @@ function deltaContent(input,stage,base) {
     architecture_impact:input.architecture_impact,
     issue_plan_delta:input.issue_plan_delta,
     findings:input.findings,
-    audit:{status,findings:input.findings},
+    audit:{status,findings:evaluated},
     readiness:{ready,failures,warnings},
     base_project:base,
     next_command:next,
@@ -226,6 +260,26 @@ export async function featureHistory(store,projectId,featureId) {
         "AMBIGUOUS_FEATURE_HISTORY","Feature delta base snapshot changed within a stage chain",5,
       );
     }
+    if (row.content.source_revision!==row.provenance.source_revision ||
+        row.content.source_sha256!==row.provenance.source_sha256) {
+      throw new OrchestrationError(
+        "AMBIGUOUS_FEATURE_HISTORY","Feature content contradicts its source provenance",5,
+      );
+    }
+    const reconstructedInput=featureInputFromDelta(row);
+    if (index>0 && canonicalJson(featureSourceProjection(reconstructedInput))!==
+        canonicalJson(featureSourceProjection(featureInputFromDelta(rows[0])))) {
+      throw new OrchestrationError(
+        "AMBIGUOUS_FEATURE_HISTORY","Feature source content changed within one identity",5,
+      );
+    }
+    if (canonicalJson(deltaContent(
+      reconstructedInput,row.content.stage,row.content.base_project,
+    ))!==canonicalJson(row.content)) {
+      throw new OrchestrationError(
+        "AMBIGUOUS_FEATURE_HISTORY","Feature stage-derived content is not deterministic",5,
+      );
+    }
   }
   return rows;
 }
@@ -254,16 +308,20 @@ export async function verifyExactBaseReferences(store,base) {
 }
 
 export async function verifyBaseSnapshot(store,base) {
-  const rows=canonicalCopy(await store.list(),"artifactStore.list result");
-  if (!Array.isArray(rows)) throw new TypeError("artifactStore.list must return an array");
+  const rows=await listedArtifacts(store,{});
   const latestByIdentity=new Map();
   const seen=new Set();
   for (const row of rows) {
     const reference=exactReference(row);
-    const exactKey=canonicalJson(reference);
+    const exactKey=canonicalJson({
+      document_type:reference.document_type,
+      artifact_id:reference.artifact_id,
+      revision:reference.revision,
+    });
     if (seen.has(exactKey)) {
       throw new OrchestrationError(
-        "AMBIGUOUS_ARTIFACT_HISTORY","Artifact store list returned a duplicate revision",5,
+        "DUPLICATE_REVISION_IDENTITY",
+        "Artifact store list returned conflicting rows for one revision identity",5,
       );
     }
     seen.add(exactKey);

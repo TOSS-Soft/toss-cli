@@ -4,6 +4,7 @@ import {join} from "node:path";
 
 import {createArtifactStore} from "../../src/artifacts/store.js";
 import {parseCommand} from "../../src/commands/router.js";
+import {canonicalJson} from "../../src/contracts/acp.js";
 import {clone,completeArtifacts,rehash} from "./trace-fixture.js";
 
 export async function commandStore(t) {
@@ -46,7 +47,7 @@ export function memoryCommandStore() {
       record.artifact_id===draft.artifact_id &&
       record.revision===draft.revision);
     if (same) {
-      if (JSON.stringify(same)!==JSON.stringify(draft)) {
+      if (canonicalJson(same)!==canonicalJson(draft)) {
         throw new Error("Refusing to overwrite immutable artifact revision");
       }
       return copy(same);
@@ -55,8 +56,8 @@ export function memoryCommandStore() {
       record.document_type===draft.document_type &&
       record.artifact_id===draft.artifact_id);
     if (draft.revision!==identity.length+1) throw new Error("Non-monotonic revision");
-    if (draft.parents.length>0 && JSON.stringify(draft.parents)!==
-        JSON.stringify([referenceOf(identity.at(-1))])) {
+    if (draft.parents.length>0 && canonicalJson(draft.parents)!==
+        canonicalJson([referenceOf(identity.at(-1))])) {
       throw new Error("Invalid artifact parent lineage");
     }
     records.push(copy(draft));

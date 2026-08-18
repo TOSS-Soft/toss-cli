@@ -6,10 +6,12 @@ import {spawnSync} from "node:child_process";
 import test from "node:test";
 
 import {parseCommand,dispatchCommand} from "../src/commands/router.js";
-import {clone} from "./support/trace-fixture.js";
+import {runNextStage} from "../src/pipeline/orchestrator.js";
+import {clone,rehash} from "./support/trace-fixture.js";
 import {
   commandServices as services,
   commandStore as testStore,
+  memoryCommandStore,
   parsedCommand as command,
   projectCommandInput as projectInput,
 } from "./support/command-fixture.js";
@@ -22,6 +24,24 @@ const runProjectCommand=projectModule.runProjectCommand;
 const projectAvailable=typeof runProjectCommand==="function";
 const repositoryRoot=resolve(new URL("..",import.meta.url).pathname);
 const cli=join(repositoryRoot,"bin","toss.js");
+
+async function injectRecoveryState(store,input,event,extra={}) {
+  return runNextStage({
+    store,
+    analysis_id:input.analysis_id,
+    state:extra.state ?? "ANALYZING",
+    event,
+    source_revision:input.provenance.source_revision,
+    source_sha256:input.provenance.source_sha256,
+    artifacts:{},
+    provenance:input.provenance,
+    run_id:input.run_id,
+    producer:{role:"orchestrator",identity:"toss-project-orchestrator"},
+    runtime_identity:input.runtime_identity,
+    created_at:input.created_at,
+    ...extra,
+  });
+}
 
 test("project orchestration exposes one closed command handler",() => {
   assert.equal(typeof runProjectCommand,"function");
@@ -102,13 +122,13 @@ test("project prepare returns exact interactive decision and ADR stops and block
   assert.equal(interactive.blocking_owner,"USER");
   assert.equal(interactive.package.document_type,"decision-package");
   assert.equal(interactive.package.questions[0].id,"Q-001");
-  await assert.rejects(
-    runProjectCommand(
-      command("project.prepare",{from:"blocked.yaml",nonInteractive:true}),
-      services(decisionStore,decisionInput),
-    ),
-    error => error?.code==="PROJECT_BLOCKED" && error?.exitCode===4,
+  const automation=await runProjectCommand(
+    command("project.prepare",{from:"blocked.yaml",nonInteractive:true}),
+    services(decisionStore,decisionInput),
   );
+  assert.equal(automation.blocked,true);
+  assert.equal(automation.command_exit_code,4);
+  assert.deepEqual(automation.package,interactive.package);
 
   const adrStore=await testStore(t);
   const adrInput=projectInput({pendingAdr:true});
@@ -158,6 +178,142 @@ test("resume starts at the last verified revision after append interruption",{
   );
   assert.equal(resumed.state,"READY_FOR_ISSUES");
   assert.ok(resumed.reused_revisions.length>0);
+});
+
+test("project resume records legal RESUME and RETRY recovery transitions",{
+  skip:!projectAvailable,
+},async () => {
+  const blockedStore=memoryCommandStore();
+  const blockedInput=projectInput();
+  await runProjectCommand(command("project.create",{from:"project.json"}),services(
+    blockedStore,blockedInput,
+  ));
+  await injectRecoveryState(blockedStore,blockedInput,"BLOCK",{
+    next_action:{action:"RESOLVE_BLOCKING_FINDINGS",owner:"PM"},
+  });
+  const resumed=await runProjectCommand(
+    command("project.resume",{continue:true}),services(blockedStore,blockedInput),
+  );
+  const blockedEvents=await blockedStore.list({document_type:"transition-event"});
+  assert.equal(resumed.state,"READY_FOR_ISSUES");
+  assert.equal(blockedEvents.filter(row => row.content.event==="RESUME").length,1);
+  const beforeRerun=await blockedStore.list();
+  await runProjectCommand(
+    command("project.resume",{continue:true}),services(blockedStore,blockedInput),
+  );
+  assert.deepEqual(await blockedStore.list(),beforeRerun);
+
+  const retryStore=memoryCommandStore();
+  const retryInput=projectInput();
+  await runProjectCommand(command("project.create",{from:"project.json"}),services(
+    retryStore,retryInput,
+  ));
+  await injectRecoveryState(retryStore,retryInput,"FAIL_RETRYABLE",{
+    failure:{code:"TEMPORARY_FAILURE",message:"Retry from verified input."},
+    resume_state:"ANALYZING",
+  });
+  const retried=await runProjectCommand(
+    command("project.resume",{continue:true}),services(retryStore,retryInput),
+  );
+  const retryEvents=await retryStore.list({document_type:"transition-event"});
+  assert.equal(retried.state,"READY_FOR_ISSUES");
+  assert.equal(retryEvents.filter(row => row.content.event==="RETRY").length,1);
+});
+
+test("project resume rejects invalid recovery evidence before any append",{
+  skip:!projectAvailable,
+},async () => {
+  const store=memoryCommandStore();
+  const input=projectInput();
+  input.artifacts.issue_plan.content.acceptance_criteria[0].verifies[0].id="REQ-NOPE";
+  rehash(input.artifacts.issue_plan);
+  await runProjectCommand(command("project.create",{from:"project.json"}),services(store,input));
+  await injectRecoveryState(store,input,"FAIL_RETRYABLE",{
+    failure:{code:"TEMPORARY_FAILURE",message:"Retry from verified input."},
+    resume_state:"ANALYZING",
+  });
+  let appends=0;
+  const observed={
+    get:store.get,
+    list:store.list,
+    verify:store.verify,
+    append:async draft => {
+      appends+=1;
+      return store.append(draft);
+    },
+  };
+  await assert.rejects(
+    runProjectCommand(command("project.resume",{continue:true}),services(observed,input)),
+    error => error?.code==="INVALID_RECOVERY_EVIDENCE",
+  );
+  assert.equal(appends,0);
+});
+
+test("project status uses the verified package owner and blocked dispatch keeps the package",{
+  skip:!projectAvailable,
+},async () => {
+  const store=memoryCommandStore();
+  const input=projectInput({blockingDecision:true});
+  input.artifacts.pm_analysis.content.open_questions[0].severity="P1";
+  rehash(input.artifacts.pm_analysis);
+  const interactive=await runProjectCommand(
+    command("project.prepare",{from:"blocked.json"}),services(store,input),
+  );
+  assert.equal(interactive.package.questions[0].owner,"ARCHITECT");
+  assert.equal(interactive.blocking_owner,"ARCHITECT");
+
+  const dispatched=await dispatchCommand(
+    command("project.prepare",{from:"blocked.json",nonInteractive:true}),
+    {services:services(store,input)},
+  );
+  assert.equal(dispatched.exitCode,4);
+  assert.equal(dispatched.result.ok,true);
+  assert.equal(dispatched.result.data.blocked,true);
+  assert.deepEqual(dispatched.result.data.package,interactive.package);
+});
+
+test("noninteractive project blocking is exit 4 command-result data, not a lossy error",{
+  skip:!projectAvailable,
+},async () => {
+  const store=memoryCommandStore();
+  const input=projectInput({blockingDecision:true});
+  const dispatched=await dispatchCommand(
+    command("project.prepare",{from:"blocked.json",nonInteractive:true}),
+    {services:services(store,input)},
+  );
+  assert.equal(dispatched.exitCode,4);
+  assert.equal(dispatched.result.schema_version,"command-result.v1");
+  assert.equal(dispatched.result.ok,true);
+  assert.equal(dispatched.result.data.blocked,true);
+  assert.equal(dispatched.result.data.package.document_type,"decision-package");
+});
+
+test("READY re-entry resolves the one exact spec audit referenced by its transition",{
+  skip:!projectAvailable,
+},async () => {
+  const store=memoryCommandStore();
+  const input=projectInput();
+  await runProjectCommand(
+    command("project.prepare",{from:"project.json"}),services(store,input),
+  );
+  const exact=(await store.list({document_type:"spec-audit"}))[0];
+  const forged=clone(exact);
+  forged.artifact_id="spec-audit:forged-same-source";
+  await store.append(forged);
+  const adversarial={
+    append:store.append,
+    get:store.get,
+    verify:store.verify,
+    list:async filter => {
+      const rows=await store.list(filter);
+      return filter?.document_type==="spec-audit" ? rows.reverse() : rows;
+    },
+  };
+  const result=await runProjectCommand(
+    command("project.prepare",{continue:true}),services(adversarial,input),
+  );
+  assert.equal(result.state,"READY_FOR_ISSUES");
+  assert.equal(result.readiness.ready_for_issue_generation,true);
 });
 
 test("project handlers reject stale, exotic, ambiguous, and GitHub-shaped service boundaries",{

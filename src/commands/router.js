@@ -346,7 +346,11 @@ export async function dispatchCommand(command,context={}) {
     const data=await Reflect.apply(
       handler,undefined,[normalized,normalizedContext.services],
     );
-    return result(EXIT_CODES.SUCCESS,successResult(data));
+    const succeeded=successResult(data);
+    const exitCode=succeeded.data?.blocked===true &&
+      succeeded.data?.command_exit_code===EXIT_CODES.BLOCKED ?
+      EXIT_CODES.BLOCKED : EXIT_CODES.SUCCESS;
+    return result(exitCode,succeeded);
   } catch (error) {
     const failure=closedFailure(error);
     return result(failure.exitCode,failure.result);

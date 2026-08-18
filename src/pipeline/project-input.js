@@ -6,6 +6,9 @@ import {fromYamlProjection} from "../contracts/yaml-projection.js";
 
 const SERVICE_KEYS=new Set(["artifactStore","readInput","prompt"]);
 const STORE_KEYS=new Set(["append","get","list","verify","recover"]);
+const ARTIFACT_REFERENCE_KEYS=new Set([
+  "document_type","artifact_id","revision","content_sha256",
+]);
 const PROJECT_INPUT_KEYS=new Set([
   "schema_version","project_id","analysis_id","created_at","run_id",
   "runtime_identity","provenance","artifacts",
@@ -45,6 +48,14 @@ export function canonicalCopy(value,label="value") {
     return JSON.parse(canonicalJson(value));
   } catch (error) {
     throw new TypeError(`${label} must be canonical JSON`,{cause:error});
+  }
+}
+
+function isNativeTypeError(value) {
+  try {
+    return utilTypes.isNativeError(value) && Object.getPrototypeOf(value)===TypeError.prototype;
+  } catch {
+    return false;
   }
 }
 
@@ -225,40 +236,141 @@ function sameReference(left,right) {
   return canonicalJson(left)===canonicalJson(right);
 }
 
+function canonicalReference(value,label) {
+  const reference=canonicalCopy(plainRecord(
+    value,label,ARTIFACT_REFERENCE_KEYS,
+  ),label);
+  if (typeof reference.document_type!=="string" || reference.document_type.length===0 ||
+      typeof reference.artifact_id!=="string" || reference.artifact_id.length===0 ||
+      !Number.isInteger(reference.revision) || reference.revision<1 ||
+      typeof reference.content_sha256!=="string" ||
+      !/^[a-f0-9]{64}$/.test(reference.content_sha256)) {
+    throw new TypeError(`${label} is not an exact artifact reference`);
+  }
+  return reference;
+}
+
+function canonicalListFilter(value) {
+  const filter=canonicalCopy(plainRecord(
+    value,"artifactStore.list filter",ARTIFACT_REFERENCE_KEYS,{required:new Set()},
+  ),"artifactStore.list filter");
+  if (filter.document_type!==undefined &&
+      (typeof filter.document_type!=="string" || filter.document_type.length===0)) {
+    throw new TypeError("artifactStore.list document_type filter must be a non-empty string");
+  }
+  if (filter.artifact_id!==undefined &&
+      (typeof filter.artifact_id!=="string" || filter.artifact_id.length===0)) {
+    throw new TypeError("artifactStore.list artifact_id filter must be a non-empty string");
+  }
+  if (filter.revision!==undefined &&
+      (!Number.isInteger(filter.revision) || filter.revision<1)) {
+    throw new TypeError("artifactStore.list revision filter must be a positive integer");
+  }
+  if (filter.content_sha256!==undefined &&
+      (typeof filter.content_sha256!=="string" ||
+       !/^[a-f0-9]{64}$/.test(filter.content_sha256))) {
+    throw new TypeError("artifactStore.list content_sha256 filter must be a SHA-256 hash");
+  }
+  return filter;
+}
+
 export async function verifiedExact(store,reference) {
-  const requested=canonicalCopy(reference,"artifact reference");
-  const [got,verified]=await Promise.all([store.get(requested),store.verify(requested)]);
-  const gotRef=exactReference(canonicalCopy(got,"artifactStore.get result"));
-  const verifiedCopy=canonicalCopy(verified,"artifactStore.verify result");
+  const requested=deepFreeze(canonicalReference(reference,"artifact reference"));
+  let gotCopy;
+  let verifiedCopy;
+  try {
+    const got=await store.get(deepFreeze(canonicalCopy(requested)));
+    gotCopy=canonicalCopy(got,"artifactStore.get result");
+    const verified=await store.verify(deepFreeze(canonicalCopy(requested)));
+    verifiedCopy=canonicalCopy(verified,"artifactStore.verify result");
+  } catch (error) {
+    if (isNativeTypeError(error)) {
+      throw new OrchestrationError(
+        "REFERENCE_RETARGET","Artifact store attempted to mutate or retarget an exact reference",5,
+      );
+    }
+    throw error;
+  }
+  const gotRef=exactReference(gotCopy);
   const verifiedRef=exactReference(verifiedCopy);
   if (!sameReference(gotRef,requested) || !sameReference(verifiedRef,requested) ||
-      canonicalJson(got)!==canonicalJson(verifiedCopy)) {
+      canonicalJson(gotCopy)!==canonicalJson(verifiedCopy)) {
     throw new OrchestrationError(
-      "AMBIGUOUS_ARTIFACT_HISTORY",
+      "REFERENCE_RETARGET",
       "Artifact store get and verify returned contradictory exact revisions",
       5,
     );
   }
+  validationError(verifiedCopy,"artifact-envelope.v1","artifact envelope");
   const schemaId=SCHEMA_BY_TYPE[verifiedCopy.document_type];
   if (schemaId) validationError(verifiedCopy,schemaId,verifiedCopy.document_type);
   return deepFreeze(verifiedCopy);
 }
 
 export async function listedArtifacts(store,filter={}) {
-  const rows=canonicalCopy(await store.list(filter),"artifactStore.list result");
+  const requestedFilter=deepFreeze(canonicalListFilter(filter));
+  let listed;
+  try {
+    listed=await store.list(deepFreeze(canonicalCopy(requestedFilter)));
+  } catch (error) {
+    if (isNativeTypeError(error)) {
+      throw new OrchestrationError(
+        "FILTER_VIOLATION","Artifact store attempted to mutate the list filter",5,
+      );
+    }
+    throw error;
+  }
+  const rows=canonicalCopy(listed,"artifactStore.list result");
   if (!Array.isArray(rows)) throw new TypeError("artifactStore.list must return an array");
   const seen=new Set();
   const verified=[];
   for (const row of rows) {
+    if (Object.entries(requestedFilter).some(([key,value]) => row[key]!==value)) {
+      throw new OrchestrationError(
+        "FILTER_VIOLATION","Artifact store list returned a row outside the exact filter",5,
+      );
+    }
     const reference=exactReference(row);
-    const key=canonicalJson(reference);
+    const key=canonicalJson({
+      document_type:reference.document_type,
+      artifact_id:reference.artifact_id,
+      revision:reference.revision,
+    });
     if (seen.has(key)) {
       throw new OrchestrationError(
-        "AMBIGUOUS_ARTIFACT_HISTORY","Artifact store list returned a duplicate revision",5,
+        "DUPLICATE_REVISION_IDENTITY",
+        "Artifact store list returned conflicting rows for one revision identity",5,
       );
     }
     seen.add(key);
-    verified.push(await verifiedExact(store,reference));
+    const exact=await verifiedExact(store,reference);
+    if (canonicalJson(row)!==canonicalJson(exact)) {
+      throw new OrchestrationError(
+        "AMBIGUOUS_ARTIFACT_HISTORY",
+        "Artifact store list contradicted get and verify for an exact revision",5,
+      );
+    }
+    verified.push(exact);
+  }
+  if (requestedFilter.revision===undefined && requestedFilter.content_sha256===undefined) {
+    const histories=new Map();
+    for (const row of verified) {
+      const identity=canonicalJson({
+        document_type:row.document_type,
+        artifact_id:row.artifact_id,
+      });
+      const revisions=histories.get(identity) ?? [];
+      revisions.push(row.revision);
+      histories.set(identity,revisions);
+    }
+    for (const revisions of histories.values()) {
+      revisions.sort((left,right) => left-right);
+      if (revisions.some((revision,index) => revision!==index+1)) {
+        throw new OrchestrationError(
+          "AMBIGUOUS_ARTIFACT_HISTORY","Artifact revision history is not contiguous",5,
+        );
+      }
+    }
   }
   return verified;
 }
@@ -277,15 +389,66 @@ export async function latestArtifact(store,documentType,artifactId) {
 }
 
 export async function appendVerified(store,draft,schemaId) {
-  validationError(draft,schemaId,draft.document_type);
-  const appended=canonicalCopy(await store.append(draft),"artifactStore.append result");
-  const reference=exactReference(appended);
-  if (draft.revision!==appended.revision || draft.content_sha256!==appended.content_sha256) {
+  const expected=deepFreeze(canonicalCopy(draft,"artifact draft"));
+  validationError(expected,schemaId,expected.document_type);
+  let appendedRaw;
+  try {
+    appendedRaw=await store.append(deepFreeze(canonicalCopy(expected)));
+  } catch (error) {
+    if (isNativeTypeError(error)) {
+      throw new OrchestrationError(
+        "APPEND_MUTATION","Artifact store attempted to mutate the immutable append draft",5,
+      );
+    }
+    throw error;
+  }
+  let appended;
+  try {
+    appended=canonicalCopy(appendedRaw,"artifactStore.append result");
+  } catch {
     throw new OrchestrationError(
-      "AMBIGUOUS_ARTIFACT_HISTORY","Artifact store appended a different revision",5,
+      "APPEND_MUTATION","Artifact store returned a malformed appended artifact",5,
     );
   }
-  return verifiedExact(store,reference);
+  const reference=exactReference(appended);
+  if (canonicalJson(expected)!==canonicalJson(appended)) {
+    throw new OrchestrationError(
+      "APPEND_MUTATION","Artifact store appended an artifact different from the immutable draft",5,
+    );
+  }
+  let verified;
+  try {
+    verified=await verifiedExact(store,reference);
+  } catch {
+    throw new OrchestrationError(
+      "APPEND_MUTATION","Appended artifact verification was retargeted or contradicted",5,
+    );
+  }
+  if (canonicalJson(expected)!==canonicalJson(verified)) {
+    throw new OrchestrationError(
+      "APPEND_MUTATION","Appended artifact verification contradicted the immutable draft",5,
+    );
+  }
+  return verified;
+}
+
+export function verifiedOrchestrationStore(store) {
+  return Object.freeze({
+    list:async (filter={}) => listedArtifacts(store,filter),
+    verify:async reference => verifiedExact(store,reference),
+    append:async draft => {
+      const canonical=canonicalCopy(draft,"orchestration artifact draft");
+      const schemaId=SCHEMA_BY_TYPE[canonical.document_type];
+      if (!schemaId) {
+        throw new OrchestrationError(
+          "ORCHESTRATION_VALIDATION_FAILED",
+          `Unsupported orchestration artifact type ${String(canonical.document_type)}`,
+          5,
+        );
+      }
+      return appendVerified(store,canonical,schemaId);
+    },
+  });
 }
 
 export async function persistProjectInput(store,input) {

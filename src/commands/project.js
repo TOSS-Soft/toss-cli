@@ -1,6 +1,9 @@
 import {canonicalJson} from "../contracts/acp.js";
 import {buildDecisionPackageFromPmAnalysis} from "../pipeline/decisions.js";
+import {validateArchitecture} from "../pipeline/architecture.js";
+import {validateIssuePlan} from "../pipeline/issue-plan.js";
 import {resumeAnalysis,runNextStage} from "../pipeline/orchestrator.js";
+import {validatePmAnalysis} from "../pipeline/pm-analysis.js";
 import {
   acquireInput,
   appendVerified,
@@ -14,6 +17,7 @@ import {
   OrchestrationError,
   persistProjectInput,
   projectInputFromArtifact,
+  verifiedOrchestrationStore,
   verifiedExact,
 } from "../pipeline/project-input.js";
 import {evaluateProjectReadiness} from "../pipeline/readiness.js";
@@ -104,19 +108,14 @@ function orchestrationContext(input,state,artifacts) {
 
 async function advance(store,input,state,artifacts) {
   const context=orchestrationContext(input,state,artifacts);
-  context.store=store;
+  context.store=verifiedOrchestrationStore(store);
   const appended=await runNextStage(context);
   return verifiedExact(store,exactReference(appended));
 }
 
 function blockingOwner(event) {
-  if (["QUESTIONS_PENDING","USER_DECISION","ADR_PENDING_APPROVAL"].includes(
-    event?.content?.state,
-  )) {
-    return "USER";
-  }
-  if (event?.content?.state==="BLOCKED") return event.content.next_action?.owner ?? null;
-  return null;
+  return event?.content?.next_action?.owner ??
+    event?.content?.decision_package?.owner ?? null;
 }
 
 function nextCommand(state,event) {
@@ -133,7 +132,7 @@ function nextCommand(state,event) {
 }
 
 async function projectStatus(store,input,{inputArtifact,reused=[]}={}) {
-  const resume=await resumeAnalysis(store,{
+  const resume=await resumeAnalysis(verifiedOrchestrationStore(store),{
     analysis_id:input.analysis_id,
     source_revision:input.provenance.source_revision,
     source_sha256:input.provenance.source_sha256,
@@ -161,12 +160,48 @@ async function projectStatus(store,input,{inputArtifact,reused=[]}={}) {
 }
 
 function blockedResult(command,status) {
-  if (!command.options.nonInteractive) return status;
+  return deepFreeze({
+    ...status,
+    blocked:true,
+    ...(command.options.nonInteractive ? {command_exit_code:4} : {}),
+  });
+}
+
+function assertRecoveryEvidence(input) {
+  try {
+    const supplied=input.artifacts;
+    const pm=validatePmAnalysis(supplied.pm_analysis);
+    const architecture=validateArchitecture({
+      pmAnalysis:supplied.pm_analysis,
+      architecture:supplied.architecture,
+      adrs:supplied.adrs,
+    });
+    const issuePlan=validateIssuePlan({
+      pmAnalysis:supplied.pm_analysis,
+      architecture:supplied.architecture,
+      adrs:supplied.adrs,
+      issuePlan:supplied.issue_plan,
+    });
+    if (pm.valid && architecture.valid && issuePlan.valid) return;
+  } catch {
+    // Normalize all pure validation failures to the closed recovery boundary below.
+  }
   throw new OrchestrationError(
-    "PROJECT_BLOCKED",
-    `Project preparation is blocked in ${status.state}; owner ${status.blocking_owner}`,
-    4,
+    "INVALID_RECOVERY_EVIDENCE",
+    "Project resume requires the exact valid supplied aggregate before recording recovery",
+    5,
   );
+}
+
+async function recoverProject(store,input,resume) {
+  assertRecoveryEvidence(input);
+  const event=resume.state==="BLOCKED" ? "RESUME" : "RETRY";
+  const context=orchestrationContext(input,resume.state,{});
+  context.store=verifiedOrchestrationStore(store);
+  context.event=event;
+  context.resume_state=resume.recovery_state;
+  const appended=await runNextStage(context);
+  return verifiedExact(store,exactReference(appended));
 }
 
 async function prepareProject(
@@ -177,7 +212,7 @@ async function prepareProject(
     source_revision:input.provenance.source_revision,
     source_sha256:input.provenance.source_sha256,
   };
-  let resume=await resumeAnalysis(store,source);
+  let resume=await resumeAnalysis(verifiedOrchestrationStore(store),source);
   let state=resume.state;
   const supplied=input.artifacts;
   let pm;
@@ -187,6 +222,15 @@ async function prepareProject(
   let issuePlan;
   let specAudit;
 
+  if (["BLOCKED","FAILED_RETRYABLE"].includes(state)) {
+    if (command.name!=="project.resume") {
+      return blockedResult(command,await projectStatus(store,input,{inputArtifact,reused}));
+    }
+    await recoverProject(store,input,resume);
+    resume=await resumeAnalysis(verifiedOrchestrationStore(store),source);
+    state=resume.state;
+  }
+
   if (state==="ANALYZING") {
     pm=await persistStage(store,supplied.pm_analysis,reused);
     decisions=pm.content.open_questions.length>0 ?
@@ -195,7 +239,7 @@ async function prepareProject(
     if (decisions) artifacts.decision_package=decisions;
     for (let step=0;state==="ANALYZING" && step<2;step+=1) {
       await advance(store,input,state,artifacts);
-      resume=await resumeAnalysis(store,source);
+      resume=await resumeAnalysis(verifiedOrchestrationStore(store),source);
       state=resume.state;
     }
     if (state==="ANALYZING") throw new OrchestrationError(
@@ -209,7 +253,8 @@ async function prepareProject(
     if (analyzeOnly) return projectStatus(store,input,{inputArtifact,reused});
   }
 
-  if (["QUESTIONS_PENDING","USER_DECISION","BLOCKED","FAILED_TERMINAL"].includes(state)) {
+  if (["QUESTIONS_PENDING","USER_DECISION","BLOCKED","FAILED_RETRYABLE",
+    "FAILED_TERMINAL"].includes(state)) {
     return blockedResult(command,await projectStatus(store,input,{inputArtifact,reused}));
   }
 
@@ -224,7 +269,7 @@ async function prepareProject(
     const artifacts={pm_analysis:pm,architecture,adrs};
     if (decisions) artifacts.decision_package=decisions;
     await advance(store,input,state,artifacts);
-    resume=await resumeAnalysis(store,source);
+    resume=await resumeAnalysis(verifiedOrchestrationStore(store),source);
     state=resume.state;
     if (state==="ADR_PENDING_APPROVAL" || state==="BLOCKED") {
       return blockedResult(command,await projectStatus(store,input,{inputArtifact,reused}));
@@ -245,7 +290,7 @@ async function prepareProject(
     const artifacts={pm_analysis:pm,architecture,adrs,issue_plan:issuePlan};
     if (decisions) artifacts.decision_package=decisions;
     await advance(store,input,state,artifacts);
-    resume=await resumeAnalysis(store,source);
+    resume=await resumeAnalysis(verifiedOrchestrationStore(store),source);
     state=resume.state;
     if (state==="BLOCKED") {
       return blockedResult(command,await projectStatus(store,input,{inputArtifact,reused}));
@@ -266,7 +311,7 @@ async function prepareProject(
     };
     if (decisions) artifacts.decision_package=decisions;
     await advance(store,input,state,artifacts);
-    resume=await resumeAnalysis(store,source);
+    resume=await resumeAnalysis(verifiedOrchestrationStore(store),source);
     state=resume.state;
     if (state==="BLOCKED") {
       return blockedResult(command,await projectStatus(store,input,{inputArtifact,reused}));
@@ -277,16 +322,28 @@ async function prepareProject(
     return projectStatus(store,input,{inputArtifact,reused});
   }
   const latestEvent=await verifiedExact(store,resume.last_verified_revision);
-  specAudit=specAudit ?? await latestArtifact(store,"spec-audit",issuePlan.artifact_id);
-  if (!specAudit) {
-    const auditRows=await listedArtifacts(store,{document_type:"spec-audit"});
-    specAudit=auditRows.find(item =>
-      item.provenance.source_revision===input.provenance.source_revision &&
-      item.provenance.source_sha256===input.provenance.source_sha256);
-  }
-  if (!specAudit) throw new OrchestrationError(
-    "ORCHESTRATION_VALIDATION_FAILED","READY state is missing its verified spec audit",5,
+  const auditReferences=latestEvent.inputs.filter(
+    reference => reference.document_type==="spec-audit",
   );
+  if (auditReferences.length!==1) throw new OrchestrationError(
+    "AMBIGUOUS_READY_AUDIT","READY state requires exactly one referenced spec audit",5,
+  );
+  const referencedAudit=await verifiedExact(store,auditReferences[0]);
+  if (specAudit && !sameReference(exactReference(specAudit),auditReferences[0])) {
+    throw new OrchestrationError(
+      "AMBIGUOUS_READY_AUDIT","READY transition contradicts the prepared spec audit",5,
+    );
+  }
+  specAudit=referencedAudit;
+  const issueReferences=specAudit.inputs.filter(
+    reference => reference.document_type==="issue-plan",
+  );
+  if (issueReferences.length!==1 ||
+      !sameReference(issueReferences[0],exactReference(issuePlan))) {
+    throw new OrchestrationError(
+      "AMBIGUOUS_READY_AUDIT","READY spec audit does not bind the exact issue plan",5,
+    );
+  }
   const traceGraph=buildTraceGraph({
     pmAnalysis:pm,
     architecture:{artifact:architecture,adrs},

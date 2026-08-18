@@ -27,19 +27,22 @@ through both `get` and `verify`, and verified again after append. List results
 must have one unambiguous, contiguous identity history.
 
 `project resume` starts from the latest verified transition revision for the
-exact source revision and hash. Existing exact revisions are reused. A retry
-after an interrupted append therefore continues without overwriting or
-forking persisted history.
+exact source revision and hash. A verified `BLOCKED` state records the legal
+`RESUME` transition and a verified `FAILED_RETRYABLE` state records `RETRY`
+before work continues. Recovery state and evidence come from persisted,
+verified history; invalid supplied evidence causes no append. Existing exact
+revisions are reused, so retry after an interrupted append continues without
+overwriting or forking persisted history.
 
 ## Project stop and next-command mapping
 
 | State | Blocking owner | Next command |
 | --- | --- | --- |
 | `ANALYZING` | none | `project analyze` |
-| `QUESTIONS_PENDING` | `USER` | `decisions list` |
-| `USER_DECISION` | `USER` | `decisions list` |
+| `QUESTIONS_PENDING` | exact `next_action.owner` from the verified transition | `decisions list` |
+| `USER_DECISION` | exact `next_action.owner` from the verified transition | `decisions list` |
 | `ARCHITECTURE_PENDING` | none | `project prepare` |
-| `ADR_PENDING_APPROVAL` | `USER` | `architecture approve` |
+| `ADR_PENDING_APPROVAL` | exact `next_action.owner` (`USER` for v1 ADR packages) | `architecture approve` |
 | `PM_FINALIZATION` | none | `project prepare` |
 | `SPEC_AUDIT` | none | `project prepare` |
 | `READY_FOR_ISSUES` | none | `issues preview` |
@@ -50,8 +53,12 @@ forking persisted history.
 An unresolved P0–P2 decision stops with the exact decision package. A pending
 ADR stops with the exact ADR approval package. Interactive callers receive the
 package without invented answers or approvals; non-interactive callers receive
-the blocked exit code. P3/P4 assumptions remain warnings and never become
-authority attestations.
+the same canonical package in structured data with the blocked exit code.
+P3/P4 assumptions remain warnings and never become authority attestations.
+
+A `READY_FOR_ISSUES` result resolves exactly one spec-audit reference from the
+verified READY transition. The audit must bind the exact issue-plan revision;
+same-source searches and artifact-id guesses are not authority.
 
 ## Feature delta authority and identity
 
@@ -61,6 +68,16 @@ records the complete exact `READY_FOR_ISSUES` base snapshot and declares
 which transitively names the same base artifacts. The handler explicitly
 verifies every recorded base reference before and after append and rejects a
 newer base artifact, changed transition, or changed feature source as stale.
+The immutable feature-source projection covers the request, impact,
+requirements, architecture impact, issue-plan delta, and caller findings.
+Those fields cannot drift under one source revision/hash. Stage-derived audit,
+readiness, and next-command fields must equal their deterministic projection.
+
+`architecture_impact.requires_adr: true` independently creates an
+ARCHITECT-owned blocking finding until an exact approved feature ADR evidence
+contract is introduced. Caller findings cannot override or suppress this gate.
+Non-interactive blocked feature results retain the exact findings in structured
+data and use exit code 4.
 
 `feature add`, `feature analyze`, and `feature prepare` each append at most one
 requested target revision. A direct prepare may therefore create a PREPARED

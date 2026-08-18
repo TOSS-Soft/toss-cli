@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import {dispatchCommand} from "../src/commands/router.js";
 import {artifactReference,clone,rehash} from "./support/trace-fixture.js";
 import {
   commandServices,
@@ -158,13 +159,13 @@ test("feature prepare persists an auditable blocked delta and automation exits n
   assert.equal(interactive.blocking_owner,"ARCHITECT");
   assert.equal(interactive.artifact.content.audit.status,"FAIL");
 
-  await assert.rejects(
-    runFeatureCommand(
-      parsedCommand("feature.prepare",{from:"feature.json",nonInteractive:true}),
-      featureServices(store,input),
-    ),
-    error => error?.code==="FEATURE_BLOCKED" && error?.exitCode===4,
+  const automation=await runFeatureCommand(
+    parsedCommand("feature.prepare",{from:"feature.json",nonInteractive:true}),
+    featureServices(store,input),
   );
+  assert.equal(automation.blocked,true);
+  assert.equal(automation.command_exit_code,4);
+  assert.deepEqual(automation.findings,interactive.artifact.content.readiness.failures);
 });
 
 test("feature prepare recovers from interruption without ambiguous revision forks",{
@@ -252,4 +253,72 @@ test("feature input and service boundaries reject stale source and accessors wit
     ),
     error => error?.code==="STALE_FEATURE_SOURCE" && error?.exitCode===6,
   );
+});
+
+test("feature source content cannot drift under one immutable source identity",{
+  skip:!commandsAvailable,
+},async t => {
+  const {store}=await readyProject(t);
+  const input=featureCommandInput();
+  await runFeatureCommand(
+    parsedCommand("feature.add",{from:"feature.json"}),featureServices(store,input),
+  );
+  const drifted=clone(input);
+  drifted.request.summary="Materially different request under the same source hash.";
+  const before=await store.list({document_type:"feature-delta"});
+  await assert.rejects(
+    runFeatureCommand(
+      parsedCommand("feature.analyze",{from:"feature.json"}),
+      featureServices(store,drifted),
+    ),
+    error => error?.code==="STALE_FEATURE_SOURCE" && error?.exitCode===6,
+  );
+  assert.deepEqual(await store.list({document_type:"feature-delta"}),before);
+});
+
+test("requires_adr independently blocks and noninteractive JSON retains findings",{
+  skip:!commandsAvailable,
+},async t => {
+  const {store}=await readyProject(t);
+  const input=featureCommandInput();
+  input.architecture_impact.requires_adr=true;
+  const interactive=await runFeatureCommand(
+    parsedCommand("feature.prepare",{from:"feature.json"}),featureServices(store,input),
+  );
+  assert.equal(interactive.ready,false);
+  assert.equal(interactive.blocking_owner,"ARCHITECT");
+  assert.equal(interactive.artifact.content.readiness.failures[0].id,"FEATURE-ADR-REQUIRED");
+
+  const dispatched=await dispatchCommand(
+    parsedCommand("feature.prepare",{from:"feature.json",nonInteractive:true}),
+    {services:featureServices(store,input)},
+  );
+  assert.equal(dispatched.exitCode,4);
+  assert.equal(dispatched.result.ok,true);
+  assert.equal(dispatched.result.data.blocked,true);
+  assert.deepEqual(
+    dispatched.result.data.findings,
+    interactive.artifact.content.readiness.failures,
+  );
+});
+
+test("noninteractive feature blocking is exit 4 command-result data with findings",{
+  skip:!commandsAvailable,
+},async t => {
+  const {store}=await readyProject(t);
+  const input=featureCommandInput({findings:[{
+    id:"FEATURE-FINDING-STRUCTURED",
+    severity:"P2",
+    owner:"ARCHITECT",
+    message:"Architecture approval is required.",
+  }]});
+  const dispatched=await dispatchCommand(
+    parsedCommand("feature.prepare",{from:"feature.json",nonInteractive:true}),
+    {services:featureServices(store,input)},
+  );
+  assert.equal(dispatched.exitCode,4);
+  assert.equal(dispatched.result.schema_version,"command-result.v1");
+  assert.equal(dispatched.result.ok,true);
+  assert.equal(dispatched.result.data.blocked,true);
+  assert.deepEqual(dispatched.result.data.findings,input.findings);
 });
