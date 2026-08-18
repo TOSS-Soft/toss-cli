@@ -132,6 +132,102 @@
         "change an Architect-owned ADR",
         "select or embed a trusted public key"
       ]
+    },
+    {
+      "document_type": "design-brief",
+      "schema_version": "acp.v1",
+      "producer": "pm",
+      "consumers": ["design-specialist", "design-auditor", "human-reviewer"],
+      "allowed_mutations": ["create a new immutable design-brief revision"],
+      "forbidden_actions": ["mutate an existing revision", "create or modify Architect-owned decisions", "create or modify auditor findings"]
+    },
+    {
+      "document_type": "ux-analysis",
+      "schema_version": "acp.v1",
+      "producer": "design-specialist",
+      "consumers": ["design-specialist", "design-auditor"],
+      "allowed_mutations": ["create a new immutable ux-analysis revision"],
+      "forbidden_actions": ["mutate an existing revision", "change PM-owned requirements", "change Architect-owned decisions"]
+    },
+    {
+      "document_type": "user-flow",
+      "schema_version": "acp.v1",
+      "producer": "design-specialist",
+      "consumers": ["design-specialist", "design-auditor"],
+      "allowed_mutations": ["create a new immutable user-flow revision"],
+      "forbidden_actions": ["mutate an existing revision", "change PM-owned requirements", "change Architect-owned decisions"]
+    },
+    {
+      "document_type": "information-architecture",
+      "schema_version": "acp.v1",
+      "producer": "design-specialist",
+      "consumers": ["design-specialist", "design-auditor"],
+      "allowed_mutations": ["create a new immutable information-architecture revision"],
+      "forbidden_actions": ["mutate an existing revision", "change PM-owned requirements", "change Architect-owned decisions"]
+    },
+    {
+      "document_type": "wireframe-plan",
+      "schema_version": "acp.v1",
+      "producer": "design-specialist",
+      "consumers": ["design-specialist", "design-auditor"],
+      "allowed_mutations": ["create a new immutable wireframe-plan revision"],
+      "forbidden_actions": ["mutate an existing revision", "change PM-owned requirements", "change Architect-owned decisions"]
+    },
+    {
+      "document_type": "visual-direction",
+      "schema_version": "acp.v1",
+      "producer": "design-specialist",
+      "consumers": ["design-specialist", "design-auditor"],
+      "allowed_mutations": ["create a new immutable visual-direction revision"],
+      "forbidden_actions": ["mutate an existing revision", "change PM-owned requirements", "change Architect-owned decisions"]
+    },
+    {
+      "document_type": "design-system",
+      "schema_version": "acp.v1",
+      "producer": "design-specialist",
+      "consumers": ["design-specialist", "design-auditor", "human-reviewer"],
+      "allowed_mutations": ["create a new immutable design-system revision", "add project extensions without changing verified company rules"],
+      "forbidden_actions": ["mutate an existing revision", "silently override a verified company binding rule", "change PM-owned requirements or Architect-owned decisions"]
+    },
+    {
+      "document_type": "screen-spec",
+      "schema_version": "acp.v1",
+      "producer": "design-specialist",
+      "consumers": ["design-auditor", "issue-publisher"],
+      "allowed_mutations": ["create a new immutable screen-spec revision"],
+      "forbidden_actions": ["mutate an existing revision", "bypass a binding design-system rule", "change PM-owned requirements or Architect-owned decisions"]
+    },
+    {
+      "document_type": "prototype-manifest",
+      "schema_version": "acp.v1",
+      "producer": "design-specialist",
+      "consumers": ["design-auditor", "human-reviewer"],
+      "allowed_mutations": ["create a new immutable prototype-manifest revision"],
+      "forbidden_actions": ["mutate an existing revision", "treat a production asset as canonical governance authority", "access a referenced network asset"]
+    },
+    {
+      "document_type": "usability-evidence",
+      "schema_version": "acp.v1",
+      "producer": "design-specialist",
+      "consumers": ["design-auditor", "human-reviewer"],
+      "allowed_mutations": ["create a new immutable usability-evidence revision"],
+      "forbidden_actions": ["mutate an existing revision", "change source flow or prototype artifacts", "change PM-owned requirements or Architect-owned decisions"]
+    },
+    {
+      "document_type": "design-audit",
+      "schema_version": "acp.v1",
+      "producer": "design-auditor",
+      "consumers": ["readiness-evaluator", "human-reviewer"],
+      "allowed_mutations": ["create a new immutable design-audit revision containing findings"],
+      "forbidden_actions": ["mutate an existing revision", "change any input design artifact", "change PM-owned, Architect-owned, or Spec Auditor-owned artifacts"]
+    },
+    {
+      "document_type": "design-approval",
+      "schema_version": "acp.v1",
+      "producer": "human-authority",
+      "consumers": ["design-auditor", "readiness-evaluator", "human-reviewer"],
+      "allowed_mutations": ["append one exact immutable design approval record"],
+      "forbidden_actions": ["mutate an existing revision", "change an approved design artifact", "approve a stale artifact revision"]
     }
   ]
 }
