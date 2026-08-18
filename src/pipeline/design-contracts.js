@@ -168,7 +168,7 @@ function collectArtifactReferences(value,path,references) {
   }
 }
 
-function graphIndexes(graph) {
+function graphIndexes(graph,validIndexes=new Set(graph.keys())) {
   const artifacts=new Map();
   const latestRevision=new Map();
   const entities=new Map();
@@ -200,6 +200,7 @@ function graphIndexes(graph) {
       artifact.artifact_id,
       Math.max(latestRevision.get(artifact.artifact_id) ?? 0,artifact.revision),
     );
+    if (!validIndexes.has(index)) continue;
     for (const definition of entityDefinitions(artifact,index)) {
       if (entities.has(definition.id)) {
         findings.push(finding(
@@ -214,9 +215,10 @@ function graphIndexes(graph) {
   return {artifacts,latestRevision,entities,findings};
 }
 
-function referenceFindings(graph,indexes) {
+function referenceFindings(graph,indexes,validIndexes) {
   const findings=[];
   for (const [index,artifact] of graph.entries()) {
+    if (!validIndexes.has(index)) continue;
     if (!artifact || typeof artifact!=="object" || Array.isArray(artifact)) continue;
     const references=[];
     collectArtifactReferences(artifact.parents,`/${index}/parents`,references);
@@ -273,11 +275,10 @@ function referenceFindings(graph,indexes) {
   return findings;
 }
 
-function sourceFindings(graph) {
+function sourceFindings(graph,validIndexes) {
   const findings=[];
-  const briefs=graph.filter(artifact => artifact?.document_type==="design-brief" &&
-    artifact.content && typeof artifact.content==="object" && !Array.isArray(artifact.content) &&
-    Number.isSafeInteger(artifact.revision));
+  const briefs=graph.filter((artifact,index) => validIndexes.has(index) &&
+    artifact?.document_type==="design-brief");
   if (briefs.length===0) {
     return [finding(
       "MISSING_DESIGN_BRIEF","/","Design graph requires an authoritative design-brief",
@@ -286,6 +287,7 @@ function sourceFindings(graph) {
   const authoritative=briefs.reduce((left,right) =>
     left.revision>=right.revision ? left : right);
   for (const [index,artifact] of graph.entries()) {
+    if (!validIndexes.has(index)) continue;
     if (!artifact || typeof artifact!=="object" || Array.isArray(artifact)) continue;
     if (artifactSource(artifact)!==authoritative.content.source) {
       findings.push(finding(
@@ -304,96 +306,147 @@ function sourceFindings(graph) {
   return findings;
 }
 
-function linkedEntityFindings(graph,indexes) {
+function linkedEntityFindings(graph,indexes,validIndexes) {
   const findings=[];
-  const requireEntity=(id,expectedType,path,message) => {
-    const definition=indexes.entities.get(id);
-    if (!definition || definition.artifact.document_type!==expectedType) {
-      findings.push(finding("DANGLING_ENTITY_REFERENCE",path,message));
+  const exactEntity=(reference,expectedType,path) => {
+    if (!reference || typeof reference!=="object" || Array.isArray(reference)) return undefined;
+    const target=indexes.artifacts.get(artifactReferenceIdentity(reference));
+    if (!target || !validIndexes.has(target.index) ||
+        target.artifact.document_type!==expectedType ||
+        target.artifact.content_sha256!==reference.content_sha256 ||
+        !entityDefinitions(target.artifact,target.index).some(definition =>
+          definition.id===reference.entity_id)) {
+      findings.push(finding(
+        "DANGLING_ENTITY_REFERENCE",path,
+        `Reference must select one exact ${expectedType} artifact revision and entity`,
+      ));
+      return undefined;
     }
-    return definition;
+    return target;
   };
+  const validScreens=graph.filter((artifact,index) => validIndexes.has(index) &&
+    artifact.document_type==="screen-spec");
   for (const [artifactIndex,artifact] of graph.entries()) {
+    if (!validIndexes.has(artifactIndex)) continue;
     const content=artifact?.content;
     if (!content || typeof content!=="object" || Array.isArray(content)) continue;
     if (artifact.document_type==="user-flow") {
+      const stepIds=new Set(content.steps.map(step => step.step_id));
       for (const [stepIndex,step] of asArray(content.steps).entries()) {
-        if (!step || typeof step!=="object" || Array.isArray(step)) continue;
-        const screen=requireEntity(
-          step.screen_id,"screen-spec",`/${artifactIndex}/content/steps/${stepIndex}/screen_id`,
-          `Flow step references missing screen ${step.screen_id}`,
-        );
-        const state=requireEntity(
-          step.state_id,"screen-spec",`/${artifactIndex}/content/steps/${stepIndex}/state_id`,
-          `Flow step references missing screen state ${step.state_id}`,
-        );
-        if (screen && state && screen.artifact!==state.artifact) findings.push(finding(
-          "CROSS_SCREEN_STATE_REFERENCE",`/${artifactIndex}/content/steps/${stepIndex}/state_id`,
-          `State ${step.state_id} does not belong to screen ${step.screen_id}`,
+        for (const [nextIndex,nextId] of step.next_step_ids.entries()) {
+          if (!stepIds.has(nextId)) findings.push(finding(
+            "DANGLING_NEXT_STEP_REFERENCE",
+            `/${artifactIndex}/content/steps/${stepIndex}/next_step_ids/${nextIndex}`,
+            `Flow step references missing local next step ${nextId}`,
+          ));
+        }
+        const screens=validScreens.filter(screen =>
+          screen.content.screen_id===step.screen_id &&
+          screen.content.flow_refs.some(reference =>
+            reference.artifact_id===artifact.artifact_id &&
+            reference.revision===artifact.revision &&
+            reference.content_sha256===artifact.content_sha256 &&
+            reference.document_type===artifact.document_type &&
+            reference.entity_id===content.flow_id));
+        if (screens.length!==1) findings.push(finding(
+          "FLOW_SCREEN_LINK_INVALID",`/${artifactIndex}/content/steps/${stepIndex}/screen_id`,
+          `Flow step must be linked by one exact screen revision for ${step.screen_id}`,
         ));
+        else if (!screens[0].content.states.some(state => state.state_id===step.state_id)) {
+          findings.push(finding(
+            "CROSS_SCREEN_STATE_REFERENCE",`/${artifactIndex}/content/steps/${stepIndex}/state_id`,
+            `State ${step.state_id} does not belong to the exact linked screen`,
+          ));
+        }
       }
     }
     if (artifact.document_type==="information-architecture") {
+      const nodeIds=new Set(content.nodes.map(node => node.node_id));
       for (const [nodeIndex,node] of asArray(content.nodes).entries()) {
-        if (!node || typeof node!=="object" || Array.isArray(node)) continue;
-        for (const [screenIndex,screenId] of asArray(node.screen_ids).entries()) {
-          requireEntity(screenId,"screen-spec",
-            `/${artifactIndex}/content/nodes/${nodeIndex}/screen_ids/${screenIndex}`,
-            `Information architecture references missing screen ${screenId}`);
+        if (node.parent_id!==null && !nodeIds.has(node.parent_id)) findings.push(finding(
+          "DANGLING_IA_PARENT_REFERENCE",
+          `/${artifactIndex}/content/nodes/${nodeIndex}/parent_id`,
+          `Information architecture references missing local parent ${node.parent_id}`,
+        ));
+        for (const [screenIndex,screenRef] of node.screen_refs.entries()) {
+          exactEntity(screenRef,"screen-spec",
+            `/${artifactIndex}/content/nodes/${nodeIndex}/screen_refs/${screenIndex}`);
         }
       }
     }
     if (artifact.document_type==="wireframe-plan") {
       for (const [wireIndex,wireframe] of asArray(content.wireframes).entries()) {
-        if (!wireframe || typeof wireframe!=="object" || Array.isArray(wireframe)) continue;
-        requireEntity(wireframe.screen_id,"screen-spec",
-          `/${artifactIndex}/content/wireframes/${wireIndex}/screen_id`,
-          `Wireframe references missing screen ${wireframe.screen_id}`);
-        for (const [flowIndex,flowId] of asArray(wireframe.flow_ids).entries()) {
-          requireEntity(flowId,"user-flow",
-            `/${artifactIndex}/content/wireframes/${wireIndex}/flow_ids/${flowIndex}`,
-            `Wireframe references missing flow ${flowId}`);
+        const screen=exactEntity(wireframe.screen_ref,"screen-spec",
+          `/${artifactIndex}/content/wireframes/${wireIndex}/screen_ref`);
+        for (const [flowIndex,flowRef] of wireframe.flow_refs.entries()) {
+          exactEntity(flowRef,"user-flow",
+            `/${artifactIndex}/content/wireframes/${wireIndex}/flow_refs/${flowIndex}`);
         }
-        for (const [stateIndex,stateId] of asArray(wireframe.state_ids).entries()) {
-          requireEntity(stateId,"screen-spec",
-            `/${artifactIndex}/content/wireframes/${wireIndex}/state_ids/${stateIndex}`,
-            `Wireframe references missing screen state ${stateId}`);
+        for (const [stateIndex,stateId] of wireframe.state_ids.entries()) {
+          if (!screen?.artifact.content.states.some(state => state.state_id===stateId)) {
+            findings.push(finding(
+              "CROSS_SCREEN_STATE_REFERENCE",
+              `/${artifactIndex}/content/wireframes/${wireIndex}/state_ids/${stateIndex}`,
+              `Wireframe state ${stateId} must belong to its exact screen revision`,
+            ));
+          }
         }
       }
     }
     if (artifact.document_type==="design-system") {
+      const ruleIds=new Set(content.rules.map(rule => rule.rule_id));
       for (const [componentIndex,component] of asArray(content.components).entries()) {
-        if (!component || typeof component!=="object" || Array.isArray(component)) continue;
-        for (const [ruleIndex,ruleId] of asArray(component.rule_ids).entries()) {
-          requireEntity(ruleId,"design-system",
+        for (const [ruleIndex,ruleId] of component.rule_ids.entries()) {
+          if (!ruleIds.has(ruleId)) findings.push(finding(
+            "DANGLING_RULE_REFERENCE",
             `/${artifactIndex}/content/components/${componentIndex}/rule_ids/${ruleIndex}`,
-            `Component references missing design rule ${ruleId}`);
+            `Component references missing local design rule ${ruleId}`,
+          ));
         }
       }
     }
     if (artifact.document_type==="screen-spec") {
+      const componentRefs=new Map(content.component_refs.map(reference =>
+        [reference.entity_id,exactEntity(reference,"design-system",
+          `/${artifactIndex}/content/component_refs/${reference.entity_id}`)]));
+      const responsiveIds=new Set(content.responsive.map(row => row.target_id));
+      const accessibilityIds=new Set(content.accessibility.map(row => row.criterion_id));
       for (const [stateIndex,state] of asArray(content.states).entries()) {
-        if (!state || typeof state!=="object" || Array.isArray(state)) continue;
-        for (const [componentIndex,componentId] of asArray(state.component_ids).entries()) {
-          requireEntity(componentId,"design-system",
+        for (const [componentIndex,componentId] of state.component_ids.entries()) {
+          if (!componentRefs.get(componentId)) findings.push(finding(
+            "SCREEN_COMPONENT_NOT_DECLARED",
             `/${artifactIndex}/content/states/${stateIndex}/component_ids/${componentIndex}`,
-            `Screen state references missing component ${componentId}`);
+            `Screen state component ${componentId} is not one of this screen's exact component references`,
+          ));
+        }
+        for (const [responsiveIndex,targetId] of state.responsive_target_ids.entries()) {
+          if (!responsiveIds.has(targetId)) findings.push(finding(
+            "DANGLING_RESPONSIVE_REFERENCE",
+            `/${artifactIndex}/content/states/${stateIndex}/responsive_target_ids/${responsiveIndex}`,
+            `Screen state references missing responsive target ${targetId}`,
+          ));
+        }
+        for (const [criterionIndex,criterionId] of state.accessibility_criterion_ids.entries()) {
+          if (!accessibilityIds.has(criterionId)) findings.push(finding(
+            "DANGLING_ACCESSIBILITY_REFERENCE",
+            `/${artifactIndex}/content/states/${stateIndex}/accessibility_criterion_ids/${criterionIndex}`,
+            `Screen state references missing accessibility criterion ${criterionId}`,
+          ));
         }
       }
       for (const [ruleIndex,application] of asArray(content.rule_applications).entries()) {
-        if (!application || typeof application!=="object" || Array.isArray(application)) continue;
-        requireEntity(application.rule_id,"design-system",
-          `/${artifactIndex}/content/rule_applications/${ruleIndex}/rule_id`,
-          `Screen references missing design rule ${application.rule_id}`);
+        exactEntity(application.rule_ref,"design-system",
+          `/${artifactIndex}/content/rule_applications/${ruleIndex}/rule_ref`);
       }
     }
   }
   return findings;
 }
 
-function integrityFindings(graph) {
+function integrityFindings(graph,validIndexes) {
   const findings=[];
   for (const [index,artifact] of graph.entries()) {
+    if (!validIndexes.has(index)) continue;
     if (!artifact || typeof artifact!=="object" || Array.isArray(artifact) ||
         !("content" in artifact)) continue;
     if (sha256Canonical(artifact.content)!==artifact.content_sha256) {
@@ -402,6 +455,93 @@ function integrityFindings(graph) {
         "Graph artifact content_sha256 must match canonical content",
       ));
     }
+  }
+  return findings;
+}
+
+function sortArtifactReferences(references) {
+  return [...references].sort((left,right) => compareText(canonicalJson(left),canonicalJson(right)));
+}
+
+function authoritativeApprovalManifest(graph,indexes,validIndexes) {
+  return sortArtifactReferences(graph.filter((artifact,index) =>
+    validIndexes.has(index) && artifact.document_type!=="design-approval" &&
+    artifact.revision===indexes.latestRevision.get(artifact.artifact_id)).map(artifactReference => ({
+    document_type:artifactReference.document_type,
+    artifact_id:artifactReference.artifact_id,
+    revision:artifactReference.revision,
+    content_sha256:artifactReference.content_sha256,
+  })));
+}
+
+function approvalGraphFindings(graph,indexes,validIndexes) {
+  const findings=[];
+  const expected=authoritativeApprovalManifest(graph,indexes,validIndexes);
+  const expectedByIdentity=new Map(expected.map(reference =>
+    [artifactReferenceIdentity(reference),reference]));
+  const briefs=graph.filter((artifact,index) => validIndexes.has(index) &&
+    artifact.document_type==="design-brief");
+  const brief=briefs.sort((left,right) => right.revision-left.revision)[0];
+  const graphTime=Math.max(...graph.filter((artifact,index) => validIndexes.has(index)).map(
+    artifact => Date.parse(artifact.created_at)));
+  for (const [index,approval] of graph.entries()) {
+    if (!validIndexes.has(index) || approval.document_type!=="design-approval") continue;
+    const prefix=`/${index}/content`;
+    const manifest=approval.content.graph_manifest;
+    const seen=new Set();
+    for (const [manifestIndex,reference] of manifest.entries()) {
+      const identity=artifactReferenceIdentity(reference);
+      if (seen.has(identity)) findings.push(finding(
+        "APPROVAL_GRAPH_DUPLICATE",`${prefix}/graph_manifest/${manifestIndex}`,
+        `Approval graph repeats ${reference.artifact_id}@${reference.revision}`,
+      ));
+      seen.add(identity);
+      const exact=expectedByIdentity.get(identity);
+      if (!exact) {
+        const existsAtAnotherRevision=expected.some(candidate =>
+          candidate.artifact_id===reference.artifact_id);
+        findings.push(finding(
+          existsAtAnotherRevision ? "APPROVAL_GRAPH_STALE" : "APPROVAL_GRAPH_EXTRA",
+          `${prefix}/graph_manifest/${manifestIndex}`,
+          `Approval graph contains a non-authoritative member ${reference.artifact_id}@${reference.revision}`,
+        ));
+      } else if (canonicalJson(exact)!==canonicalJson(reference)) findings.push(finding(
+        "APPROVAL_GRAPH_STALE",`${prefix}/graph_manifest/${manifestIndex}`,
+        `Approval graph member ${reference.artifact_id}@${reference.revision} is stale or corrupt`,
+      ));
+    }
+    for (const reference of expected) {
+      if (!manifest.some(candidate => canonicalJson(candidate)===canonicalJson(reference))) {
+        findings.push(finding(
+          "APPROVAL_GRAPH_INCOMPLETE",`${prefix}/graph_manifest`,
+          `Approval graph omits ${reference.artifact_id}@${reference.revision}`,
+        ));
+      }
+    }
+    const sorted=sortArtifactReferences(manifest);
+    if (canonicalJson(manifest)!==canonicalJson(sorted)) findings.push(finding(
+      "APPROVAL_GRAPH_ORDER",`${prefix}/graph_manifest`,
+      "Approval graph manifest must use canonical artifact-reference order",
+    ));
+    if (sha256Canonical(sorted)!==approval.content.graph_root_sha256) findings.push(finding(
+      "APPROVAL_GRAPH_ROOT_MISMATCH",`${prefix}/graph_root_sha256`,
+      "Approval graph root must hash the canonical graph manifest",
+    ));
+    if (!brief || canonicalJson(approval.content.authority)!==
+        canonicalJson(brief.content.approval_owner)) findings.push(finding(
+      "APPROVAL_AUTHORITY_INVALID",`${prefix}/authority`,
+      "Approval authority must be the exact human authority selected by the design brief",
+    ));
+    const approvedAt=Date.parse(approval.content.approved_at);
+    const expiresAt=Date.parse(approval.content.expires_at);
+    if (approvedAt>Date.parse(approval.created_at) || expiresAt<approvedAt) findings.push(finding(
+      "APPROVAL_TIME_INVALID",`${prefix}/approved_at`,
+      "Approval time must be provenance-bound and precede its expiry",
+    ));
+    if (expiresAt<graphTime) findings.push(finding(
+      "APPROVAL_EXPIRED",`${prefix}/expires_at`,
+      "Approval expired before the latest artifact in its graph",
+    ));
   }
   return findings;
 }
@@ -427,8 +567,9 @@ function artifactAssetFindings(artifact,pathPrefix="") {
   return findings;
 }
 
-function graphSchemaFindings(graph) {
+function graphSchemaState(graph) {
   const findings=[];
+  const validIndexes=new Set();
   for (const [index,artifact] of graph.entries()) {
     if (!artifact || typeof artifact!=="object" || Array.isArray(artifact)) continue;
     if (artifact.schema_version!=="acp.v1") {
@@ -452,32 +593,64 @@ function graphSchemaFindings(graph) {
         "GRAPH_SCHEMA_VALIDATION",`/${index}${item.path==="/" ? "" : item.path}`,
         item.message,
       ));
-    }
+    } else validIndexes.add(index);
     findings.push(...artifactAssetFindings(artifact,`/${index}`));
   }
-  return findings;
+  return {findings,validIndexes};
 }
 
 function graphFindings(graph) {
   if (!Array.isArray(graph)) {
     return [finding("MALFORMED_GRAPH","/","Design artifact graph must be an array")];
   }
-  const indexes=graphIndexes(graph);
+  const schemaState=graphSchemaState(graph);
+  const indexes=graphIndexes(graph,schemaState.validIndexes);
   return [
-    ...graphSchemaFindings(graph),
+    ...schemaState.findings,
     ...indexes.findings,
-    ...integrityFindings(graph),
-    ...sourceFindings(graph),
-    ...referenceFindings(graph,indexes),
-    ...linkedEntityFindings(graph,indexes),
+    ...integrityFindings(graph,schemaState.validIndexes),
+    ...sourceFindings(graph,schemaState.validIndexes),
+    ...referenceFindings(graph,indexes,schemaState.validIndexes),
+    ...linkedEntityFindings(graph,indexes,schemaState.validIndexes),
+    ...approvalGraphFindings(graph,indexes,schemaState.validIndexes),
   ];
+}
+
+function candidateGraphFindings(artifact,graph) {
+  if (!Array.isArray(graph)) return [];
+  const matches=graph.filter(candidate => candidate && typeof candidate==="object" &&
+    !Array.isArray(candidate) && candidate.artifact_id===artifact.artifact_id &&
+    candidate.revision===artifact.revision);
+  if (matches.length===0) return [finding(
+    "ARTIFACT_NOT_IN_GRAPH","/",
+    `Artifact ${artifact.artifact_id}@${artifact.revision} is absent from the graph`,
+  )];
+  if (matches.length!==1 || canonicalJson(matches[0])!==canonicalJson(artifact)) return [finding(
+    "ARTIFACT_GRAPH_MISMATCH","/",
+    `Artifact ${artifact.artifact_id}@${artifact.revision} is not the graph's exact canonical member`,
+  )];
+  return [];
 }
 
 function bindingFindings(graph) {
   const findings=[];
-  const indexes=graphIndexes(graph);
-  const systems=graph.filter(artifact => artifact?.document_type==="design-system");
-  const screens=graph.filter(artifact => artifact?.document_type==="screen-spec");
+  const schemaState=graphSchemaState(graph);
+  const indexes=graphIndexes(graph,schemaState.validIndexes);
+  const systems=graph.filter((artifact,index) => schemaState.validIndexes.has(index) &&
+    artifact.document_type==="design-system");
+  const screens=graph.filter((artifact,index) => schemaState.validIndexes.has(index) &&
+    artifact.document_type==="screen-spec");
+  const approvals=graph.filter((artifact,index) => schemaState.validIndexes.has(index) &&
+    artifact.document_type==="design-approval");
+  const approvalIssues=approvalGraphFindings(graph,indexes,schemaState.validIndexes);
+  const graphTime=Math.max(...graph.filter((artifact,index) =>
+    schemaState.validIndexes.has(index)).map(artifact => Date.parse(artifact.created_at)));
+  const exactEntityRef=(reference,artifact,entityId) => reference &&
+    reference.artifact_id===artifact.artifact_id &&
+    reference.revision===artifact.revision &&
+    reference.content_sha256===artifact.content_sha256 &&
+    reference.document_type===artifact.document_type &&
+    reference.entity_id===entityId;
   for (const system of systems) {
     const rules=new Map(asArray(system.content?.rules).filter(rule =>
       rule && typeof rule==="object" && !Array.isArray(rule)).map(rule => [rule.rule_id,rule]));
@@ -501,11 +674,16 @@ function bindingFindings(graph) {
       for (const [index,application] of asArray(screen.content?.rule_applications).entries()) {
         if (!application || typeof application!=="object" || Array.isArray(application)) continue;
         const path=`/screen-spec/${screen.artifact_id}/rule_applications/${index}`;
-        const rule=rules.get(application.rule_id);
+        const targetsSystem=application.rule_ref?.artifact_id===system.artifact_id &&
+          application.rule_ref?.revision===system.revision &&
+          application.rule_ref?.content_sha256===system.content_sha256 &&
+          application.rule_ref?.document_type===system.document_type;
+        if (!targetsSystem) continue;
+        const rule=rules.get(application.rule_ref.entity_id);
         if (!rule) {
           findings.push(finding(
-            "DANGLING_RULE_REFERENCE",`${path}/rule_id`,
-            `Screen references missing design rule ${application.rule_id}`,
+            "DANGLING_RULE_REFERENCE",`${path}/rule_ref/entity_id`,
+            `Screen references missing design rule ${application.rule_ref.entity_id}`,
           ));
           continue;
         }
@@ -527,14 +705,32 @@ function bindingFindings(graph) {
           continue;
         }
         const exception=exceptions.get(application.exception_id);
-        const approvalTarget=exception?.approval?.artifact===undefined ? undefined :
-          indexes.artifacts.get(artifactReferenceIdentity(exception.approval.artifact));
-        const valid=exception?.exact_rule_id===rule.rule_id &&
-          exception.scope?.screen_ids?.includes(screen.content.screen_id) &&
-          exception.authority?.role===exception.approval?.authority?.role &&
-          exception.authority?.identity===exception.approval?.authority?.identity &&
-          approvalTarget?.artifact?.document_type==="design-approval" &&
-          approvalTarget.artifact.content_sha256===exception.approval.artifact.content_sha256;
+        const grants=[];
+        for (const approval of approvals) {
+          const approvalIndex=graph.indexOf(approval);
+          const approvalBound=!approvalIssues.some(issue =>
+            issue.path===`/${approvalIndex}` || issue.path.startsWith(`/${approvalIndex}/`));
+          if (approval.content.decision!=="APPROVED" || !approvalBound ||
+              approval.content.source!==artifactSource(system) ||
+              Date.parse(approval.content.expires_at)<graphTime) continue;
+          for (const grant of approval.content.exception_grants) {
+            if (grant.exception_id===application.exception_id &&
+                exactEntityRef(grant.rule_ref,system,rule.rule_id) &&
+                exactEntityRef(grant.screen_ref,screen,screen.content.screen_id)) {
+              grants.push({approval,grant});
+            }
+          }
+        }
+        const componentIds=new Set(screen.content.component_refs.map(reference =>
+          reference.entity_id));
+        const authorization=grants.length===1 ? grants[0] : undefined;
+        const valid=authorization!==undefined && exception?.exact_rule_id===rule.rule_id &&
+          exception.scope.screen_ids.includes(screen.content.screen_id) &&
+          exception.scope.component_ids.every(componentId => componentIds.has(componentId)) &&
+          canonicalJson(exception.scope)===canonicalJson(authorization.grant.scope) &&
+          canonicalJson(exception.provenance)===canonicalJson(system.provenance) &&
+          Date.parse(exception.valid_until)>=graphTime &&
+          Date.parse(exception.valid_until)>=Date.parse(authorization.approval.content.approved_at);
         if (!valid) findings.push(finding(
           "APPROVED_EXCEPTION_INVALID",`${path}/exception_id`,
           `Exception ${application.exception_id} is not exact, scoped, authority-approved, and provenance-bound`,
@@ -550,19 +746,64 @@ function bindingFindings(graph) {
   }
   for (const revisions of byArtifactId.values()) {
     revisions.sort((left,right) => left.revision-right.revision);
-    for (let index=1;index<revisions.length;index+=1) {
-      const previous=new Map(asArray(revisions[index-1].content?.rules).filter(rule =>
-        rule && typeof rule==="object" && !Array.isArray(rule)).map(rule => [rule.rule_id,rule]));
-      for (const rule of asArray(revisions[index].content?.rules)) {
-        if (!rule || typeof rule!=="object" || Array.isArray(rule)) continue;
-        const old=previous.get(rule.rule_id);
-        if (old?.origin==="company_system" && old.binding===true &&
-            canonicalJson(old.value)!==canonicalJson(rule.value)) {
-          findings.push(finding(
-            "VERIFIED_RULE_MUTATION",`/design-system/${revisions[index].artifact_id}@${revisions[index].revision}/rules/${rule.rule_id}`,
-            `Verified company rule ${rule.rule_id} changed across revisions`,
-          ));
-        }
+    const byRevision=new Map();
+    for (const system of revisions) {
+      const sameRevision=byRevision.get(system.revision) ?? [];
+      sameRevision.push(system);
+      byRevision.set(system.revision,sameRevision);
+    }
+    for (const [revision,members] of byRevision) {
+      if (members.length>1) findings.push(finding(
+        "DESIGN_SYSTEM_LINEAGE_FORK",
+        `/design-system/${members[0].artifact_id}@${revision}`,
+        `Design-system lineage has ${members.length} artifacts at revision ${revision}`,
+      ));
+    }
+    for (const current of revisions) {
+      if (current.revision===1) continue;
+      const priorMembers=byRevision.get(current.revision-1) ?? [];
+      if (priorMembers.length!==1) {
+        const hasEarlier=revisions.some(candidate => candidate.revision<current.revision);
+        findings.push(finding(
+          hasEarlier ? "DESIGN_SYSTEM_LINEAGE_NONCONTIGUOUS" :
+            "DESIGN_SYSTEM_LINEAGE_MISSING",
+          `/design-system/${current.artifact_id}@${current.revision}`,
+          `Design-system revision ${current.revision} requires exactly one revision ${current.revision-1}`,
+        ));
+        continue;
+      }
+      const previous=priorMembers[0];
+      const exactParents=asArray(current.parents).filter(parent =>
+        parent.artifact_id===previous.artifact_id &&
+        parent.revision===previous.revision &&
+        parent.document_type===previous.document_type &&
+        parent.content_sha256===previous.content_sha256);
+      if (exactParents.length!==1 || current.parents.length!==1) findings.push(finding(
+        "DESIGN_SYSTEM_LINEAGE_PARENT_INVALID",
+        `/design-system/${current.artifact_id}@${current.revision}/parents`,
+        "Design-system revision must have its exact immediate predecessor as its sole parent",
+      ));
+      if (previous.content.verified===true && (current.content.verified!==true ||
+          current.content.system_id!==previous.content.system_id)) findings.push(finding(
+        "VERIFIED_SYSTEM_DOWNGRADE",
+        `/design-system/${current.artifact_id}@${current.revision}`,
+        "A verified design-system identity cannot be removed or downgraded",
+      ));
+      const currentRules=new Map(current.content.rules.map(rule => [rule.rule_id,rule]));
+      for (const old of previous.content.rules) {
+        if (previous.content.verified!==true || old.origin!=="company_system" ||
+            old.binding!==true) continue;
+        const next=currentRules.get(old.rule_id);
+        if (!next) findings.push(finding(
+          "VERIFIED_RULE_DELETION",
+          `/design-system/${current.artifact_id}@${current.revision}/rules/${old.rule_id}`,
+          `Verified company rule ${old.rule_id} was deleted`,
+        ));
+        else if (canonicalJson(next)!==canonicalJson(old)) findings.push(finding(
+          "VERIFIED_RULE_MUTATION",
+          `/design-system/${current.artifact_id}@${current.revision}/rules/${old.rule_id}`,
+          `Verified company rule ${old.rule_id} or its verification metadata changed`,
+        ));
       }
     }
   }
@@ -578,28 +819,34 @@ export function validateDesignArtifact(artifact,graph=[]) {
   } catch (error) {
     return canonicalFailure("CANONICAL_JSON",error);
   }
+  const findings=[];
   if (value.schema_version!=="acp.v1") {
-    return sortedResult([finding(
+    findings.push(finding(
       "UNKNOWN_SCHEMA_VERSION","/schema_version","Design artifact schema_version must be acp.v1",
-    )]);
+    ));
   }
-  const schemaId=SCHEMA_BY_DOCUMENT_TYPE[value.document_type];
-  if (!schemaId) {
-    return sortedResult([finding(
+  const schemaId=value.schema_version==="acp.v1" ?
+    SCHEMA_BY_DOCUMENT_TYPE[value.document_type] : undefined;
+  if (value.schema_version==="acp.v1" && !schemaId) {
+    findings.push(finding(
       "UNKNOWN_DOCUMENT_TYPE","/document_type","Unknown design artifact document_type",
-    )]);
+    ));
   }
-  try {
-    assertKnownDocumentType(value.document_type,value.schema_version);
-  } catch (error) {
-    return sortedResult([finding(
-      "REGISTRY_CONTRACT","/document_type",
-      error instanceof Error ? error.message : "Design artifact is not registered",
-    )]);
+  if (schemaId) {
+    try {
+      assertKnownDocumentType(value.document_type,value.schema_version);
+    } catch (error) {
+      findings.push(finding(
+        "REGISTRY_CONTRACT","/document_type",
+        error instanceof Error ? error.message : "Design artifact is not registered",
+      ));
+    }
   }
-  const validation=validateDocument(value,schemaId);
-  const findings=validation.valid ? [] : schemaFindings(validation.errors);
-  if (validation.valid && sha256Canonical(value.content)!==value.content_sha256) {
+  const validation=schemaId ? validateDocument(value,schemaId) : {valid:false,errors:[]};
+  if (schemaId && !validation.valid) findings.push(...schemaFindings(validation.errors));
+  const integrityValid=validation.valid &&
+    sha256Canonical(value.content)===value.content_sha256;
+  if (validation.valid && !integrityValid) {
     findings.push(finding(
       "CONTENT_SHA256_MISMATCH","/content_sha256","content_sha256 must match canonical content",
     ));
@@ -607,8 +854,9 @@ export function validateDesignArtifact(artifact,graph=[]) {
   if (validation.valid) findings.push(...artifactAssetFindings(value));
   if (!Array.isArray(graphValue)) {
     findings.push(finding("MALFORMED_GRAPH","/","Design artifact graph must be an array"));
-  } else if (validation.valid && graphValue.length>0) {
+  } else {
     findings.push(...graphFindings(graphValue));
+    if (integrityValid) findings.push(...candidateGraphFindings(value,graphValue));
   }
   return sortedResult(findings);
 }
@@ -674,7 +922,8 @@ export function resolveDesignAsset(entry) {
     const segments=typeof candidate==="string" ? candidate.split("/") : [];
     const unsafe=canonicalJson(pathKeys)!==canonicalJson(["kind","path"]) ||
       typeof candidate!=="string" || candidate.length===0 || candidate.includes("\\") ||
-      candidate.includes("\u0000") || candidate.startsWith("/") ||
+      /[\u0000-\u001f\u007f]/.test(candidate) || /%(?:[0-1][0-9a-f]|7f|25|2e|2f|5c)/i.test(candidate) ||
+      /[?#]/.test(candidate) || candidate.startsWith("/") ||
       /^[A-Za-z]:/.test(candidate) || candidate.startsWith("//") ||
       segments.some(segment => segment==="" || segment==="." || segment==="..");
     if (unsafe) findings.push(finding(
@@ -689,10 +938,16 @@ export function resolveDesignAsset(entry) {
     } catch {
       parsed=undefined;
     }
+    const encodedAmbiguity=typeof location.uri==="string" &&
+      /%(?:[0-1][0-9a-f]|7f|25|2e|2f|5c)/i.test(location.uri);
+    const secretQuery=parsed && [...parsed.searchParams.keys()].some(key =>
+      /(?:access[_-]?token|api[_-]?key|auth|credential|password|secret|signature|sig)/i.test(key));
     const unsafe=canonicalJson(uriKeys)!==canonicalJson(["kind","uri"]) ||
-      typeof location.uri!=="string" || /[\u0000-\u0020]/.test(location.uri) ||
+      typeof location.uri!=="string" || /[\u0000-\u0020\u007f]/.test(location.uri) ||
+      encodedAmbiguity ||
       !parsed || !new Set(["https:","figma:","pencil:"]).has(parsed.protocol) ||
       parsed.username!=="" || parsed.password!=="" ||
+      parsed.hash!=="" || secretQuery || parsed.href!==location.uri ||
       (parsed.protocol==="https:" && parsed.hostname.length===0);
     if (unsafe) findings.push(finding(
       "ASSET_URI_UNSAFE","/location/uri",
