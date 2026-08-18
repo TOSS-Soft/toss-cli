@@ -158,21 +158,43 @@ function boundaryFailure(message,path="/") {
   return deepFreeze(result);
 }
 
-function validationEvidence(key,artifact,schemaId,pathPrefix="") {
-  const items=[];
+function pointerSegments(path) {
+  if (typeof path!=="string" || path==="" || path==="/") return [];
+  return path.slice(1).split("/").map(segment =>
+    segment.replaceAll("~1","/").replaceAll("~0","~"));
+}
+
+function safeEntityIdAtPath(artifact,path) {
+  let current=artifact;
+  let entityId=null;
+  for (const segment of pointerSegments(path)) {
+    if (isPlainObject(current) && typeof current.id==="string") entityId=current.id;
+    if ((!isPlainObject(current) && !Array.isArray(current)) ||
+        !Object.hasOwn(current,segment)) break;
+    current=current[segment];
+  }
+  if (isPlainObject(current) && typeof current.id==="string") entityId=current.id;
+  return entityId;
+}
+
+function validationEvidence(key,artifact,schemaId,pathPrefix="",{contentHash=true}={}) {
+  const schemaItems=[];
   const validation=validateDocument(artifact,schemaId);
   for (const error of validation.errors) {
     const missing=error.keyword==="required" ? error.params?.missingProperty : undefined;
     const path=missing===undefined ? error.instancePath :
       `${error.instancePath}/${String(missing).replaceAll("~","~0").replaceAll("/","~1")}`;
-    items.push(evidence(
+    schemaItems.push(evidence(
       key,
       artifact,
       `${pathPrefix}${path || "/"}`,
       error.message ?? `${key} does not satisfy ${schemaId}`,
+      safeEntityIdAtPath(artifact,path),
     ));
   }
-  if (validation.valid && artifact.content_sha256!==sha256Canonical(artifact.content)) {
+  const items=[...schemaItems];
+  if (contentHash && validation.valid &&
+      artifact.content_sha256!==sha256Canonical(artifact.content)) {
     items.push(evidence(
       key,
       artifact,
@@ -180,7 +202,7 @@ function validationEvidence(key,artifact,schemaId,pathPrefix="") {
       "content_sha256 does not match canonical content",
     ));
   }
-  return items;
+  return {items,schemaItems};
 }
 
 function exactSourceEvidence(key,artifact,source,path="/provenance") {
@@ -237,6 +259,7 @@ function artifactEntries(input) {
 function integrityRule(context) {
   const {input}=context;
   const items=[];
+  context.schemaEvidence=new Map();
   if (!isPlainObject(input)) {
     return [evidence("pipeline-input",undefined,"/","Artifact aggregate must be a plain object")];
   }
@@ -261,36 +284,41 @@ function integrityRule(context) {
   }
 
   const contracts=[
-    ["pmAnalysis",input.pmAnalysis,"pm-analysis.v1","/pmAnalysis"],
-    ["architecture.artifact",input.architecture?.artifact,"architecture.v1","/architecture/artifact"],
+    ["pmAnalysis",input.pmAnalysis,"pm-analysis.v1","/pmAnalysis",true],
+    ["architecture.artifact",input.architecture?.artifact,"architecture.v1","/architecture/artifact",true],
     ...(Array.isArray(input.architecture?.adrs) ? input.architecture.adrs.map((adr,index) => [
-      `architecture.adrs[${index}]`,adr,"adr.v1",`/architecture/adrs/${index}`,
+      `architecture.adrs[${index}]`,adr,"adr.v1",`/architecture/adrs/${index}`,true,
     ]) : []),
-    ["issuePlan",input.issuePlan,"issue-plan.v1","/issuePlan"],
+    ["issuePlan",input.issuePlan,"issue-plan.v1","/issuePlan",true],
     ...(Array.isArray(input.specAudits) ? input.specAudits.map((audit,index) => [
-      `specAudits[${index}]`,audit,"spec-audit.v1",`/specAudits/${index}`,
+      `specAudits[${index}]`,audit,"spec-audit.v1",`/specAudits/${index}`,true,
     ]) : []),
-    ["analysisState",input.analysisState,"transition-event.v1","/analysisState"],
+    ["analysisState",input.analysisState,"transition-event.v1","/analysisState",true],
+    ...(Object.hasOwn(input,"decisionPackage") ? [[
+      "decisionPackage",input.decisionPackage,"decision-package.v1","/decisionPackage",false,
+    ]] : []),
   ];
-  for (const [key,artifact,schemaId,path] of contracts) {
+  for (const [key,artifact,schemaId,path,contentHash] of contracts) {
     try {
-      items.push(...validationEvidence(key,artifact,schemaId,path));
+      const result=validationEvidence(key,artifact,schemaId,path,{contentHash});
+      context.schemaEvidence.set(key,result.schemaItems);
+      items.push(...result.items);
     } catch (error) {
-      items.push(evidence(key,artifact,path,error.message));
+      const fallback=[evidence(key,artifact,path,error.message)];
+      context.schemaEvidence.set(key,fallback);
+      items.push(...fallback);
     }
   }
   try {
-    const traceValidation=validateDocument(input.traceGraph,"trace-graph.v1");
-    for (const error of traceValidation.errors) {
-      items.push(evidence(
-        "traceGraph",
-        undefined,
-        `/traceGraph${error.instancePath || "/"}`,
-        error.message ?? "Trace graph does not satisfy trace-graph.v1",
-      ));
-    }
+    const result=validationEvidence(
+      "traceGraph",input.traceGraph,"trace-graph.v1","/traceGraph",{contentHash:false},
+    );
+    context.schemaEvidence.set("traceGraph",result.schemaItems);
+    items.push(...result.items);
   } catch (error) {
-    items.push(evidence("traceGraph",undefined,"/traceGraph",error.message));
+    const fallback=[evidence("traceGraph",undefined,"/traceGraph",error.message)];
+    context.schemaEvidence.set("traceGraph",fallback);
+    items.push(...fallback);
   }
 
   const source=sourceOf(input);
@@ -979,6 +1007,39 @@ const RULE_HANDLERS=Object.freeze({
   "PDOR-110-ANALYSIS-STATE":analysisStateRule,
   "PDOR-120-UNRESOLVED-ASSUMPTIONS":assumptionWarningsRule,
 });
+const RULE_SCHEMA_DEPENDENCIES=Object.freeze({
+  "PDOR-010-PROJECT-FRAMING":["pmAnalysis"],
+  "PDOR-020-PRODUCT-DEFINITION":["pmAnalysis"],
+  "PDOR-030-SYSTEM-CONTEXT":["pmAnalysis"],
+  "PDOR-040-BLOCKING-DECISIONS":["pmAnalysis","decisionPackage"],
+  "PDOR-050-ARCHITECTURE-QUESTIONS":[
+    "pmAnalysis","architecture.artifact","architecture.adrs",
+  ],
+  "PDOR-060-APPROVED-ADRS":["architecture.adrs"],
+  "PDOR-070-DELIVERY-RECORDS":["pmAnalysis","issuePlan"],
+  "PDOR-080-EPIC-MAP":["pmAnalysis","issuePlan"],
+  "PDOR-090-REQUIREMENT-AC-COVERAGE":["pmAnalysis","issuePlan"],
+  "PDOR-100-LATEST-SPEC-AUDIT":[
+    "pmAnalysis","architecture.artifact","architecture.adrs","issuePlan","specAudits",
+  ],
+  "PDOR-110-ANALYSIS-STATE":[
+    "pmAnalysis","architecture.artifact","architecture.adrs","issuePlan",
+    "specAudits","analysisState",
+  ],
+  "PDOR-120-UNRESOLVED-ASSUMPTIONS":["pmAnalysis","decisionPackage"],
+});
+
+function dependentSchemaEvidence(context,ruleId) {
+  const dependencies=RULE_SCHEMA_DEPENDENCIES[ruleId] ?? [];
+  const items=[];
+  for (const [key,evidenceItems] of context.schemaEvidence ?? []) {
+    if (dependencies.some(dependency =>
+      key===dependency || key.startsWith(`${dependency}[`))) {
+      items.push(...evidenceItems);
+    }
+  }
+  return items;
+}
 
 if (canonicalJson(Object.keys(RULE_HANDLERS).sort())!==canonicalJson([...RULE_IDS].sort())) {
   throw new Error("Every PDoR rule must have exactly one runtime evaluator");
@@ -1025,7 +1086,8 @@ export function evaluateProjectReadiness(artifacts,options={}) {
   for (const rule of RULES.rules) {
     let items;
     try {
-      items=RULE_HANDLERS[rule.id](context);
+      const schemaItems=dependentSchemaEvidence(context,rule.id);
+      items=schemaItems.length>0 ? schemaItems : RULE_HANDLERS[rule.id](context);
     } catch (error) {
       items=[evidence(
         "pipeline-input",undefined,"/",

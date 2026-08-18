@@ -421,6 +421,140 @@ test("malformed authoritative collections retain exact rule-specific evidence pa
   }
 });
 
+test("malformed collection members retain exact dependent-rule evidence",() => {
+  const cases=[
+    {
+      label:"null PM open question",
+      path:"/pmAnalysis/content/open_questions/0",
+      rules:[
+        ["failures","PDOR-040-BLOCKING-DECISIONS"],
+        ["warnings","PDOR-120-UNRESOLVED-ASSUMPTIONS"],
+      ],
+      mutate(aggregate) {
+        aggregate.pmAnalysis.content.open_questions=[null];
+        rehash(aggregate.pmAnalysis);
+      },
+    },
+    {
+      label:"primitive architecture question",
+      path:"/architecture/artifact/content/architecture_questions/0",
+      rules:[["failures","PDOR-050-ARCHITECTURE-QUESTIONS"]],
+      mutate(aggregate) {
+        aggregate.architecture.artifact.content.architecture_questions=[42];
+        rehash(aggregate.architecture.artifact);
+      },
+    },
+    {
+      label:"wrong nested ADR question refs",
+      path:"/architecture/adrs/0/content/resolved_architecture_questions",
+      entityId:"ADR-001",
+      rules:[["failures","PDOR-050-ARCHITECTURE-QUESTIONS"]],
+      mutate(aggregate) {
+        aggregate.architecture.adrs[0].content.resolved_architecture_questions={};
+        rehash(aggregate.architecture.adrs[0]);
+      },
+    },
+    {
+      label:"null issue",
+      path:"/issuePlan/content/issues/0",
+      rules:[
+        ["failures","PDOR-070-DELIVERY-RECORDS"],
+        ["failures","PDOR-080-EPIC-MAP"],
+        ["failures","PDOR-090-REQUIREMENT-AC-COVERAGE"],
+      ],
+      mutate(aggregate) {
+        aggregate.issuePlan.content.issues=[null];
+        rehash(aggregate.issuePlan);
+      },
+    },
+    {
+      label:"null functional requirement",
+      path:"/pmAnalysis/content/functional_requirements/0",
+      rules:[["failures","PDOR-090-REQUIREMENT-AC-COVERAGE"]],
+      mutate(aggregate) {
+        aggregate.pmAnalysis.content.functional_requirements=[null];
+        rehash(aggregate.pmAnalysis);
+      },
+    },
+    {
+      label:"null epic",
+      path:"/issuePlan/content/epics/0",
+      rules:[["failures","PDOR-080-EPIC-MAP"]],
+      mutate(aggregate) {
+        aggregate.issuePlan.content.epics=[null];
+        rehash(aggregate.issuePlan);
+      },
+    },
+    {
+      label:"missing PM epic candidate id",
+      path:"/pmAnalysis/content/epic_candidates/0/id",
+      rules:[["failures","PDOR-080-EPIC-MAP"]],
+      mutate(aggregate) {
+        aggregate.pmAnalysis.content.epic_candidates=[{}];
+        rehash(aggregate.pmAnalysis);
+      },
+    },
+    {
+      label:"wrong nested issue acceptance criteria",
+      path:"/issuePlan/content/issues/0/acceptance_criteria",
+      entityId:"ISSUE-001",
+      rules:[["failures","PDOR-090-REQUIREMENT-AC-COVERAGE"]],
+      mutate(aggregate) {
+        aggregate.issuePlan.content.issues[0].acceptance_criteria={};
+        rehash(aggregate.issuePlan);
+      },
+    },
+    {
+      label:"null Spec Audit input",
+      path:"/specAudits/0/inputs/0",
+      rules:[["failures","PDOR-100-LATEST-SPEC-AUDIT"]],
+      mutate(aggregate) {
+        aggregate.specAudits[0].inputs=[null];
+      },
+    },
+    {
+      label:"null trace node",
+      path:"/traceGraph/nodes/0",
+      rules:[["failures","PDOR-001-ARTIFACT-INTEGRITY"]],
+      mutate(aggregate) {
+        aggregate.traceGraph.nodes=[null];
+      },
+    },
+    {
+      label:"null analysis-state input",
+      path:"/analysisState/inputs/0",
+      rules:[["failures","PDOR-110-ANALYSIS-STATE"]],
+      mutate(aggregate) {
+        aggregate.analysisState.inputs=[null];
+      },
+    },
+  ];
+
+  for (const testCase of cases) {
+    const aggregate=passAggregate();
+    testCase.mutate(aggregate);
+    const first=evaluateProjectReadiness(aggregate);
+    const second=evaluateProjectReadiness(clone(aggregate));
+
+    assert.deepEqual(first,second,testCase.label);
+    assert.equal(validateDocument(first,"pdor-result.v1").valid,true,testCase.label);
+    assertDeepFrozen(first);
+    for (const [collection,ruleId] of testCase.rules) {
+      const result=first[collection].find(item => item.rule_id===ruleId);
+      assert.ok(result,`${testCase.label}: ${ruleId}`);
+      const exact=result.evidence.find(item => item.path===testCase.path);
+      assert.ok(exact,`${testCase.label}: ${ruleId} must identify ${testCase.path}`);
+      assert.notEqual(exact.artifact,"pipeline-input",testCase.label);
+      if (testCase.entityId!==undefined) {
+        assert.equal(exact.entity_id,testCase.entityId,testCase.label);
+      }
+      assert.ok(result.evidence.every(item =>
+        !(item.artifact==="pipeline-input" && item.path==="/")),
+      `${testCase.label}: ${ruleId} must not use generic root evidence`);
+    }
+  }
+});
+
 test("latest audit evidence retains its original index across input order permutations",() => {
   for (const latestFirst of [false,true]) {
     const aggregate=passAggregate();
