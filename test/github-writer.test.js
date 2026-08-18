@@ -590,6 +590,54 @@ test("preflight rejects a remote identity claimed by immutable history from anot
   assert.equal(store.calls.filter(call => call.method==="append").length,appendCount);
 });
 
+test("different repositories may each map their own canonical issue number 101",async () => {
+  const firstContext=readyContext();
+  const store=fakeStore();
+  await configuredWriter({adapter:fakeAdapter(),store}).publish(firstContext,{
+    apply:true,
+    authority:authorityFor(firstContext),
+  });
+  const appendCount=store.calls.filter(call => call.method==="append").length;
+
+  const context=readyContext();
+  context.repository="TOSS-Soft/other-repo";
+  context.artifacts.issuePlan.artifact_id="ISSUE-PLAN-OTHER-REPO-001";
+  rehash(context.artifacts.issuePlan);
+  rebuildReadyContext(context);
+  const preview=await configuredWriter({adapter:fakeAdapter(),store:fakeStore()})
+    .preview(context);
+  const operation=preview.operations[0];
+  const adapter=fakeAdapter({seed:[{
+    repository:operation.repository,
+    marker:operation.marker,
+    title:operation.title,
+    body:operation.body,
+    labels:operation.labels,
+    milestone:operation.milestone,
+    number:101,
+    url:"https://github.com/TOSS-Soft/other-repo/issues/101",
+  }]});
+  const record={record_id:"PUB-APPROVAL-OTHER-REPO-001",revision:1};
+
+  const result=await configuredWriter({adapter,store}).publish(context,{
+    apply:true,
+    authority:authorityFor(context,{
+      record_id:record.record_id,
+      record_sha256:sha256Canonical(record),
+    }),
+  });
+  assert.equal(result.status,"complete");
+  assert.deepEqual(result.mappings,[{
+    local_issue_id:"ISSUE-001",
+    number:101,
+    url:"https://github.com/TOSS-Soft/other-repo/issues/101",
+    marker:operation.marker,
+  }]);
+  assert.equal(adapter.created.length,0);
+  assert.equal(adapter.updated.length,0);
+  assert.equal(store.calls.filter(call => call.method==="append").length,appendCount+1);
+});
+
 test("a prospective create mapping is validated against whole history before append",async () => {
   const context=readyContext({twoIssues:true});
   const adapter=fakeAdapter();

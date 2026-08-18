@@ -951,19 +951,19 @@ function mappingFor(operation,remote) {
   };
 }
 
-function claimMapping(mapping,owner,numberClaims,urlClaims,label) {
-  for (const [identity,value,claims] of [
-    ["number",mapping.number,numberClaims],
+function claimMapping(mapping,repository,owner,numberClaims,urlClaims,label) {
+  for (const [identity,claimKey,claims] of [
+    ["number",canonicalJson({repository,number:mapping.number}),numberClaims],
     ["URL",mapping.url,urlClaims],
   ]) {
-    const claimedBy=claims.get(value);
+    const claimedBy=claims.get(claimKey);
     if (claimedBy!==undefined && claimedBy.key!==owner.key) {
       throw new GitHubPublicationError(
         `${label} ${identity} is claimed by multiple local issues: ${
           claimedBy.label} and ${owner.label}`,
       );
     }
-    claims.set(value,owner);
+    claims.set(claimKey,owner);
   }
 }
 
@@ -1047,16 +1047,21 @@ export function createGitHubWriter({adapter,store,authorityRegistry}={}) {
     let latest=current.at(-1);
     const numberClaims=new Map();
     const urlClaims=new Map();
-    const ownerFor=(issuePlan,localIssueId) => ({
-      key:canonicalJson({issue_plan:issuePlan,local_issue_id:localIssueId}),
-      label:`${issuePlan.artifact_id}@${issuePlan.revision}:${localIssueId}`,
+    const ownerFor=(repository,issuePlan,localIssueId) => ({
+      key:canonicalJson({repository,issue_plan:issuePlan,local_issue_id:localIssueId}),
+      label:`${repository}:${issuePlan.artifact_id}@${issuePlan.revision}:${localIssueId}`,
     });
     const currentPlan=exactReference(context.artifacts.issuePlan);
     for (const artifact of history) {
       for (const mapping of artifact.content.mappings) {
         claimMapping(
           mapping,
-          ownerFor(artifact.content.issue_plan,mapping.local_issue_id),
+          artifact.content.repository,
+          ownerFor(
+            artifact.content.repository,
+            artifact.content.issue_plan,
+            mapping.local_issue_id,
+          ),
           numberClaims,
           urlClaims,
           "Immutable publication mapping",
@@ -1117,7 +1122,8 @@ export function createGitHubWriter({adapter,store,authorityRegistry}={}) {
       if (remote) {
         claimMapping(
           mappingFor(operation,remote),
-          ownerFor(currentPlan,operation.local_issue_id),
+          context.repository,
+          ownerFor(context.repository,currentPlan,operation.local_issue_id),
           numberClaims,
           urlClaims,
           "Remote preflight mapping",
@@ -1163,7 +1169,8 @@ export function createGitHubWriter({adapter,store,authorityRegistry}={}) {
       const mapping=mappingFor(operation,remote);
       claimMapping(
         mapping,
-        ownerFor(currentPlan,operation.local_issue_id),
+        context.repository,
+        ownerFor(context.repository,currentPlan,operation.local_issue_id),
         numberClaims,
         urlClaims,
         "Verified remote mapping",
