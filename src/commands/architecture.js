@@ -166,6 +166,48 @@ function verifyApproval(value,registry,{adr,packageValue}) {
   return input;
 }
 
+async function verifiedApprovalSource(catalog,row) {
+  const transition=await catalog.get(row.content.source_transition);
+  if (transition.document_type!=="transition-event") {
+    throw new OrchestrationError(
+      "ADR_APPROVAL_STALE","ADR approval source is not a transition event",6,
+    );
+  }
+  const adr=await catalog.get(row.content.adr);
+  if (adr.document_type!=="adr") {
+    throw new OrchestrationError(
+      "ADR_APPROVAL_STALE","ADR approval source snapshot is not an ADR",6,
+    );
+  }
+  if (!same(row.inputs,[exactReference(transition),exactReference(adr)])) {
+    throw new OrchestrationError(
+      "ADR_APPROVAL_STALE","ADR approval inputs do not bind its exact transition and ADR",6,
+    );
+  }
+  const packageValue=approvalPackageFromTransition(transition);
+  if (!same(row.content.approval_package,packageValue) ||
+      !packageValue.adr_references.some(reference => same(reference,exactReference(adr)))) {
+    throw new OrchestrationError(
+      "ADR_APPROVAL_STALE",
+      "ADR approval package does not match its verified source transition",6,
+    );
+  }
+  const provenance={
+    source_revision:adr.provenance.source_revision,
+    source_sha256:adr.provenance.source_sha256,
+    locations:[`adr:${adr.artifact_id}@${adr.revision}#${adr.content_sha256}`],
+  };
+  if (transition.provenance.source_revision!==adr.provenance.source_revision ||
+      transition.provenance.source_sha256!==adr.provenance.source_sha256 ||
+      !same(row.provenance,provenance)) {
+    throw new OrchestrationError(
+      "ADR_APPROVAL_STALE",
+      "ADR approval provenance does not match its verified source transition",6,
+    );
+  }
+  return {adr,transition,packageValue};
+}
+
 async function approvalHistory(catalog,registry) {
   const rows=await catalog.list({document_type:"adr-approval"});
   if (rows.length>0 && registry===undefined) {
@@ -180,16 +222,16 @@ async function approvalHistory(catalog,registry) {
     left.artifact_id.localeCompare(right.artifact_id) || left.revision-right.revision);
   for (const row of ordered) {
     validationError(row,"adr-approval.v1","ADR approval");
+    const source=await verifiedApprovalSource(catalog,row);
     if (row.content.authority_registry.content_sha256!==sha256Canonical(registry)) {
       throw new OrchestrationError(
         "ADR_AUTHORITY_INVALID","ADR approval registry binding is stale",6,
       );
     }
-    const adr=await catalog.get(row.content.adr);
     verifyApproval({
       schema_version:"adr-approval-input.v1",
       ...row.content.approval_record,
-    },registry,{adr,packageValue:row.content.approval_package});
+    },registry,{adr:source.adr,packageValue:source.packageValue});
     const identity=byIdentity.get(row.artifact_id) ?? [];
     const previous=identity.at(-1);
     if (row.revision!==identity.length+1 || !same(row.parents,

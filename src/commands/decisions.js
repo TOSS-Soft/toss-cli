@@ -154,6 +154,43 @@ function resolutionRows(answer) {
   }];
 }
 
+async function verifiedAnswerSource(catalog,row) {
+  const transition=await catalog.get(row.content.source_transition);
+  if (transition.document_type!=="transition-event") {
+    throw new OrchestrationError(
+      "DECISION_ANSWER_STALE","Decision answer source is not a transition event",6,
+    );
+  }
+  if (canonicalJson(row.inputs)!==canonicalJson([exactReference(transition)])) {
+    throw new OrchestrationError(
+      "DECISION_ANSWER_STALE","Decision answer inputs do not bind its exact transition",6,
+    );
+  }
+  const packageValue=decisionPackageFromTransition(transition);
+  if (canonicalJson(row.content.source_decision_package)!==canonicalJson(packageValue)) {
+    throw new OrchestrationError(
+      "DECISION_ANSWER_STALE",
+      "Decision answer package does not match its verified source transition",6,
+    );
+  }
+  const provenance={
+    source_revision:transition.provenance.source_revision,
+    source_sha256:transition.provenance.source_sha256,
+    locations:[
+      `decision-package:${transition.artifact_id}@${transition.revision}:${
+        row.content.question_id
+      }`,
+    ],
+  };
+  if (canonicalJson(row.provenance)!==canonicalJson(provenance)) {
+    throw new OrchestrationError(
+      "DECISION_ANSWER_STALE",
+      "Decision answer provenance does not match its verified source transition",6,
+    );
+  }
+  return transition;
+}
+
 async function answerHistory(catalog,registry) {
   const rows=await catalog.list({document_type:"decision-answer"});
   if (rows.length>0 && registry===undefined) {
@@ -168,6 +205,7 @@ async function answerHistory(catalog,registry) {
     left.artifact_id.localeCompare(right.artifact_id) || left.revision-right.revision);
   for (const row of ordered) {
     validationError(row,"decision-answer.v1","decision answer");
+    await verifiedAnswerSource(catalog,row);
     if (row.content.authority_registry.content_sha256!==sha256Canonical(registry)) {
       throw new OrchestrationError(
         "DECISION_AUTHORITY_STALE","Decision answer registry binding is stale",6,
