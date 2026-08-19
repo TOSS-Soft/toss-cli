@@ -5,8 +5,9 @@ import {
   validateDesignSystemRules,
 } from "../pipeline/design-contracts.js";
 import {classifyDesignLevel} from "../pipeline/design-level.js";
-import {featureHistory} from "../pipeline/feature-delta.js";
+import {featureHistory,verifyBaseSnapshot} from "../pipeline/feature-delta.js";
 import {createDesignOrchestrator} from "../pipeline/design-orchestrator.js";
+import {resumeAnalysis} from "../pipeline/orchestrator.js";
 import {
   acquireInput,
   canonicalCopy,
@@ -494,6 +495,40 @@ function stateCommitmentIdentity(content) {
   })).sort();
 }
 
+async function authoritativeBaseProjectId(store,source) {
+  const base=source.content.base_project;
+  const artifacts=await verifyBaseSnapshot(store,base);
+  const projects=artifacts.filter(row => row.document_type==="project-input");
+  const transitions=artifacts.filter(row => row.document_type==="transition-event");
+  if (projects.length!==1 || transitions.length!==1) {
+    throw new TypeError("feature base must resolve one project and READY transition");
+  }
+  const project=projects[0];
+  const transition=transitions[0];
+  const resumed=await resumeAnalysis(store,{
+    analysis_id:base.analysis_id,
+    source_revision:base.source_revision,
+    source_sha256:base.source_sha256,
+  });
+  const projectId=project.content.project_id;
+  if (project.artifact_id!==`project-input:${projectId}` ||
+      project.content.analysis_id!==base.analysis_id ||
+      project.provenance.source_revision!==base.source_revision ||
+      project.provenance.source_sha256!==base.source_sha256 ||
+      transition.artifact_id!==base.analysis_id ||
+      transition.content.state!=="READY_FOR_ISSUES" ||
+      transition.content.source_revision!==base.source_revision ||
+      transition.content.source_sha256!==base.source_sha256 ||
+      transition.provenance.source_revision!==base.source_revision ||
+      transition.provenance.source_sha256!==base.source_sha256 ||
+      resumed.state!=="READY_FOR_ISSUES" ||
+      canonicalJson(resumed.last_verified_revision)!==
+        canonicalJson(exactReference(transition))) {
+    throw new TypeError("feature base does not bind one exact READY project identity");
+  }
+  return projectId;
+}
+
 async function assertStateEnvelopeInputs(artifact,store) {
   const sourceRefs=artifact.content.source_artifact_refs;
   const featureScope=artifact.content.scope.kind==="feature";
@@ -516,13 +551,14 @@ async function assertStateEnvelopeInputs(artifact,store) {
           canonicalJson(source.provenance)!==canonicalJson(artifact.provenance)) {
         throw new TypeError("feature source does not match design state provenance");
       }
-      const expectedArtifactId=
-        `feature-delta:${source.content.project_id}:${source.content.feature_id}`;
+      const projectId=await authoritativeBaseProjectId(store,source);
+      const expectedArtifactId=`feature-delta:${projectId}:${source.content.feature_id}`;
       const matching=(await store.list({document_type:"feature-delta"})).filter(row =>
         row.content?.feature_id===artifact.content.scope.id &&
         canonicalJson(row.provenance)===canonicalJson(artifact.provenance));
       const identities=[...new Set(matching.map(row => row.artifact_id))];
-      if (source.artifact_id!==expectedArtifactId || identities.length!==1 ||
+      if (source.content.project_id!==projectId ||
+          source.artifact_id!==expectedArtifactId || identities.length!==1 ||
           identities[0]!==expectedArtifactId) {
         throw new TypeError("feature source identity is ambiguous or noncanonical");
       }

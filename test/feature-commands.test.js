@@ -107,6 +107,7 @@ function fixedArtifactStore(rows) {
 
 async function sourceRetargetStore(delegate,{
   alternateIdentity=false,
+  changeProjectIdentity=false,
   changeImpact=false,
   changeBriefFacts=false,
   alignClassification=false,
@@ -124,6 +125,11 @@ async function sourceRetargetStore(delegate,{
   const forged=clone(original);
   if (alternateIdentity) {
     forged.artifact_id=`${original.artifact_id}:alternate`;
+  }
+  if (changeProjectIdentity) {
+    forged.content.project_id="alternate-workspace";
+    forged.artifact_id=`feature-delta:alternate-workspace:${forged.content.feature_id}`;
+    rehash(forged);
   }
   if (changeImpact) {
     forged.content.design_impact={
@@ -580,6 +586,9 @@ test("design and feature status authenticate the unique latest feature source an
     "alternate identity with the same payload":{
       alternateIdentity:true,
     },
+    "cross-project replacement with a self-derived canonical identity":{
+      changeProjectIdentity:true,
+    },
     "alternate identity with changed design impact":{
       alternateIdentity:true,changeImpact:true,
     },
@@ -605,7 +614,7 @@ test("design and feature status authenticate the unique latest feature source an
   const closedSourceError=error => new Set([
     "AMBIGUOUS_ARTIFACT_HISTORY","AMBIGUOUS_FEATURE_HISTORY",
     "DESIGN_STATE_INVALID","DUPLICATE_REVISION_IDENTITY",
-    "INPUT_STALE","STALE_FEATURE_SOURCE",
+    "INPUT_STALE","STALE_FEATURE_BASE","STALE_FEATURE_SOURCE",
   ]).has(error?.code);
   for (const [name,options] of Object.entries(cases)) {
     await t.test(name,async () => {
