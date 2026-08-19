@@ -11,8 +11,8 @@ import {
 } from "./github-adapter.js";
 import {validateIssuePlan} from "./issue-plan.js";
 import {evaluateProjectReadiness} from "./readiness.js";
-import {createDesignOrchestrator} from "./design-orchestrator.js";
 import {evaluateDesignReadiness} from "./design-readiness.js";
+import {verifyDesignStateGraph} from "./design-state-readiness.js";
 import {auditSpecification} from "./spec-auditor.js";
 import {transition} from "./state-machine.js";
 
@@ -141,24 +141,6 @@ function decisionAuthorityRegistry(registry) {
   return actors.length===0 ? undefined : {actors};
 }
 
-function designAuthorityRegistry(registry) {
-  const actors=registry.actors.filter(actor =>
-    new Set(["CEO","USER"]).has(actor.actor_role) &&
-    Array.isArray(actor.allowed_routes) && actor.allowed_routes.some(route =>
-      route.authority==="A3" &&
-      route.verification_kind==="A3_VERIFIED_CEO_OR_USER_AUTHORITY",
-    )).map(actor => ({
-    actor_id:actor.actor_id,
-    actor_role:actor.actor_role,
-    public_key:actor.public_key,
-    allowed_routes:[{
-      authority:"A3",
-      verification_kind:"A3_VERIFIED_CEO_OR_USER_AUTHORITY",
-    }],
-  }));
-  return actors.length===0 ? undefined : {actors};
-}
-
 function assertIndependentGates(context,registry) {
   const {artifacts}=context;
   const issuePlanValidation=validateIssuePlan({
@@ -253,18 +235,11 @@ function assertIndependentGates(context,registry) {
         "GitHub publication design readiness requires the exact design graph, audit, approval, and state",
       );
     }
-    const stateValidation=validateDocument(designState,"design-orchestration-state.v1");
-    if (!stateValidation.valid || designState.content_sha256!==sha256Canonical(designState.content)) {
-      throw new GitHubPublicationError(
-        "GitHub publication design readiness requires a valid immutable design state",
-      );
-    }
     let verifiedState;
     try {
-      const trustedDesign=designAuthorityRegistry(registry);
-      if (!trustedDesign) throw new TypeError("Trusted registry has no design authority");
-      verifiedState=createDesignOrchestrator({authorityRegistry:trustedDesign})
-        .verifyStateSnapshot({content:designState.content,provenance:designState.provenance});
+      verifiedState=verifyDesignStateGraph({
+        state:designState,designGraph,authorityRegistry:registry,
+      }).snapshot;
     } catch (error) {
       throw new GitHubPublicationError(
         "GitHub publication design readiness requires independently verified design authority",

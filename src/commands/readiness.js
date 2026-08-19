@@ -1,6 +1,10 @@
 import {evaluateProjectReadiness} from "../pipeline/readiness.js";
-import {createDesignOrchestrator} from "../pipeline/design-orchestrator.js";
 import {evaluateDesignReadiness} from "../pipeline/design-readiness.js";
+import {
+  stateMatchesIssuePlanTrace,
+  trustedDesignAuthorityRegistry,
+  verifyDesignStateGraph,
+} from "../pipeline/design-state-readiness.js";
 import {buildTraceGraph} from "../pipeline/traceability.js";
 import {verifiedGateEvidence} from "./evidence.js";
 import {
@@ -60,14 +64,12 @@ async function designReadinessFromCatalog(catalog,bundle,authorityRegistry,proje
       issuePlan:bundle.issuePlan});
   }
   const verified=[];
-  const orchestrator=createDesignOrchestrator({authorityRegistry});
+  const designAuthority=trustedDesignAuthorityRegistry(authorityRegistry);
   for (const state of states) {
     try {
-      const snapshot=orchestrator.verifyStateSnapshot({
-        content:state.content,provenance:state.provenance,
-      });
-      if (new Set(["COMPLETE","NOT_APPLICABLE"]).has(snapshot.content.gate)) {
-        verified.push({state,snapshot});
+      if (new Set(["COMPLETE","NOT_APPLICABLE"]).has(state.content?.gate) &&
+          stateMatchesIssuePlanTrace(state,bundle.issuePlan)) {
+        verified.push(state);
       }
     } catch {
       // An invalid historical state cannot establish current readiness.
@@ -78,11 +80,14 @@ async function designReadinessFromCatalog(catalog,bundle,authorityRegistry,proje
     return evaluateDesignReadiness({designGraph:[],audit:null,approval:null,
       issuePlan:bundle.issuePlan});
   }
-  const {snapshot}=verified[0];
+  const state=verified[0];
   const graph=[];
-  for (const reference of snapshot.content.artifact_refs) {
+  for (const reference of state.content.artifact_refs) {
     graph.push(await catalog.get(reference));
   }
+  const {snapshot}=verifyDesignStateGraph({
+    state,designGraph:graph,authorityRegistry:designAuthority,
+  });
   if (snapshot.content.gate==="NOT_APPLICABLE") {
     if (uiIssues.length>0) return evaluateDesignReadiness({
       designGraph:graph,audit:null,approval:null,issuePlan:bundle.issuePlan,

@@ -495,6 +495,46 @@ test("verified UI issue preview and apply carry exact Design DoR trace reference
     row.document_type==="design-orchestration-state"));
 });
 
+test("UI publication rejects caller-substituted full artifact payloads before writer effects",async () => {
+  const context=attachCurrentDesignBundle(readyContext());
+  context.artifacts.designGraph.find(row =>
+    row.document_type==="screen-spec").producer.identity="caller-substituted-designer";
+  const adapter=fakeAdapter();
+  const store=fakeStore();
+  const writer=configuredWriter({
+    adapter,store,authorityRegistry:trustedDesignAndPublicationRegistry(),
+  });
+
+  await assert.rejects(
+    writer.publish(context,{apply:true,authority:authorityFor(context)}),
+    /payload|commitment|design readiness/i,
+  );
+  assert.deepEqual(adapter.calls,[]);
+  assert.deepEqual(store.calls,[]);
+});
+
+test("UI publication rejects a state envelope not exactly bound to source and graph inputs",async () => {
+  for (const mutate of [
+    inputs => inputs.pop(),
+    inputs => inputs.reverse(),
+  ]) {
+    const context=attachCurrentDesignBundle(readyContext());
+    mutate(context.artifacts.designState.inputs);
+    const adapter=fakeAdapter();
+    const store=fakeStore();
+    const writer=configuredWriter({
+      adapter,store,authorityRegistry:trustedDesignAndPublicationRegistry(),
+    });
+
+    await assert.rejects(
+      writer.publish(context,{apply:true,authority:authorityFor(context)}),
+      /input|design readiness/i,
+    );
+    assert.deepEqual(adapter.calls,[]);
+    assert.deepEqual(store.calls,[]);
+  }
+});
+
 test("apply requires a trusted source, plan, repository, role, record, and signature bound approval",async () => {
   const context=readyContext();
   for (const [name,mutate] of [
