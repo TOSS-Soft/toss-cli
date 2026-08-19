@@ -789,6 +789,7 @@ test("CLI help exposes the lifecycle tree and shell-completion vocabulary",() =>
   for (const line of [
     "project <create|analyze|prepare|status|resume>",
     "feature <add|analyze|prepare|status>",
+    "design <init|analyze|prepare|status|flows|wireframes|direction|system|screens|prototype|audit|review|approve>",
     "decisions <list|answer>",
     "architecture <review|approve>",
     "plan show",
@@ -801,7 +802,7 @@ test("CLI help exposes the lifecycle tree and shell-completion vocabulary",() =>
   ]) assert.match(result.stdout,new RegExp(line.replace(/[|<>]/g,"\\$&")),line);
 
   for (const word of [
-    "project","feature","decisions","architecture","plan","audit",
+    "project","feature","design","decisions","architecture","plan","audit",
     "readiness","issues","trace","artifacts","validate","--from",
     "--non-interactive","--json","--continue","--project","--apply",
   ]) assert.ok(SHELL_COMPLETION_WORDS.includes(word),word);

@@ -1,5 +1,6 @@
 import {canonicalJson,sha256Canonical} from "../contracts/acp.js";
 import {validateDocument} from "../contracts/validator.js";
+import {classifyDesignLevel} from "./design-level.js";
 import {
   appendVerified,
   canonicalCopy,
@@ -13,7 +14,8 @@ import {
 const INPUT_KEYS=new Set([
   "schema_version","project_id","feature_id","created_at","run_id",
   "runtime_identity","provenance","request","impact_analysis",
-  "requirement_delta","architecture_impact","issue_plan_delta","findings",
+  "requirement_delta","architecture_impact","issue_plan_delta","design_impact",
+  "findings",
 ]);
 const SHAPES=Object.freeze({
   request:new Set(["summary","source_locations"]),
@@ -21,12 +23,17 @@ const SHAPES=Object.freeze({
   requirement_delta:new Set(["added","changed"]),
   architecture_impact:new Set(["summary","affected_adrs","requires_adr"]),
   issue_plan_delta:new Set(["summary","issue_ids"]),
+  design_impact:new Set([
+    "delivery_targets","affected_surfaces","risk_signals","requested_level",
+    "source","purpose","success_criteria","approval_owner",
+  ]),
   finding:new Set(["id","severity","owner","message"]),
   added_requirement:new Set(["id","meaning"]),
   changed_requirement:new Set(["id","base_id","meaning","reason"]),
   reference:new Set(["kind","id"]),
   provenance:new Set(["source_revision","source_sha256","locations"]),
   runtime_identity:new Set(["kind","name","version"]),
+  approval_owner:new Set(["role","identity"]),
 });
 const BLOCKING=new Set(["P0","P1","P2"]);
 const ADR_REQUIRED_FINDING=Object.freeze({
@@ -122,6 +129,17 @@ export function normalizeFeatureInput(value) {
   const plan=exactRecord(input.issue_plan_delta,"feature issue_plan_delta",SHAPES.issue_plan_delta);
   text(plan.summary,"feature issue plan delta summary");
   stringArray(plan.issue_ids,"feature issue_ids");
+  const designImpact=exactRecord(
+    input.design_impact,"feature design_impact",SHAPES.design_impact,
+  );
+  classifyDesignLevel({
+    schema_version:"design-classification-input.v1",
+    scope:{kind:"feature",id:input.feature_id},
+    ...designImpact,
+  });
+  exactRecord(
+    designImpact.approval_owner,"feature design approval_owner",SHAPES.approval_owner,
+  );
   if (!Array.isArray(input.findings)) throw new TypeError("feature findings must be an array");
   for (const finding of input.findings) {
     const normalized=exactRecord(finding,"feature finding",SHAPES.finding);
@@ -157,6 +175,7 @@ export function featureInputFromDelta(artifact) {
     requirement_delta:content.requirement_delta,
     architecture_impact:content.architecture_impact,
     issue_plan_delta:content.issue_plan_delta,
+    design_impact:content.design_impact,
     findings:content.findings,
   });
 }
@@ -171,6 +190,7 @@ function sourceProjection(input) {
     requirement_delta:input.requirement_delta,
     architecture_impact:input.architecture_impact,
     issue_plan_delta:input.issue_plan_delta,
+    design_impact:input.design_impact,
     findings:input.findings,
   };
 }
@@ -205,6 +225,7 @@ function deltaContent(input,stage,base) {
     requirement_delta:input.requirement_delta,
     architecture_impact:input.architecture_impact,
     issue_plan_delta:input.issue_plan_delta,
+    design_impact:input.design_impact,
     findings:input.findings,
     audit:{status,findings:evaluated},
     readiness:{ready,failures,warnings},
@@ -253,9 +274,19 @@ async function featureHistoryForArtifactId(store,artifactId) {
   for (const [index,row] of rows.entries()) {
     const rank=stages.indexOf(row.content.stage);
     const previousRank=index===0 ? -1 : stages.indexOf(rows[index-1].content.stage);
-    if (row.revision!==index+1 || rank<0 || rank<=previousRank) {
+    const expectedArtifactId=`feature-delta:${row.content.project_id}:${row.content.feature_id}`;
+    const expectedParents=index===0 ? [] : [exactReference(rows[index-1])];
+    const stateReferences=row.content.base_project.artifacts.filter(
+      reference => reference.document_type==="transition-event",
+    );
+    if (row.artifact_id!==expectedArtifactId || row.revision!==index+1 ||
+        rank<0 || rank<=previousRank ||
+        canonicalJson(row.parents)!==canonicalJson(expectedParents) ||
+        stateReferences.length!==1 ||
+        canonicalJson(row.inputs)!==canonicalJson(stateReferences)) {
       throw new OrchestrationError(
-        "AMBIGUOUS_FEATURE_HISTORY","Feature delta history is not one monotonic stage chain",5,
+        "AMBIGUOUS_FEATURE_HISTORY",
+        "Feature delta history is not one canonical monotonic envelope chain",5,
       );
     }
     if (index>0 && canonicalJson(row.content.base_project)!==

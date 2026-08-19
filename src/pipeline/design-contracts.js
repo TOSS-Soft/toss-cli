@@ -19,6 +19,19 @@ const SCHEMA_BY_DOCUMENT_TYPE=Object.freeze({
   "design-audit":"design-audit.v1",
   "design-approval":"design-approval.v1",
 });
+const REQUIRED_TYPES_BY_LEVEL=Object.freeze({
+  LITE:Object.freeze([
+    "design-brief","user-flow","design-system","screen-spec","design-audit",
+    "design-approval",
+  ]),
+  STANDARD:Object.freeze([
+    "design-brief","ux-analysis","user-flow","information-architecture",
+    "wireframe-plan","visual-direction","design-system","screen-spec",
+    "prototype-manifest","design-audit","design-approval",
+  ]),
+  CRITICAL:Object.freeze(Object.keys(SCHEMA_BY_DOCUMENT_TYPE)),
+  NOT_APPLICABLE:Object.freeze(["design-brief"]),
+});
 
 function deepFreeze(value) {
   if (!value || typeof value!=="object" || Object.isFrozen(value)) return value;
@@ -619,10 +632,29 @@ function designSystemLineageFindings(systems) {
   return findings;
 }
 
+function authoritativeDesignLevel(graph,validIndexes) {
+  const briefs=graph.filter((artifact,index) => validIndexes.has(index) &&
+    artifact.document_type==="design-brief").sort((left,right) =>
+    right.revision-left.revision);
+  return briefs[0]?.content.orchestration?.level;
+}
+
 function approvalClosure(graph,validIndexes) {
   const latest=[];
   const issues=[];
-  for (const documentType of Object.keys(SCHEMA_BY_DOCUMENT_TYPE)) {
+  const level=authoritativeDesignLevel(graph,validIndexes);
+  const requiredTypes=REQUIRED_TYPES_BY_LEVEL[level] ??
+    Object.keys(SCHEMA_BY_DOCUMENT_TYPE);
+  const requiredSet=new Set(requiredTypes);
+  for (const [index,artifact] of graph.entries()) {
+    if (!validIndexes.has(index) || !SCHEMA_BY_DOCUMENT_TYPE[artifact.document_type] ||
+        requiredSet.has(artifact.document_type)) continue;
+    issues.push({
+      type:"APPROVAL_TYPE_NOT_REQUIRED",
+      message:`${level ?? "legacy"} approval graph forbids ${artifact.document_type}`,
+    });
+  }
+  for (const documentType of requiredTypes) {
     const members=graph.filter((artifact,index) => validIndexes.has(index) &&
       artifact.document_type===documentType);
     if (members.length===0) {
@@ -654,7 +686,7 @@ function approvalClosure(graph,validIndexes) {
     }
     latest.push(members[0]);
   }
-  return {issues,latest};
+  return {issues,latest,level,requiredTypes};
 }
 
 function authoritativeApprovalManifest(closure) {
@@ -681,6 +713,10 @@ function approvalGraphFindings(graph,validIndexes) {
   for (const [index,approval] of graph.entries()) {
     if (!validIndexes.has(index) || approval.document_type!=="design-approval") continue;
     const prefix=`/${index}/content`;
+    if (closure.level==="NOT_APPLICABLE") findings.push(finding(
+      "APPROVAL_NOT_ALLOWED",prefix,
+      "NOT_APPLICABLE design scope cannot fabricate a design approval",
+    ));
     for (const issue of closure.issues) findings.push(finding(
       issue.type,`${prefix}/graph_manifest`,issue.message,
     ));

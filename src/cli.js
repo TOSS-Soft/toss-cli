@@ -892,7 +892,7 @@ async function help() {
 }
 
 const LIFECYCLE_FAMILIES=new Set([
-  "project","feature","decisions","architecture","plan","audit",
+  "project","feature","design","decisions","architecture","plan","audit",
   "readiness","issues","artifacts","validate",
 ]);
 const LEGACY_SCAFFOLD_OPTIONS=new Set([
@@ -914,41 +914,12 @@ function hasExplicitLegacyScaffoldOption(args) {
   return args.slice(1).some(value => LEGACY_SCAFFOLD_OPTIONS.has(value));
 }
 
-function readLifecycleInput(inputPath) {
-  const resolved=path.resolve(process.cwd(),inputPath);
-  const descriptor=fs.openSync(resolved,fs.constants.O_RDONLY|NO_FOLLOW);
-  try {
-    const stat=fs.fstatSync(descriptor);
-    if (!stat.isFile()) throw new TypeError("Lifecycle input must be a regular file");
-    return fs.readFileSync(descriptor,"utf8");
-  } finally {
-    fs.closeSync(descriptor);
-  }
-}
-
-async function lifecycleContext(command) {
-  const family=command.name.split(".")[0];
-  if (!LIFECYCLE_FAMILIES.has(family) || ["artifacts","validate"].includes(family)) {
-    return {};
-  }
-  const {createArtifactStore}=await import("./artifacts/store.js");
-  const root=path.resolve(process.cwd(),command.options.project ?? ".");
-  const services={artifactStore:createArtifactStore({root})};
-  if (command.name.startsWith("project.") || command.name.startsWith("feature.") ||
-      command.name==="decisions.answer" || command.name==="architecture.approve" ||
-      (command.name==="issues.publish" && command.options.apply)) {
-    services.readInput=async inputPath => readLifecycleInput(inputPath);
-  }
-  return {
-    services,
-  };
-}
-
 async function runLifecycle(args) {
-  const [router,output,options]=await Promise.all([
+  const [router,output,options,lifecycle]=await Promise.all([
     import("./commands/router.js"),
     import("./output/command-result.js"),
     import("./commands/options.js"),
+    import("./cli-lifecycle.js"),
   ]);
   if (args.at(-1)==="--help" || args.at(-1)==="-h") {
     if (args.filter(value => value==="--help" || value==="-h").length!==1) {
@@ -974,8 +945,7 @@ async function runLifecycle(args) {
 
   let dispatched;
   try {
-    const command=router.parseCommand(args);
-    dispatched=await router.dispatchCommand(command,await lifecycleContext(command));
+    dispatched=await lifecycle.runLifecycleCommand(args,{root:process.cwd()});
   } catch (error) {
     const exitCode=error instanceof router.CommandUsageError ?
       router.EXIT_CODES.USAGE : router.EXIT_CODES.INTERNAL;

@@ -1,8 +1,21 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import {
+  createLifecycleRuntimeProvider,
+  lifecycleRuntimeServices,
+} from "../src/cli-lifecycle.js";
 import {dispatchCommand} from "../src/commands/router.js";
+import {canonicalJson,sha256Canonical} from "../src/contracts/acp.js";
+import {classifyDesignLevel} from "../src/pipeline/design-level.js";
 import {artifactReference,clone,rehash} from "./support/trace-fixture.js";
+import {
+  authorityRegistry,
+  classificationInput,
+  designCommandInput,
+  graphForLevel,
+  signedStageApproval,
+} from "./support/design-command-fixture.js";
 import {
   commandServices,
   commandStore,
@@ -23,6 +36,11 @@ const projectModule=await import("../src/commands/project.js").catch(error => {
 });
 const runFeatureCommand=featureModule.runFeatureCommand;
 const runProjectCommand=projectModule.runProjectCommand;
+const designModule=await import("../src/commands/design.js").catch(error => {
+  if (error?.code==="ERR_MODULE_NOT_FOUND") return {};
+  throw error;
+});
+const runDesignCommand=designModule.runDesignCommand;
 const commandsAvailable=typeof runFeatureCommand==="function" &&
   typeof runProjectCommand==="function";
 
@@ -43,6 +61,167 @@ async function readyProject(t,{real=false}={}) {
 
 function featureServices(store,input,options) {
   return commandServices(store,input,options);
+}
+
+function assertStateInputProjection(state) {
+  assert.deepEqual(state.inputs,[
+    ...state.content.source_artifact_refs,
+    ...state.content.artifact_refs,
+  ]);
+}
+
+function rewrittenStateInputStore(delegate,rewrite) {
+  const project=row => {
+    const result=clone(row);
+    if (result.document_type==="design-orchestration-state") {
+      result.inputs=rewrite(result);
+    }
+    return result;
+  };
+  return {
+    append:delegate.append,
+    get:async reference => project(await delegate.get(reference)),
+    list:async filter => (await delegate.list(filter)).map(project),
+    verify:async reference => project(await delegate.verify(reference)),
+  };
+}
+
+function fixedArtifactStore(rows) {
+  const snapshot=rows.map(clone);
+  const key=reference => canonicalJson(reference);
+  const byReference=new Map(snapshot.map(row => [key(artifactReference(row)),row]));
+  const exact=async reference => {
+    const row=byReference.get(key(reference));
+    if (!row) throw new Error("exact hostile artifact is absent");
+    return clone(row);
+  };
+  return {
+    append:async () => { throw new Error("status must not append"); },
+    get:exact,
+    verify:exact,
+    list:async (filter={}) => snapshot.filter(row => Object.entries(filter).every(
+      ([field,value]) => row[field]===value,
+    )).map(clone),
+  };
+}
+
+async function sourceRetargetStore(delegate,{
+  alternateIdentity=false,
+  changeProjectIdentity=false,
+  changeImpact=false,
+  changeBriefFacts=false,
+  alignClassification=false,
+  breakParents=false,
+  breakInputs=false,
+  keepOriginal=alternateIdentity,
+  addNewer=false,
+  duplicate=false,
+}={}) {
+  const rows=(await delegate.list()).map(clone);
+  const original=rows.find(row => row.document_type==="feature-delta" &&
+    row.content.stage==="PREPARED");
+  const state=rows.find(row => row.document_type==="design-orchestration-state");
+  assert.ok(original && state);
+  const forged=clone(original);
+  if (alternateIdentity) {
+    forged.artifact_id=`${original.artifact_id}:alternate`;
+  }
+  if (changeProjectIdentity) {
+    forged.content.project_id="alternate-workspace";
+    forged.artifact_id=`feature-delta:alternate-workspace:${forged.content.feature_id}`;
+    rehash(forged);
+  }
+  if (changeImpact) {
+    forged.content.design_impact={
+      delivery_targets:["WEB"],
+      affected_surfaces:["SCREEN"],
+      risk_signals:["SECURITY_PRIVACY"],
+      requested_level:"AUTO",
+      source:"company_system",
+      purpose:"Expose a security-sensitive account control screen.",
+      success_criteria:["The account owner can safely complete the control flow."],
+      approval_owner:{role:"USER",identity:"verified-user"},
+    };
+    rehash(forged);
+  }
+  if (changeBriefFacts) {
+    forged.content.design_impact.purpose="Changed authoritative N/A purpose.";
+    forged.content.design_impact.success_criteria=[
+      "Changed authoritative N/A success criterion.",
+    ];
+    rehash(forged);
+  }
+  if (breakParents) {
+    forged.parents=[artifactReference(rows.find(row => row.document_type==="project-input"))];
+  }
+  if (breakInputs) forged.inputs=[];
+  const projected=rows.filter(row => row!==state && (keepOriginal || row!==original));
+  if (addNewer) {
+    const newer=clone(original);
+    newer.revision=original.revision+1;
+    newer.parents=[artifactReference(original)];
+    projected.push(newer);
+  } else {
+    const retargeted=clone(state);
+    const sourceRef=artifactReference(forged);
+    retargeted.content.source_artifact_refs=[sourceRef];
+    retargeted.inputs=[sourceRef,...retargeted.content.artifact_refs];
+    if (alignClassification) {
+      retargeted.content.classification=classifyDesignLevel({
+        schema_version:"design-classification-input.v1",
+        scope:{kind:"feature",id:forged.content.feature_id},
+        ...forged.content.design_impact,
+      });
+    }
+    rehash(retargeted);
+    projected.push(forged,retargeted);
+  }
+  if (addNewer) projected.push(state);
+  if (duplicate) projected.push(clone(original));
+  return fixedArtifactStore(projected);
+}
+
+function downgradedFeatureGraph(input,{briefBasis}={}) {
+  const graph=graphForLevel("LITE");
+  const prepared=[];
+  const byType=new Map();
+  for (const source of graph) {
+    const artifact=clone(source);
+    artifact.run_id=input.run_id;
+    artifact.runtime_identity=clone(input.runtime_identity);
+    artifact.created_at=input.created_at;
+    artifact.provenance=clone(input.provenance);
+    const remap=reference => artifactReference(byType.get(reference.document_type));
+    artifact.parents=artifact.parents.map(remap);
+    artifact.inputs=artifact.inputs.map(remap);
+    if (artifact.document_type==="design-brief") {
+      artifact.artifact_id="design-brief:DESIGN-FEATURE-001";
+      artifact.producer={role:"pm",identity:"toss-feature-design-classifier"};
+      artifact.content.design_id="DESIGN-FEATURE-001";
+      artifact.content.source=input.design_impact.source;
+      artifact.content.purpose=input.design_impact.purpose;
+      artifact.content.success_criteria=clone(input.design_impact.success_criteria);
+      artifact.content.approval_owner=clone(input.design_impact.approval_owner);
+      artifact.content.orchestration={
+        level:"LITE",
+        basis:briefBasis ?? [
+          `PM classification CRITICAL for exact feature source ${input.provenance.source_revision}.`,
+        ],
+      };
+    }
+    if (artifact.document_type==="design-approval") {
+      artifact.content.authority=clone(input.design_impact.approval_owner);
+      artifact.content.graph_manifest=prepared.map(artifactReference).sort((left,right) =>
+        canonicalJson(left).localeCompare(canonicalJson(right)));
+      artifact.content.graph_root_sha256=sha256Canonical(
+        artifact.content.graph_manifest,
+      );
+    }
+    artifact.content_sha256=sha256Canonical(artifact.content);
+    prepared.push(artifact);
+    byType.set(artifact.document_type,artifact);
+  }
+  return prepared;
 }
 
 test("feature add/analyze/prepare creates immutable delta revisions over one exact base",{
@@ -74,8 +253,11 @@ test("feature add/analyze/prepare creates immutable delta revisions over one exa
   assert.deepEqual(result.artifact.content.base_project.artifacts,prepared.artifact_revisions);
   assert.equal(result.artifact.content.base_project.authority,"reference-only");
 
+  const featureOwnedTypes=new Set([
+    "feature-delta","design-brief","design-orchestration-state",
+  ]);
   const projectAfter=(await store.list()).filter(entry =>
-    entry.document_type!=="feature-delta");
+    !featureOwnedTypes.has(entry.document_type));
   assert.deepEqual(projectAfter,projectBefore);
   assert.deepEqual(result.artifact.inputs,prepared.artifact_revisions.filter(
     reference => reference.document_type==="transition-event",
@@ -110,6 +292,378 @@ test("feature prepare is idempotent and reports reused immutable revisions",{
   assert.deepEqual(after,before);
   assert.equal(first.artifact.content_sha256,second.artifact.content_sha256);
   assert.ok(second.reused_revisions.length>=1);
+});
+
+test("UI feature prepare starts a provenance-bound design state without pre-gate artifacts",{
+  skip:!commandsAvailable,
+},async t => {
+  const {store}=await readyProject(t);
+  const input=featureCommandInput({designImpact:{
+    delivery_targets:["WEB"],
+    affected_surfaces:["SCREEN","FLOW","INFORMATION_ARCHITECTURE"],
+    risk_signals:["MULTI_SCREEN"],
+    requested_level:"AUTO",
+    source:"company_system",
+    purpose:"Add a requester-visible resolution notification screen and flow.",
+    success_criteria:["The requester can understand the resolved state."],
+    approval_owner:{role:"USER",identity:"verified-user"},
+  }});
+  const first=await runFeatureCommand(
+    parsedCommand("feature.prepare",{from:"feature.json"}),featureServices(store,input),
+  );
+  assert.equal(first.design.level,"STANDARD");
+  assert.equal(first.design.state,"INITIALIZED");
+  assert.equal(first.design.artifact_revisions.length,0);
+  assert.equal((await store.list({document_type:"design-brief"})).length,0);
+  const states=await store.list({document_type:"design-orchestration-state"});
+  assert.equal(states.length,1);
+  assertStateInputProjection(states[0]);
+  assert.equal(states[0].content.source_artifact_refs[0].document_type,"feature-delta");
+  assert.deepEqual(first.design.state_revision,artifactReference(states[0]));
+  assert.equal(states[0].provenance.source_revision,input.provenance.source_revision);
+
+  const second=await runFeatureCommand(
+    parsedCommand("feature.prepare",{from:"feature.json"}),featureServices(store,input),
+  );
+  assert.deepEqual(second.design.state_revision,first.design.state_revision);
+  assert.equal((await store.list({document_type:"design-orchestration-state"})).length,1);
+});
+
+test("Critical feature downgrade starts from one valid pending bootstrap state",{
+  skip:!commandsAvailable,
+},async t => {
+  const {store}=await readyProject(t);
+  const input=featureCommandInput({designImpact:{
+    delivery_targets:["WEB"],
+    affected_surfaces:["SCREEN"],
+    risk_signals:["SECURITY_PRIVACY"],
+    requested_level:"LITE",
+    source:"company_system",
+    purpose:"Protect a user-visible sensitive-data workflow.",
+    success_criteria:["The sensitive flow is usable without weakening privacy."],
+    approval_owner:{role:"CEO",identity:"verified-ceo"},
+  }});
+  const result=await runFeatureCommand(
+    parsedCommand("feature.prepare",{from:"feature.json"}),
+    featureServices(store,input),
+  );
+  assert.equal(result.design.level,"CRITICAL");
+  assert.equal(result.design.state,"DOWNGRADE_PENDING");
+  assert.equal(result.design.gate,"CRITICAL_DOWNGRADE_APPROVAL");
+  assert.equal(result.design.blocked,true);
+  assert.equal(result.design.command_exit_code,4);
+  const states=await store.list({document_type:"design-orchestration-state"});
+  assert.equal(states.length,1);
+  assertStateInputProjection(states[0]);
+  const status=await runFeatureCommand(
+    parsedCommand("feature.status"),featureServices(store,input),
+  );
+  assert.equal(status.design.state,"DOWNGRADE_PENDING");
+
+  const graph=downgradedFeatureGraph(input);
+  const classification=classificationInput({
+    scope:{kind:"feature",id:"FEATURE-001"},
+    delivery_targets:input.design_impact.delivery_targets,
+    affected_surfaces:input.design_impact.affected_surfaces,
+    risk_signals:input.design_impact.risk_signals,
+    requested_level:"LITE",
+    source:input.design_impact.source,
+    purpose:input.design_impact.purpose,
+    success_criteria:input.design_impact.success_criteria,
+    approval_owner:input.design_impact.approval_owner,
+  });
+  const downgrade=signedStageApproval("CRITICAL_DOWNGRADE",graph,{
+    design_id:"DESIGN-FEATURE-001",
+    level:"LITE",
+    recommended_level:"CRITICAL",
+    effective_level:"LITE",
+    from_level:"CRITICAL",
+    to_level:"LITE",
+    source_revision:input.provenance.source_revision,
+    source_sha256:input.provenance.source_sha256,
+  });
+  const replay=designCommandInput({
+    artifacts:graph,approvalRecords:[downgrade],classification,
+  });
+  replay.design_id="DESIGN-FEATURE-001";
+  replay.created_at=input.created_at;
+  replay.run_id=input.run_id;
+  replay.runtime_identity=clone(input.runtime_identity);
+  replay.provenance=clone(input.provenance);
+  const authorityCapability=lifecycleRuntimeServices(createLifecycleRuntimeProvider({
+    authorityRegistry:authorityRegistry(),prompt:async () => null,
+  })).authorityCapability;
+  const advanced=await runDesignCommand(
+    parsedCommand("design.approve",{from:"design.json"}),{
+      artifactStore:store,
+      readInput:async () => JSON.stringify(replay),
+      authorityCapability,
+    },
+  );
+  assert.equal(advanced.level,"LITE");
+  assert.equal(advanced.state,"DIRECTION_PENDING");
+  assert.equal((await store.list({document_type:"design-orchestration-state"})).length,2);
+  const continuedStatus=await runFeatureCommand(
+    parsedCommand("feature.status"),{
+      ...featureServices(store,input),authorityCapability,
+    },
+  );
+  assert.equal(continuedStatus.design.level,"LITE");
+  assert.equal(continuedStatus.design.state,"DIRECTION_PENDING");
+});
+
+test("feature design rejects a non-derived brief commitment before appending state",{
+  skip:!commandsAvailable,
+},async t => {
+  const {store}=await readyProject(t);
+  const input=featureCommandInput({designImpact:{
+    delivery_targets:["WEB"],
+    affected_surfaces:["SCREEN"],
+    risk_signals:["SECURITY_PRIVACY"],
+    requested_level:"LITE",
+    source:"company_system",
+    purpose:"Protect a user-visible sensitive-data workflow.",
+    success_criteria:["The sensitive flow is usable without weakening privacy."],
+    approval_owner:{role:"CEO",identity:"verified-ceo"},
+  }});
+  await runFeatureCommand(
+    parsedCommand("feature.prepare",{from:"feature.json"}),featureServices(store,input),
+  );
+  const graph=downgradedFeatureGraph(input,{
+    briefBasis:["Caller-supplied basis not derived from the authoritative feature source."],
+  });
+  const classification=classificationInput({
+    scope:{kind:"feature",id:"FEATURE-001"},
+    delivery_targets:input.design_impact.delivery_targets,
+    affected_surfaces:input.design_impact.affected_surfaces,
+    risk_signals:input.design_impact.risk_signals,
+    requested_level:"LITE",
+    source:input.design_impact.source,
+    purpose:input.design_impact.purpose,
+    success_criteria:input.design_impact.success_criteria,
+    approval_owner:input.design_impact.approval_owner,
+  });
+  const approval=signedStageApproval("CRITICAL_DOWNGRADE",graph,{
+    design_id:"DESIGN-FEATURE-001",
+    level:"LITE",
+    recommended_level:"CRITICAL",
+    effective_level:"LITE",
+    from_level:"CRITICAL",
+    to_level:"LITE",
+    source_revision:input.provenance.source_revision,
+    source_sha256:input.provenance.source_sha256,
+  });
+  const replay=designCommandInput({
+    artifacts:graph,approvalRecords:[approval],classification,
+  });
+  replay.design_id="DESIGN-FEATURE-001";
+  replay.created_at=input.created_at;
+  replay.run_id=input.run_id;
+  replay.runtime_identity=clone(input.runtime_identity);
+  replay.provenance=clone(input.provenance);
+  const authorityCapability=lifecycleRuntimeServices(createLifecycleRuntimeProvider({
+    authorityRegistry:authorityRegistry(),prompt:async () => null,
+  })).authorityCapability;
+  const before=await store.list();
+  await assert.rejects(runDesignCommand(
+    parsedCommand("design.approve",{from:"design.json"}),{
+      artifactStore:store,
+      readInput:async () => JSON.stringify(replay),
+      authorityCapability,
+    },
+  ),error => error?.code==="DESIGN_STATE_INVALID" || error?.code==="INPUT_STALE");
+  assert.deepEqual(await store.list(),before);
+});
+
+test("feature status follows a valid descendant design state instead of comparing it to bootstrap",{
+  skip:!commandsAvailable,
+},async t => {
+  const {store}=await readyProject(t);
+  const input=featureCommandInput({designImpact:{
+    delivery_targets:["WEB"],
+    affected_surfaces:["SCREEN","FLOW","INFORMATION_ARCHITECTURE"],
+    risk_signals:["MULTI_SCREEN"],
+    requested_level:"AUTO",
+    source:"company_system",
+    purpose:"Add a requester-visible resolution notification screen and flow.",
+    success_criteria:["The requester can understand the resolved state."],
+    approval_owner:{role:"USER",identity:"verified-user"},
+  }});
+  await runFeatureCommand(
+    parsedCommand("feature.prepare",{from:"feature.json"}),featureServices(store,input),
+  );
+  const initial=(await store.list({document_type:"design-orchestration-state"})).at(-1);
+  const stages={
+    "design-brief":"BRIEF",
+    "ux-analysis":"ANALYSIS",
+    "user-flow":"FLOWS",
+    "information-architecture":"INFORMATION_ARCHITECTURE",
+    "wireframe-plan":"WIREFRAMES",
+    "visual-direction":"DIRECTION",
+    "design-system":"DESIGN_SYSTEM",
+    "screen-spec":"SCREENS",
+    "prototype-manifest":"PROTOTYPE",
+    "design-audit":"AUDIT",
+    "design-approval":"FINAL_APPROVAL",
+  };
+  const descendant=clone(initial);
+  descendant.revision=2;
+  descendant.parents=[artifactReference(initial)];
+  descendant.inputs=[...initial.content.source_artifact_refs];
+  descendant.content.state="DIRECTION_PENDING";
+  descendant.content.gate="DIRECTION_APPROVAL";
+  descendant.content.payload_commitments=descendant.content.required_artifact_types.map(
+    (documentType,index) => ({
+      stage:stages[documentType],
+      expected_document_type:documentType,
+      expected_artifact_ref:documentType==="design-brief" ?
+        initial.content.payload_commitments[0].expected_artifact_ref : {
+          document_type:documentType,
+          artifact_id:`${documentType}:DESIGN-FEATURE-001`,
+          revision:1,
+          content_sha256:"abcdef12345"[index].repeat(64),
+        },
+      payload_sha256:documentType==="design-brief" ?
+        initial.content.payload_commitments[0].payload_sha256 :
+        "123456789ab"[index].repeat(64),
+      status:"COLLECTED",
+      artifact_ref:null,
+    }),
+  );
+  descendant.content.next_action={
+    command:"toss design approve",
+    owner:"USER",
+    reason:"Visual direction approval is required.",
+  };
+  rehash(descendant);
+  await store.append(descendant);
+
+  const directStatus=await runDesignCommand(
+    parsedCommand("design.status"),{artifactStore:store},
+  );
+  assert.equal(directStatus.state,"DIRECTION_PENDING");
+  assert.deepEqual(directStatus.state_artifact,descendant);
+  const status=await runFeatureCommand(
+    parsedCommand("feature.status"),featureServices(store,input),
+  );
+  assert.equal(status.design.state,"DIRECTION_PENDING");
+  assert.deepEqual(status.design.state_revision,artifactReference(descendant));
+});
+
+test("backend-only feature prepare persists exactly a reasoned N/A brief and state",{
+  skip:!commandsAvailable,
+},async t => {
+  const {store}=await readyProject(t);
+  const input=featureCommandInput();
+  const result=await runFeatureCommand(
+    parsedCommand("feature.prepare",{from:"feature.json"}),featureServices(store,input),
+  );
+  assert.equal(result.design.level,"NOT_APPLICABLE");
+  assert.equal(result.design.state,"NOT_APPLICABLE");
+  assert.equal((await store.list({document_type:"design-brief"})).length,1);
+  assert.equal((await store.list({document_type:"design-orchestration-state"})).length,1);
+  const state=(await store.list({document_type:"design-orchestration-state"}))[0];
+  assertStateInputProjection(state);
+  assert.deepEqual(result.artifact.content.design_impact,input.design_impact);
+  assert.equal(result.design.artifact_revisions[0].document_type,"design-brief");
+  const beforeRerun=await store.list();
+  const rerun=await runFeatureCommand(
+    parsedCommand("feature.prepare",{from:"feature.json"}),featureServices(store,input),
+  );
+  assert.deepEqual(await store.list(),beforeRerun);
+  assert.deepEqual(rerun.design.state_revision,result.design.state_revision);
+});
+
+test("design and feature status authenticate the unique latest feature source and derived design facts",{
+  skip:!commandsAvailable,
+},async t => {
+  const {store}=await readyProject(t);
+  const input=featureCommandInput();
+  await runFeatureCommand(
+    parsedCommand("feature.prepare",{from:"feature.json"}),featureServices(store,input),
+  );
+  const cases={
+    "alternate identity with the same payload":{
+      alternateIdentity:true,
+    },
+    "cross-project replacement with a self-derived canonical identity":{
+      changeProjectIdentity:true,
+    },
+    "alternate identity with changed design impact":{
+      alternateIdentity:true,changeImpact:true,
+    },
+    "canonical identity with source classification drift":{
+      changeImpact:true,
+    },
+    "source-aligned classification with a stale derived brief":{
+      changeBriefFacts:true,alignClassification:true,
+    },
+    "a newer feature revision makes the committed source stale":{
+      addNewer:true,
+    },
+    "a duplicate feature revision is ambiguous":{
+      duplicate:true,
+    },
+    "a source envelope with forged root parents is ambiguous":{
+      breakParents:true,
+    },
+    "a source envelope detached from its base transition is ambiguous":{
+      breakInputs:true,
+    },
+  };
+  const closedSourceError=error => new Set([
+    "AMBIGUOUS_ARTIFACT_HISTORY","AMBIGUOUS_FEATURE_HISTORY",
+    "DESIGN_STATE_INVALID","DUPLICATE_REVISION_IDENTITY",
+    "INPUT_STALE","STALE_FEATURE_BASE","STALE_FEATURE_SOURCE",
+  ]).has(error?.code);
+  for (const [name,options] of Object.entries(cases)) {
+    await t.test(name,async () => {
+      const hostile=await sourceRetargetStore(store,options);
+      await Promise.all([
+        assert.rejects(runDesignCommand(
+          parsedCommand("design.status"),{
+            artifactStore:hostile,
+          },
+        ),closedSourceError),
+        assert.rejects(runFeatureCommand(
+          parsedCommand("feature.status"),featureServices(hostile,input),
+        ),closedSourceError),
+      ]);
+    });
+  }
+});
+
+test("feature design status rejects cleared source, cleared artifact, extra, duplicate, and reordered state inputs",{
+  skip:!commandsAvailable,
+},async t => {
+  const {store}=await readyProject(t);
+  const input=featureCommandInput();
+  await runFeatureCommand(
+    parsedCommand("feature.prepare",{from:"feature.json"}),featureServices(store,input),
+  );
+  const state=(await store.list({document_type:"design-orchestration-state"}))[0];
+  assert.deepEqual(state.inputs.map(row => row.document_type),[
+    "feature-delta","design-brief",
+  ]);
+  const inputKeys=new Set(state.inputs.map(row => canonicalJson(row)));
+  const unexpected=artifactReference((await store.list()).find(row =>
+    row.document_type!=="design-orchestration-state" &&
+    !inputKeys.has(canonicalJson(artifactReference(row)))));
+  const variants={
+    "cleared source":row => row.inputs.slice(1),
+    "cleared artifact":row => row.inputs.slice(0,1),
+    extra:row => [...row.inputs,unexpected],
+    duplicate:row => [...row.inputs,row.inputs[0]],
+    reordered:row => [...row.inputs].reverse(),
+  };
+  for (const [name,rewrite] of Object.entries(variants)) {
+    await t.test(name,async () => {
+      await assert.rejects(runFeatureCommand(
+        parsedCommand("feature.status"),
+        featureServices(rewrittenStateInputStore(store,rewrite),input),
+      ),error => new Set(["DESIGN_STATE_INVALID","INPUT_STALE"]).has(error?.code));
+    });
+  }
 });
 
 test("feature prepare detects a stale exact base and never rewrites project artifacts",{
@@ -418,7 +972,7 @@ test("feature prepare uses bounded command-scoped store verification",{
     counted.calls.list<=3 && counted.calls.get<=15 && counted.calls.verify<=15,
     `feature prepare store amplification: ${JSON.stringify(counted.calls)}`,
   );
-  assert.equal(counted.calls.append,1);
+  assert.equal(counted.calls.append,3);
 });
 
 test("feature status verifies two bounded base catalog generations",{

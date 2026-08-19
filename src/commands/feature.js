@@ -10,6 +10,7 @@ import {
   verifyExactBaseReferences,
 } from "../pipeline/feature-delta.js";
 import {resumeAnalysis} from "../pipeline/orchestrator.js";
+import {startFeatureDesign} from "./design.js";
 import {
   acquireInput,
   canonicalCopy,
@@ -158,7 +159,7 @@ async function currentFeature(store,input) {
   return {history,latest};
 }
 
-async function runStages(command,store,input,targetStage) {
+async function runStages(command,store,input,targetStage,authorityCapability) {
   const base=await readyBase(store,input.project_id);
   let {history,latest}=await currentFeature(store,input);
   if (latest && !sameBase(latest.content.base_project,base)) {
@@ -175,11 +176,17 @@ async function runStages(command,store,input,targetStage) {
     await verifyExactBaseReferences(store,base);
   }
   await verifyBaseSnapshot(store,base);
-  const result=statusResult(latest,reused);
+  const design=targetStage==="PREPARED" ? await startFeatureDesign(
+    store,latest,{authorityCapability},
+  ) : null;
+  const result=deepFreeze({
+    ...statusResult(latest,reused),
+    ...(design ? {design} : {}),
+  });
   return targetStage==="PREPARED" ? blockAutomation(command,result) : result;
 }
 
-async function featureStatus(store) {
+async function featureStatus(store,authorityCapability) {
   const latest=await latestAnyFeature(store);
   const input=featureInputFromDelta(latest);
   const base=await readyBase(store,input.project_id);
@@ -188,7 +195,11 @@ async function featureStatus(store) {
       "STALE_FEATURE_BASE","Persisted feature delta references a stale project snapshot",6,
     );
   }
-  return statusResult(latest);
+  const design=latest.content.stage==="PREPARED" ?
+    await startFeatureDesign(store,latest,{
+      readOnly:true,authorityCapability,
+    }) : null;
+  return deepFreeze({...statusResult(latest),...(design ? {design} : {})});
 }
 
 export async function runFeatureCommand(command,serviceInput) {
@@ -202,7 +213,7 @@ export async function runFeatureCommand(command,serviceInput) {
   const services={...rawServices,store};
   let result;
   if (normalized.name==="feature.status") {
-    result=await featureStatus(services.store);
+    result=await featureStatus(services.store,services.authorityCapability);
   } else {
     const input=await resolveFeature(normalized,services);
     const target={
@@ -210,7 +221,9 @@ export async function runFeatureCommand(command,serviceInput) {
       "feature.analyze":"ANALYZED",
       "feature.prepare":"PREPARED",
     }[normalized.name];
-    result=await runStages(normalized,services.store,input,target);
+    result=await runStages(
+      normalized,services.store,input,target,services.authorityCapability,
+    );
   }
   await store.refresh();
   return result;

@@ -156,6 +156,43 @@ function rebuildGraph(input) {
   return graph;
 }
 
+const LEVEL_TYPES=Object.freeze({
+  LITE:Object.freeze([
+    "design-brief","user-flow","design-system","screen-spec","design-audit",
+    "design-approval",
+  ]),
+  STANDARD:Object.freeze([
+    "design-brief","ux-analysis","user-flow","information-architecture",
+    "wireframe-plan","visual-direction","design-system","screen-spec",
+    "prototype-manifest","design-audit","design-approval",
+  ]),
+  CRITICAL:Object.freeze([
+    "design-brief","ux-analysis","user-flow","information-architecture",
+    "wireframe-plan","visual-direction","design-system","screen-spec",
+    "prototype-manifest","usability-evidence","design-audit","design-approval",
+  ]),
+});
+
+function levelAwareGraph(level) {
+  const graph=buildGraph();
+  const brief=graph.find(artifact => artifact.document_type==="design-brief");
+  brief.content.orchestration={
+    level,
+    basis:[`${level} is the exact PM-classified design depth for this source revision.`],
+  };
+  if (level==="NOT_APPLICABLE") {
+    brief.content.source="NOT_APPLICABLE";
+    brief.content.purpose="Record that the verified scope has no user-interface impact.";
+    brief.content.success_criteria=["No UI design artifact is required for this source revision."];
+    rehash(brief);
+    return rebuildGraph([brief]);
+  }
+  rehash(brief);
+  return rebuildGraph(graph.filter(artifact => LEVEL_TYPES[level].includes(
+    artifact.document_type,
+  )));
+}
+
 test("the public design validator accepts all twelve issue 29 artifact types",async () => {
   const {validateDesignArtifact}=await import(
     "../src/pipeline/design-contracts.js"
@@ -1182,4 +1219,43 @@ test("approval closure is independent of synchronized caller omissions and extra
     assert.equal(validateDesignArtifact(approval,graph).valid,true,
       JSON.stringify(validateDesignArtifact(approval,graph).findings));
   });
+});
+
+test("level-aware approval closure accepts exact Lite, Standard, Critical, and N/A graphs",async t => {
+  const {validateDesignArtifact}=await import("../src/pipeline/design-contracts.js");
+  for (const level of ["LITE","STANDARD","CRITICAL","NOT_APPLICABLE"]) {
+    await t.test(level,() => {
+      const graph=levelAwareGraph(level);
+      const expectedCount=level==="NOT_APPLICABLE" ? 1 : LEVEL_TYPES[level].length;
+      assert.equal(graph.length,expectedCount);
+      for (const artifact of graph) {
+        const result=validateDesignArtifact(artifact,graph);
+        assert.equal(result.valid,true,`${level} ${artifact.document_type}: ${JSON.stringify(
+          result.findings,
+        )}`);
+      }
+    });
+  }
+});
+
+test("Lite keeps its hidden design-system binding and N/A cannot fabricate approval",async () => {
+  const {validateDesignArtifact}=await import("../src/pipeline/design-contracts.js");
+  const lite=levelAwareGraph("LITE");
+  const withoutSystem=rebuildGraph(lite.filter(artifact => artifact.document_type!=="design-system"));
+  const liteApproval=withoutSystem.find(artifact => artifact.document_type==="design-approval");
+  assert.ok(validateDesignArtifact(liteApproval,withoutSystem).findings.some(finding =>
+    finding.type==="APPROVAL_REQUIRED_TYPE_MISSING" ||
+    finding.type==="APPROVAL_GRAPH_INCOMPLETE"));
+
+  const notApplicable=levelAwareGraph("NOT_APPLICABLE");
+  const fabricated=clone(buildGraph().find(artifact => artifact.document_type==="design-approval"));
+  fabricated.content.source="NOT_APPLICABLE";
+  fabricated.parents=[];
+  fabricated.inputs=[];
+  fabricated.content.graph_manifest=[artifactReference(notApplicable[0])];
+  fabricated.content.graph_root_sha256=sha256Canonical(fabricated.content.graph_manifest);
+  rehash(fabricated);
+  const forgedGraph=[...notApplicable,fabricated];
+  assert.ok(validateDesignArtifact(fabricated,forgedGraph).findings.some(finding =>
+    finding.type==="APPROVAL_NOT_ALLOWED"));
 });
