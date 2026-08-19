@@ -3,20 +3,25 @@ import {createHash} from "node:crypto";
 import {readFileSync} from "node:fs";
 import test from "node:test";
 
-const baseline=JSON.parse(readFileSync(
+const baselineSource=readFileSync(
   new URL("../docs/performance/v2.1.1-baseline.json",import.meta.url),"utf8",
-));
+);
+const baseline=JSON.parse(baselineSource);
 const protocol=readFileSync(
   new URL("../docs/testing/performance-baseline.md",import.meta.url),"utf8",
 );
 const lock=readFileSync(new URL("../package-lock.json",import.meta.url));
+const BASELINE_SHA256="6456c1c8e9c44e570a11db4742802ec882e3de36aa361cbe9c09e2a1995f71a2";
 
 function median(samples,field) {
   return samples.map(sample => sample[field]).sort((left,right) => left-right)[1];
 }
 
-function assertBaselineIntegrity(candidate) {
+function assertBaselineIntegrity(candidate,source=baselineSource) {
+  assert.equal(createHash("sha256").update(source).digest("hex"),BASELINE_SHA256);
   assert.equal(candidate.schema_version,"toss-test-performance-baseline.v1");
+  assert.deepEqual(candidate.command,{arguments:["test"],executable:"npm"});
+  assert.equal(candidate.lane,"full");
   assert.equal(candidate.identity.commit,"e443a2c4492cfb7f16daec4d089218ef30cc9f81");
   assert.equal(candidate.identity.runner_id,"toss-reference-macos-node26");
   assert.equal(candidate.identity.node_version,"v26.6.0");
@@ -66,6 +71,24 @@ test("integrity rejects a replacement captured commit",() => {
   const mutated=structuredClone(baseline);
   mutated.identity.commit="0".repeat(40);
   assert.throws(() => assertBaselineIntegrity(mutated),assert.AssertionError);
+});
+
+test("integrity rejects drift in a raw nonmedian CPU sample",() => {
+  const mutatedSource=baselineSource.replace('"system_cpu_ms":293241.792','"system_cpu_ms":293241.793');
+  assert.notEqual(mutatedSource,baselineSource);
+  assert.throws(
+    () => assertBaselineIntegrity(JSON.parse(mutatedSource),mutatedSource),
+    assert.AssertionError,
+  );
+});
+
+test("integrity rejects drift in captured diagnostic evidence",() => {
+  const mutatedSource=baselineSource.replace('"entry_path":"bin/toss.js"','"entry_path":"bin/toss.mjs"');
+  assert.notEqual(mutatedSource,baselineSource);
+  assert.throws(
+    () => assertBaselineIntegrity(JSON.parse(mutatedSource),mutatedSource),
+    assert.AssertionError,
+  );
 });
 
 test("protocol names exact capture and refresh boundaries",() => {

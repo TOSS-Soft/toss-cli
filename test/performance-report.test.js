@@ -32,12 +32,32 @@ const identity={
   node_version:"v26.6.0",platform:"darwin",arch:"arm64",
   lock_sha256:"a".repeat(64),runner_id:"toss-reference-macos-node26",
 };
+const command={executable:"npm",arguments:["test"]};
 
 const sample=wall_ms => ({
   wall_ms,user_cpu_ms:200000,system_cpu_ms:300000,exit_status:0,
   fresh_process_count:80,peak_process_count:12,duplicates:[],
   slowest_files:[],slowest_tests:[],
 });
+
+function reportDocument({
+  lane="full",walls=[139000,140000,141000],exactIdentity=identity,exactCommand=command,
+  sampleFactory=sample,
+}={}) {
+  return createPerformanceReport({
+    command:exactCommand,lane,identity:exactIdentity,samples:walls.map(sampleFactory),
+  });
+}
+
+function baselineDocument({walls,fullLimit=94472,exactIdentity,exactCommand}={}) {
+  const report=reportDocument({walls,exactIdentity,exactCommand});
+  return {
+    ...report,
+    schema_version:"toss-test-performance-baseline.v1",
+    historical:{full_wall_ms:134960},
+    budgets:{fast_max_wall_ms:15000,full_max_wall_ms:fullLimit},
+  };
+}
 
 test("process events produce counts, CPU totals, and duplicates",() => {
   const summary=summarizeProcessEvents([
@@ -51,6 +71,13 @@ test("process events produce counts, CPU totals, and duplicates",() => {
   assert.equal(summary.user_cpu_ms,30);
   assert.equal(summary.system_cpu_ms,12);
   assert.deepEqual(summary.duplicates,[{entry_path:"test/a.test.js",count:2}]);
+});
+
+test("process summaries reject empty evidence",() => {
+  assert.throws(
+    () => summarizeProcessEvents([],"/repo","run-1"),
+    error => error.code==="INCOMPLETE_PROCESS_EVIDENCE",
+  );
 });
 
 test("process summaries retain external processes but duplicate only repository tests",() => {
@@ -96,84 +123,106 @@ test("process summaries use the Node entry point instead of later repository arg
 
 test("report requires three compatible successful samples",() => {
   const report=createPerformanceReport({
-    lane:"full",identity,
+    command,lane:"full",identity,
     samples:[sample(134000),sample(132000),sample(133000)],
   });
   assert.equal(report.schema_version,"toss-test-performance-report.v1");
   assert.equal(report.medians.wall_ms,133000);
   assert.equal(JSON.parse(canonicalPerformanceJson(report)).medians.wall_ms,133000);
-  assert.throws(() => createPerformanceReport({lane:"full",identity,samples:[sample(1),sample(2)]}),/exactly three/);
+  assert.throws(() => createPerformanceReport({
+    command,lane:"full",identity,samples:[sample(1),sample(2)],
+  }),/exactly three/);
+});
+
+test("report records one exact closed executable and argument vector",() => {
+  const report=createPerformanceReport({
+    command,lane:"full",identity,
+    samples:[sample(134000),sample(132000),sample(133000)],
+  });
+  assert.deepEqual(report.command,command);
+  assert.throws(() => createPerformanceReport({
+    command:{...command,shell:false},lane:"full",identity,
+    samples:[sample(134000),sample(132000),sample(133000)],
+  }),/unknown property/);
 });
 
 test("full budget has stable passing and failing results",() => {
-  const baseline={
-    schema_version:"toss-test-performance-baseline.v1",identity,
-    historical:{full_wall_ms:134960},
-    medians:{wall_ms:140000},
-    budgets:{fast_max_wall_ms:15000,full_max_wall_ms:94472},
-  };
-  const candidate=createPerformanceReport({
-    lane:"full",identity,
-    samples:[sample(95000),sample(95000),sample(95000)],
-  });
+  const baseline=baselineDocument();
+  const candidate=reportDocument({walls:[95000,95000,95000]});
   assert.equal(comparePerformanceBudget(baseline,candidate,"full").code,"FULL_WALL_BUDGET_EXCEEDED");
 });
 
 test("budget comparison accepts a report produced by the report model",() => {
-  const baseline={
-    schema_version:"toss-test-performance-baseline.v1",identity,
-    historical:{full_wall_ms:134960},
-    medians:{wall_ms:140000},
-    budgets:{fast_max_wall_ms:15000,full_max_wall_ms:94472},
-  };
-  const candidate=createPerformanceReport({
-    lane:"full",identity,
-    samples:[sample(94000),sample(93000),sample(92000)],
-  });
+  const baseline=baselineDocument();
+  const candidate=reportDocument({walls:[94000,93000,92000]});
   assert.equal(comparePerformanceBudget(baseline,candidate,"full").code,"PERFORMANCE_BUDGET_OK");
 });
 
 test("budget comparison accepts a complete historical baseline",() => {
-  const baseline={
-    schema_version:"toss-test-performance-baseline.v1",identity,
-    historical:{full_wall_ms:134960},
-    medians:{wall_ms:140000},
-    budgets:{fast_max_wall_ms:15000,full_max_wall_ms:94472},
-  };
-  const candidate=createPerformanceReport({
-    lane:"full",identity,
-    samples:[sample(94000),sample(93000),sample(92000)],
-  });
+  const baseline=baselineDocument();
+  const candidate=reportDocument({walls:[94000,93000,92000]});
   assert.equal(comparePerformanceBudget(baseline,candidate,"full").code,"PERFORMANCE_BUDGET_OK");
 });
 
 test("budget comparison rejects a candidate report from another lane",() => {
-  const baseline={
+  const baseline=baselineDocument();
+  const candidate=reportDocument({lane:"fast",walls:[1000,1100,1200]});
+  assert.throws(() => comparePerformanceBudget(baseline,candidate,"full"),/candidate lane/);
+});
+
+test("budget comparison requires complete canonical evidence",() => {
+  const partialBaseline={
     schema_version:"toss-test-performance-baseline.v1",identity,
-    historical:{full_wall_ms:134960},
-    medians:{wall_ms:140000},
     budgets:{fast_max_wall_ms:15000,full_max_wall_ms:94472},
   };
-  const candidate=createPerformanceReport({
-    lane:"fast",identity,
-    samples:[sample(1000),sample(1100),sample(1200)],
-  });
-  assert.throws(() => comparePerformanceBudget(baseline,candidate,"full"),/candidate lane/);
+  const partialCandidate={
+    schema_version:"toss-test-performance-report.v1",lane:"full",identity,
+    medians:{wall_ms:90000},
+  };
+  assert.throws(() => comparePerformanceBudget(partialBaseline,partialCandidate,"full"));
+
+  const relaxed=baselineDocument({fullLimit:94473});
+  assert.throws(
+    () => comparePerformanceBudget(relaxed,reportDocument({walls:[90000,90000,90000]}),"full"),
+    /full budget/,
+  );
+
+  const failed=reportDocument({walls:[90000,90000,90000]});
+  failed.samples[1].exit_status=7;
+  assert.throws(() => comparePerformanceBudget(baselineDocument(),failed,"full"),/successful/);
+
+  const noncanonical=reportDocument({walls:[90000,90000,90000]});
+  noncanonical.samples[0].stdout="captured output is not canonical evidence";
+  assert.throws(() => comparePerformanceBudget(baselineDocument(),noncanonical,"full"));
+});
+
+test("budget comparison binds command and lane while allowing a stricter baseline",() => {
+  const stricter=baselineDocument({fullLimit:90000});
+  assert.equal(
+    comparePerformanceBudget(stricter,reportDocument({walls:[89000,89000,89000]}),"full").code,
+    "PERFORMANCE_BUDGET_OK",
+  );
+  assert.throws(
+    () => comparePerformanceBudget(stricter,reportDocument({
+      walls:[89000,89000,89000],exactCommand:{executable:"node",arguments:["--test"]},
+    }),"full"),
+    /command/,
+  );
 });
 
 test("canonical report serialization rejects unknown report fields",() => {
   const report=createPerformanceReport({
-    lane:"fast",identity,
+    command,lane:"fast",identity,
     samples:[sample(1000),sample(1100),sample(1200)],
   });
   assert.throws(() => canonicalPerformanceJson({...report,extra:true}),/unknown property/);
 });
 
 test("report creation rejects hidden and symbol input properties",() => {
-  const hidden={lane:"fast",identity,samples:[sample(1000),sample(1100),sample(1200)]};
+  const hidden={command,lane:"fast",identity,samples:[sample(1000),sample(1100),sample(1200)]};
   Object.defineProperty(hidden,"hidden",{value:true});
   assert.throws(() => createPerformanceReport(hidden),/unknown property/);
-  const symbolic={lane:"fast",identity,samples:[sample(1000),sample(1100),sample(1200)]};
+  const symbolic={command,lane:"fast",identity,samples:[sample(1000),sample(1100),sample(1200)]};
   symbolic[Symbol("hidden")]=true;
   assert.throws(() => createPerformanceReport(symbolic),/symbol property/);
 });
@@ -181,5 +230,5 @@ test("report creation rejects hidden and symbol input properties",() => {
 test("report creation rejects sparse JSON arrays before sample validation",() => {
   const samples=[sample(1000),sample(1100),sample(1200)];
   delete samples[1];
-  assert.throws(() => createPerformanceReport({lane:"fast",identity,samples}),/dense/);
+  assert.throws(() => createPerformanceReport({command,lane:"fast",identity,samples}),/dense/);
 });

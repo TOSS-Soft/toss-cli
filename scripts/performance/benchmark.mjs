@@ -1,6 +1,6 @@
 import {execFile} from "node:child_process";
 import {createHash} from "node:crypto";
-import {lstat,readFile,realpath,rename,writeFile} from "node:fs/promises";
+import {lstat,readFile,realpath,rename,rm,writeFile} from "node:fs/promises";
 import {arch,platform} from "node:os";
 import {dirname,relative,resolve,sep} from "node:path";
 import {fileURLToPath} from "node:url";
@@ -9,7 +9,9 @@ import {promisify} from "node:util";
 import {canonicalJson} from "../../src/contracts/acp.js";
 import {
   FAST_MAX_WALL_MS,HISTORICAL_FULL_WALL_MS,PERFORMANCE_BASELINE_VERSION,
-  PerformanceToolError,canonicalPerformanceJson,createPerformanceReport,
+  PerformanceToolError,canonicalPerformanceJson,compatiblePerformanceIdentity,
+  createPerformanceReport,validatePerformanceBaseline,validatePerformanceIdentity,
+  validatePerformanceReport,
 } from "./report.mjs";
 import {runSuiteOnce} from "./run-suite.mjs";
 
@@ -29,7 +31,7 @@ function nonemptyString(value,label) {
 }
 
 function validateLane(lane) {
-  if (lane!=="fast" && lane!=="full") throw new TypeError("benchmark lane must be fast or full");
+  if (lane!=="full") throw new TypeError("benchmark capture requires the full lane");
   return lane;
 }
 
@@ -58,6 +60,26 @@ function validateBaselineDestination(path,root) {
   if (!isBaselineDestination(resolve(root,path),root)) {
     throw new TypeError(`--update-baseline must target ${BASELINE_RELATIVE_PATH}`);
   }
+}
+
+async function readExistingBaseline(path,root) {
+  let source;
+  try {
+    source=await readFile(resolve(root,path),"utf8");
+  } catch (error) {
+    if (error?.code==="ENOENT") return undefined;
+    if (error?.code==="EISDIR") {
+      throw new BenchmarkOutputError("existing baseline destination must be a regular file");
+    }
+    throw error;
+  }
+  let baseline;
+  try {
+    baseline=JSON.parse(source);
+  } catch {
+    throw new TypeError("existing baseline must contain valid JSON evidence");
+  }
+  return validatePerformanceBaseline(baseline);
 }
 
 async function rejectSymlinkParents(destination,root) {
@@ -93,17 +115,11 @@ async function collectIdentity(cwd,runnerId) {
 }
 
 function validateIdentity(identity,runnerId) {
-  const report=createPerformanceReport({
-    lane:"full",identity,
-    samples:Array.from({length:3},() => ({
-      wall_ms:0,user_cpu_ms:0,system_cpu_ms:0,exit_status:0,
-      fresh_process_count:0,peak_process_count:0,duplicates:[],slowest_files:[],slowest_tests:[],
-    })),
-  });
-  if (report.identity.runner_id!==runnerId) {
+  const normalized=validatePerformanceIdentity(identity);
+  if (normalized.runner_id!==runnerId) {
     throw new TypeError("benchmark runner ID must match identity runner_id");
   }
-  return report.identity;
+  return normalized;
 }
 
 export async function runBenchmark({runs,lane,runnerId,cwd,identity,runOnce=runSuiteOnce}) {
@@ -114,6 +130,7 @@ export async function runBenchmark({runs,lane,runnerId,cwd,identity,runOnce=runS
   if (typeof runOnce!=="function") throw new TypeError("benchmark runOnce must be a function");
   const exactIdentity=identity===undefined ? await collectIdentity(cwd,runnerId) : validateIdentity(identity,runnerId);
   const npm=process.platform==="win32" ? "npm.cmd" : "npm";
+  const command={executable:npm,arguments:["test"]};
   const samples=[];
   for (let index=0;index<3;index+=1) {
     samples.push(await runOnce({
@@ -121,21 +138,36 @@ export async function runBenchmark({runs,lane,runnerId,cwd,identity,runOnce=runS
       runId:`${exactIdentity.commit}-${index+1}`,env:{},
     }));
   }
-  return createPerformanceReport({lane,identity:exactIdentity,samples});
+  return createPerformanceReport({command,lane,identity:exactIdentity,samples});
 }
 
-export function createBaseline(report) {
-  const normalized=JSON.parse(canonicalPerformanceJson(report));
+export function createBaseline(report,existingBaseline) {
+  const normalized=validatePerformanceReport(report);
   if (normalized.lane!=="full") throw new TypeError("baseline requires the full lane");
   const basis=Math.min(HISTORICAL_FULL_WALL_MS,normalized.medians.wall_ms);
+  const calculatedLimit=Math.floor(basis*0.70);
+  let fullLimit=calculatedLimit;
+  if (existingBaseline!==undefined) {
+    const existing=validatePerformanceBaseline(existingBaseline);
+    if (existing.lane!==normalized.lane) {
+      throw new TypeError("existing baseline lane must match captured report lane");
+    }
+    if (canonicalJson(existing.command)!==canonicalJson(normalized.command)) {
+      throw new TypeError("existing baseline command must match captured report command");
+    }
+    if (!compatiblePerformanceIdentity(existing.identity,normalized.identity)) {
+      throw new TypeError("existing baseline uses an incompatible performance environment");
+    }
+    fullLimit=Math.min(existing.budgets.full_max_wall_ms,calculatedLimit);
+  }
   return Object.freeze({
     schema_version:PERFORMANCE_BASELINE_VERSION,
-    identity:normalized.identity,
+    command:normalized.command,lane:normalized.lane,identity:normalized.identity,
     historical:{full_wall_ms:HISTORICAL_FULL_WALL_MS},
     samples:normalized.samples,medians:normalized.medians,
     budgets:{
       fast_max_wall_ms:FAST_MAX_WALL_MS,
-      full_max_wall_ms:Math.floor(basis*0.70),
+      full_max_wall_ms:fullLimit,
     },
   });
 }
@@ -197,7 +229,9 @@ export function parseBenchmarkOptions(argv) {
   return Object.freeze(options);
 }
 
-export async function writeCanonicalReport(path,value,root,{allowBaseline=false}={}) {
+export async function writeCanonicalReport(path,value,root,{
+  allowBaseline=false,renameFile=rename,
+}={}) {
   nonemptyString(path,"report path");
   nonemptyString(root,"repository root");
   const canonicalRoot=await realpath(root);
@@ -212,8 +246,12 @@ export async function writeCanonicalReport(path,value,root,{allowBaseline=false}
     throw new BenchmarkOutputError("report destination must remain under repository root");
   }
   try {
-    if ((await lstat(destination)).isSymbolicLink()) {
+    const status=await lstat(destination);
+    if (status.isSymbolicLink()) {
       throw new BenchmarkOutputError("report destination must not be a symbolic link");
+    }
+    if (!status.isFile()) {
+      throw new BenchmarkOutputError("existing report destination must be a regular file");
     }
   } catch (error) {
     if (error?.code!=="ENOENT") throw error;
@@ -229,7 +267,16 @@ export async function writeCanonicalReport(path,value,root,{allowBaseline=false}
     canonicalPerformanceJson(value) : canonicalJson(value);
   const temporary=resolve(parent,`.${destination.split(sep).at(-1)}.${process.pid}.${Date.now()}.tmp`);
   await writeFile(temporary,output,{encoding:"utf8",flag:"wx",mode:0o600});
-  await rename(temporary,destination);
+  try {
+    await renameFile(temporary,destination);
+  } catch (error) {
+    try {
+      await rm(temporary,{force:true});
+    } catch (cleanupError) {
+      throw new AggregateError([error,cleanupError],"report rename and temporary cleanup failed");
+    }
+    throw error;
+  }
 }
 
 async function main(argv) {
@@ -250,10 +297,14 @@ async function main(argv) {
     return;
   }
   try {
+    const existingBaseline=options.updateBaseline===undefined ? undefined :
+      await readExistingBaseline(options.updateBaseline,root);
     const report=await runBenchmark({...options,cwd:root});
     if (options.output!==undefined) await writeCanonicalReport(options.output,report,root);
     if (options.updateBaseline!==undefined) {
-      await writeCanonicalReport(options.updateBaseline,createBaseline(report),root,{allowBaseline:true});
+      await writeCanonicalReport(
+        options.updateBaseline,createBaseline(report,existingBaseline),root,{allowBaseline:true},
+      );
     }
     const output=renderBenchmarkOutput(report,options.json);
     process.stdout.write(output.stdout);

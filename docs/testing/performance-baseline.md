@@ -15,7 +15,10 @@ Run `npm run test:benchmark -- --runs 3 --lane full --runner-id
 toss-reference-macos-node26 --update-baseline
 docs/performance/v2.1.1-baseline.json` from a clean issue #84 checkout.
 
-The command runs the unchanged canonical `npm test` three times. Ordinary benchmark execution does not update the tracked baseline.
+The command runs the unchanged canonical `npm test` three times and records the
+actual executable plus arguments in the report's closed `command` field.
+Ordinary benchmark execution does not update the tracked baseline. Benchmark
+capture accepts only the full lane; issue #85 owns the future fast-lane runner.
 
 ## Budgets
 

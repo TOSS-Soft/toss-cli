@@ -53,6 +53,15 @@ test("one run preserves nonzero status and stderr",async () => {
   assert.match(sample.stderr,/intentional benchmark fixture failure/);
 });
 
+test("one run rejects a command that produces no process evidence",async () => {
+  await assert.rejects(
+    runSuiteOnce({
+      command:"git",args:["--version"],cwd:root,runId:"fixture-empty",env:{},
+    }),
+    error => error.code==="INCOMPLETE_PROCESS_EVIDENCE",
+  );
+});
+
 test("the intentional failing fixture is inert under Node test discovery",() => {
   const environment={...process.env};
   delete environment.NODE_TEST_CONTEXT;
