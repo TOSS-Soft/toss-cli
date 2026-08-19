@@ -12,6 +12,7 @@ import {dispatchCommand,parseCommand} from "../src/commands/router.js";
 import {canonicalJson,sha256Canonical} from "../src/contracts/acp.js";
 import {authorityAttestationSigningPayload} from "../src/pipeline/decisions.js";
 import {createGitHubWriter} from "../src/pipeline/github-writer.js";
+import {createDesignOrchestrator} from "../src/pipeline/design-orchestrator.js";
 import {runProjectCommand} from "../src/commands/project.js";
 import {clone,rehash} from "./support/trace-fixture.js";
 import {
@@ -27,6 +28,16 @@ import {
   publicationAuthorityRegistry as round1PublicationRegistry,
   signedPublicationApproval as signedRound1PublicationApproval,
 } from "./support/gate-command-round1-fixture.js";
+import {criticalCompleteGraph} from "./support/design-audit-fixture.js";
+import {
+  artifactReference as designArtifactReference,
+  authorityRegistry as designAuthorityRegistry,
+  classificationInput as designClassificationInput,
+  DIRECTION_TYPES,
+  graphForLevel,
+  signedStageApproval,
+  SYSTEM_TYPES,
+} from "./support/design-command-fixture.js";
 
 const modules=await Promise.all([
   "decisions","architecture","plan","audit","readiness","issues",
@@ -175,6 +186,137 @@ async function preparedStore(options={}) {
     commandServices(store,input),
   );
   return {store,input,status};
+}
+
+function fullDesignAuthorityRegistry() {
+  const registry=publicationAuthorityRegistry();
+  const {content_sha256,...unsigned}=registry;
+  unsigned.actors.push({
+    actor_id:"verified-ceo",
+    actor_role:"CEO",
+    public_key:PUBLIC_KEY,
+    public_key_fingerprint:publicKeyFingerprint(),
+    allowed_publications:[],
+    allowed_routes:[{
+      authority:"A3",
+      verification_kind:"A3_VERIFIED_CEO_OR_USER_AUTHORITY",
+    }],
+  });
+  return {...unsigned,content_sha256:sha256Canonical(unsigned)};
+}
+
+function designStateArtifact(graph,outcome,{artifactId="design-orchestration-state:DESIGN-CHECKOUT"}={}) {
+  const brief=graph.find(row => row.document_type==="design-brief");
+  const content=clone(outcome.next_state_content);
+  return {
+    schema_version:"acp.v1",
+    document_type:"design-orchestration-state",
+    artifact_id:artifactId,
+    revision:1,
+    run_id:"run:design-readiness:001",
+    producer:{role:"orchestrator",identity:"toss-design-orchestrator"},
+    runtime_identity:{kind:"deterministic",name:"toss-cli",version:"2.1.0"},
+    created_at:"2026-08-18T10:00:00.000Z",
+    provenance:clone(brief.provenance),
+    parents:[],
+    inputs:graph.map(designArtifactReference),
+    content_sha256:sha256Canonical(content),
+    content,
+  };
+}
+
+function attachUiTrace(issuePlan,graph) {
+  const flow=graph.find(row => row.document_type==="user-flow");
+  const screen=graph.find(row => row.document_type==="screen-spec");
+  const system=graph.find(row => row.document_type==="design-system");
+  const entityRef=(artifact,entity_id) => ({...designArtifactReference(artifact),entity_id});
+  issuePlan.content.issues[0].ui_design_trace={
+    design_system_ref:designArtifactReference(system),
+    flow_refs:[entityRef(flow,flow.content.flow_id)],
+    screen_refs:[entityRef(screen,screen.content.screen_id)],
+    component_refs:[entityRef(system,"COMP-BUTTON")],
+    state_refs:screen.content.states.map(row => entityRef(screen,row.state_id)),
+    responsive_refs:screen.content.responsive.map(row => entityRef(screen,row.target_id)),
+    accessibility_refs:screen.content.accessibility.map(row =>
+      entityRef(screen,row.criterion_id)),
+  };
+  rehash(issuePlan);
+}
+
+async function preparedUiStore() {
+  const graph=criticalCompleteGraph();
+  const byTypes=types => graph.filter(row => types.includes(row.document_type));
+  const approvals=[
+    signedStageApproval("VISUAL_DIRECTION",byTypes(DIRECTION_TYPES),{level:"CRITICAL"}),
+    signedStageApproval("DESIGN_SYSTEM",byTypes(SYSTEM_TYPES),{level:"CRITICAL"}),
+    signedStageApproval("FINAL",graph,{level:"CRITICAL"}),
+  ];
+  const outcome=createDesignOrchestrator({
+    authorityRegistry:designAuthorityRegistry(),
+  }).prepareDesign({
+    classification_input:designClassificationInput({
+      risk_signals:["SECURITY_PRIVACY"],requested_level:"CRITICAL",
+    }),
+    source_artifact_refs:[],design_artifacts:graph,persisted_artifacts:graph,
+    approval_records:approvals,target_command:"design.approve",
+  });
+  const store=memoryCommandStore();
+  const input=projectCommandInput();
+  attachUiTrace(input.artifacts.issue_plan,graph);
+  await runProjectCommand(
+    parsedCommand("project.prepare",{from:"project.json"}),
+    commandServices(store,input),
+  );
+  for (const artifact of graph) await store.append(artifact);
+  const state=designStateArtifact(graph,outcome);
+  await store.append(state);
+  return {store,input,graph,state};
+}
+
+async function appendUnrelatedNotApplicableDesign(store) {
+  const graph=graphForLevel("NOT_APPLICABLE");
+  const brief=graph[0];
+  brief.artifact_id="design-brief:DESIGN-OTHER";
+  brief.content.design_id="DESIGN-OTHER";
+  brief.provenance.source_revision="other-project-r1";
+  brief.provenance.source_sha256="b".repeat(64);
+  rehash(brief);
+  const classification=designClassificationInput({
+    scope:{kind:"project",id:"PROJECT-OTHER"},delivery_targets:["BACKEND"],
+    affected_surfaces:[],risk_signals:[],requested_level:"NOT_APPLICABLE",
+    source:"NOT_APPLICABLE",purpose:brief.content.purpose,
+    success_criteria:brief.content.success_criteria,
+    approval_owner:brief.content.approval_owner,
+  });
+  const outcome=createDesignOrchestrator({
+    authorityRegistry:designAuthorityRegistry(),
+  }).prepareDesign({
+    classification_input:classification,source_artifact_refs:[],design_artifacts:graph,
+    persisted_artifacts:graph,approval_records:[],target_command:"design.status",
+  });
+  await store.append(brief);
+  await store.append(designStateArtifact(graph,outcome,{
+    artifactId:"design-orchestration-state:DESIGN-OTHER",
+  }));
+}
+
+async function appendCurrentNotApplicableDesign(store) {
+  const graph=graphForLevel("NOT_APPLICABLE");
+  const brief=graph[0];
+  const classification=designClassificationInput({
+    delivery_targets:["BACKEND"],affected_surfaces:[],risk_signals:[],
+    requested_level:"NOT_APPLICABLE",source:"NOT_APPLICABLE",
+    purpose:brief.content.purpose,success_criteria:brief.content.success_criteria,
+    approval_owner:brief.content.approval_owner,
+  });
+  const outcome=createDesignOrchestrator({
+    authorityRegistry:designAuthorityRegistry(),
+  }).prepareDesign({
+    classification_input:classification,source_artifact_refs:[],design_artifacts:graph,
+    persisted_artifacts:graph,approval_records:[],target_command:"design.status",
+  });
+  await store.append(brief);
+  await store.append(designStateArtifact(graph,outcome));
 }
 
 async function preparedTwoIssueStore() {
@@ -471,6 +613,10 @@ test("plan, audit, and readiness derive views from verified artifacts",{
   );
   assert.equal(readiness.ready_for_issue_generation,true);
   assert.deepEqual(readiness.failures,[]);
+  assert.equal(readiness.project_readiness.ready_for_issue_generation,true);
+  assert.equal(readiness.ui_design_readiness.document_type,"ui-design-dor-result");
+  assert.equal(readiness.ui_design_readiness.design_level,null);
+  assert.equal(readiness.ui_design_readiness.ready_for_ui_issue_generation,true);
 });
 
 test("readiness requires independently injected authority context and remains read-only",{
@@ -496,6 +642,68 @@ test("readiness requires independently injected authority context and remains re
   );
   assert.equal(checked.ready_for_issue_generation,true);
   assert.equal(appends,0);
+});
+
+test("UI readiness accepts the validated full publication registry at the public command boundary",{
+  skip:!gateAvailable,
+},async () => {
+  const {store}=await preparedUiStore();
+  const lf=fullDesignAuthorityRegistry();
+  const crlf=clone(lf);
+  for (const actor of crlf.actors) actor.public_key=actor.public_key.replaceAll("\n","\r\n");
+  const {content_sha256,...unsigned}=crlf;
+  crlf.content_sha256=sha256Canonical(unsigned);
+  for (const authorityRegistry of [lf,crlf]) {
+    const readiness=await readinessModule.runReadinessCommand(
+      command("readiness.check"),services(store,{authorityRegistry}),
+    );
+    assert.equal(readiness.ui_design_readiness.ready_for_ui_issue_generation,true);
+    assert.equal(readiness.ui_design_readiness.design_level,"CRITICAL");
+  }
+});
+
+test("UI readiness ignores an unrelated completed design lineage",{
+  skip:!gateAvailable,
+},async () => {
+  const {store}=await preparedUiStore();
+  await appendUnrelatedNotApplicableDesign(store);
+  const readiness=await readinessModule.runReadinessCommand(
+    command("readiness.check"),services(store,{
+      authorityRegistry:fullDesignAuthorityRegistry(),
+    }),
+  );
+  assert.equal(readiness.ui_design_readiness.ready_for_ui_issue_generation,true);
+  assert.equal(readiness.ui_design_readiness.design_level,"CRITICAL");
+});
+
+test("UI readiness fails closed on two relevant current terminal lineages",{
+  skip:!gateAvailable,
+},async () => {
+  const {store,state}=await preparedUiStore();
+  const duplicate=clone(state);
+  duplicate.artifact_id="design-orchestration-state:DESIGN-CHECKOUT-REPLAY";
+  await store.append(duplicate);
+  const readiness=await readinessModule.runReadinessCommand(
+    command("readiness.check"),services(store,{
+      authorityRegistry:fullDesignAuthorityRegistry(),
+    }),
+  );
+  assert.equal(readiness.ui_design_readiness.ready_for_ui_issue_generation,false);
+  assert.equal(readiness.blocked,true);
+});
+
+test("UI readiness preserves a valid current NOT_APPLICABLE design state",{
+  skip:!gateAvailable,
+},async () => {
+  const {store}=await preparedStore();
+  await appendCurrentNotApplicableDesign(store);
+  const readiness=await readinessModule.runReadinessCommand(
+    command("readiness.check"),services(store,{
+      authorityRegistry:fullDesignAuthorityRegistry(),
+    }),
+  );
+  assert.equal(readiness.ui_design_readiness.ready_for_ui_issue_generation,true);
+  assert.equal(readiness.ui_design_readiness.design_level,"NOT_APPLICABLE");
 });
 
 test("audit run persists and verifies only the exact recomputed audit artifact",{

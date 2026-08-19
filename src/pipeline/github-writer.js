@@ -11,6 +11,8 @@ import {
 } from "./github-adapter.js";
 import {validateIssuePlan} from "./issue-plan.js";
 import {evaluateProjectReadiness} from "./readiness.js";
+import {evaluateDesignReadiness} from "./design-readiness.js";
+import {verifyDesignStateGraph} from "./design-state-readiness.js";
 import {auditSpecification} from "./spec-auditor.js";
 import {transition} from "./state-machine.js";
 
@@ -206,8 +208,12 @@ function assertIndependentGates(context,registry) {
   }
 
   const trustedDecisions=decisionAuthorityRegistry(registry);
+  const projectArtifacts=Object.fromEntries([
+    "analysisState","adrApprovals","architecture","decisionAnswers",
+    "decisionPackage","issuePlan","pmAnalysis","specAudits","traceGraph",
+  ].filter(key => Object.hasOwn(artifacts,key)).map(key => [key,artifacts[key]]));
   const readiness=evaluateProjectReadiness(
-    artifacts,
+    projectArtifacts,
     trustedDecisions===undefined ? {} : {authorityRegistry:trustedDecisions},
   );
   const source=artifacts.issuePlan.provenance;
@@ -218,7 +224,53 @@ function assertIndependentGates(context,registry) {
       "GitHub publication readiness requires exact current-source PDoR PASS",
     );
   }
-  return {audit,readiness};
+  const uiIssues=artifacts.issuePlan.content.issues.filter(issue =>
+    Object.hasOwn(issue,"ui_design_trace"));
+  let designReadiness;
+  let designInputs=[];
+  if (uiIssues.length>0) {
+    const {designGraph,designAudit,designApproval,designState}=artifacts;
+    if (!Array.isArray(designGraph) || !designAudit || !designApproval || !designState) {
+      throw new GitHubPublicationError(
+        "GitHub publication design readiness requires the exact design graph, audit, approval, and state",
+      );
+    }
+    let verifiedState;
+    try {
+      verifiedState=verifyDesignStateGraph({
+        state:designState,designGraph,authorityRegistry:registry,
+      }).snapshot;
+    } catch (error) {
+      throw new GitHubPublicationError(
+        "GitHub publication design readiness requires independently verified design authority",
+        {cause:error},
+      );
+    }
+    const graphRefs=designGraph.map(exactReference).sort((left,right) =>
+      canonicalJson(left).localeCompare(canonicalJson(right)));
+    const stateRefs=[...(verifiedState.content?.artifact_refs ?? [])].sort((left,right) =>
+      canonicalJson(left).localeCompare(canonicalJson(right)));
+    if (verifiedState.content?.state!=="APPROVED" ||
+        verifiedState.content?.gate!=="COMPLETE" || !same(graphRefs,stateRefs)) {
+      throw new GitHubPublicationError(
+        "GitHub publication design readiness requires a COMPLETE state for the exact graph",
+      );
+    }
+    designReadiness=evaluateDesignReadiness({
+      designGraph,
+      audit:designAudit,
+      approval:designApproval,
+      issuePlan:artifacts.issuePlan,
+    });
+    if (designReadiness.ready_for_ui_issue_generation!==true ||
+        !same(designReadiness.ui_issue_ids,uiIssues.map(issue => issue.id).sort())) {
+      throw new GitHubPublicationError(
+        "GitHub publication design readiness requires exact current UI Design DoR PASS",
+      );
+    }
+    designInputs=[designAudit,designApproval,designState].map(exactReference);
+  }
+  return {audit,readiness,designReadiness,designInputs};
 }
 
 function canonicalizePublicKey(value,label) {
@@ -476,6 +528,28 @@ function bulletList(references,meanings,{empty="None"}={}) {
   }).join("\n");
 }
 
+function exactDesignLabel(reference) {
+  return `${reference.document_type}:${reference.artifact_id}@${reference.revision}#${reference.content_sha256}${
+    reference.entity_id===undefined ? "" : `:${reference.entity_id}`}`;
+}
+
+function designTraceBody(context,issue) {
+  const trace=issue.ui_design_trace;
+  if (!trace) return [];
+  const brief=context.artifacts.designGraph.find(row => row.document_type==="design-brief");
+  const rows=[
+    "## UI Design trace",
+    `- Design level: ${brief.content.orchestration.level}`,
+    `- Design System: ${exactDesignLabel(trace.design_system_ref)}`,
+  ];
+  for (const [label,key] of [
+    ["Flows","flow_refs"],["Screens","screen_refs"],["Components","component_refs"],
+    ["States","state_refs"],["Responsive targets","responsive_refs"],
+    ["Accessibility criteria","accessibility_refs"],
+  ]) rows.push(`- ${label}: ${trace[key].map(exactDesignLabel).join(", ")}`);
+  return rows;
+}
+
 function buildOperations(context) {
   const plan=context.artifacts.issuePlan;
   const pm=context.artifacts.pmAnalysis.content;
@@ -519,6 +593,7 @@ function buildOperations(context) {
         "",
         "## Definition of done",
         ...issue.definition_of_done.map(item => `- [ ] ${item}`),
+        ...(issue.ui_design_trace ? ["",...designTraceBody(context,issue)] : []),
       ].join("\n");
       return {
         action:"create",
@@ -773,6 +848,7 @@ function currentHistory(history,context,gates) {
     exactReference(plan),
     exactReference(gates.audit),
     exactReference(context.artifacts.analysisState),
+    ...gates.designInputs,
   ].sort((left,right) => canonicalJson(left).localeCompare(canonicalJson(right)));
   for (const artifact of revisions) {
     if (artifact.content.repository!==context.repository ||
@@ -863,6 +939,7 @@ function publicationDraft(context,gates,approval,current,content) {
     exactReference(plan),
     exactReference(gates.audit),
     exactReference(context.artifacts.analysisState),
+    ...gates.designInputs,
   ].sort((left,right) => canonicalJson(left).localeCompare(canonicalJson(right)));
   return {
     schema_version:"acp.v1",

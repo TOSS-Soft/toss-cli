@@ -1,0 +1,20 @@
+{
+  "schema_version": "ui-design-dor-rules.v1",
+  "document_type": "ui-design-dor-rules",
+  "required_state_names": ["empty", "error", "loading", "main", "permission", "recovery"],
+  "responsive_range": {"min_width": 320, "max_width": 1440},
+  "accessibility_standard": "WCAG_2_2_AA",
+  "critical_evidence_kinds": ["PRIVACY", "RESEARCH", "SECURITY", "USABILITY"],
+  "rules": [
+    {"id":"UIDOR-010-GRAPH-INTEGRITY","severity":"blocking","description":"The exact level-aware design graph is canonical, schema-valid, hash-valid, and internally linked."},
+    {"id":"UIDOR-020-USERS-AND-NEEDS","severity":"blocking","description":"Users and their evidenced needs are defined for Standard and Critical design work."},
+    {"id":"UIDOR-030-FLOWS-AND-STATES","severity":"blocking","description":"Required normal and exception states are present and traversed by exact user-flow references."},
+    {"id":"UIDOR-040-IA-RESPONSIVE-A11Y","severity":"blocking","description":"Information architecture, continuous responsive behavior, and WCAG 2.2 AA criteria are complete."},
+    {"id":"UIDOR-050-DESIGN-SYSTEM","severity":"blocking","description":"The exact Design System revision is selected and all binding company rules are satisfied."},
+    {"id":"UIDOR-060-CRITICAL-EVIDENCE","severity":"blocking","description":"Critical work contains research, usability, security, and privacy UX evidence."},
+    {"id":"UIDOR-070-LATEST-AUDIT","severity":"blocking","description":"The immutable Design Audit equals a fresh independent audit of the exact current graph and has no blocking finding."},
+    {"id":"UIDOR-080-EXACT-APPROVAL","severity":"blocking","description":"Human approval is APPROVED and bound to the exact current design graph manifest and root."},
+    {"id":"UIDOR-090-ISSUE-TRACE","severity":"blocking","description":"Every UI issue traces to exact current flows, screens, components, states, responsive targets, accessibility criteria, and Design System revision."},
+    {"id":"UIDOR-100-NONBLOCKING-FINDINGS","severity":"warning","description":"Non-blocking Design Audit findings remain visible."}
+  ]
+}

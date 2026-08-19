@@ -117,6 +117,34 @@
         "content_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
       }
     },
+    "design_entity_reference": {
+      "$ref": "https://toss.software/schemas/design/design-brief.v1.schema.json#/$defs/entity_reference"
+    },
+    "design_artifact_reference": {
+      "$ref": "https://toss.software/schemas/design/design-brief.v1.schema.json#/$defs/artifact_reference"
+    },
+    "ui_design_trace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "design_system_ref",
+        "flow_refs",
+        "screen_refs",
+        "component_refs",
+        "state_refs",
+        "responsive_refs",
+        "accessibility_refs"
+      ],
+      "properties": {
+        "design_system_ref": {"$ref": "#/$defs/design_artifact_reference"},
+        "flow_refs": {"type":"array","minItems":1,"uniqueItems":true,"items":{"$ref":"#/$defs/design_entity_reference"}},
+        "screen_refs": {"type":"array","minItems":1,"uniqueItems":true,"items":{"$ref":"#/$defs/design_entity_reference"}},
+        "component_refs": {"type":"array","minItems":1,"uniqueItems":true,"items":{"$ref":"#/$defs/design_entity_reference"}},
+        "state_refs": {"type":"array","minItems":1,"uniqueItems":true,"items":{"$ref":"#/$defs/design_entity_reference"}},
+        "responsive_refs": {"type":"array","minItems":1,"uniqueItems":true,"items":{"$ref":"#/$defs/design_entity_reference"}},
+        "accessibility_refs": {"type":"array","minItems":1,"uniqueItems":true,"items":{"$ref":"#/$defs/design_entity_reference"}}
+      }
+    },
     "pm_snapshot": {
       "allOf": [
         {"$ref": "#/$defs/artifact_snapshot"},
@@ -231,7 +259,8 @@
           "type": "array",
           "uniqueItems": true,
           "items": {"$ref": "#/$defs/issue_reference"}
-        }
+        },
+        "ui_design_trace": {"$ref": "#/$defs/ui_design_trace"}
       },
       "allOf": [
         {

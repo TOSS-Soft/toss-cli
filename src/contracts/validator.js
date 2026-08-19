@@ -41,6 +41,7 @@ const schemaDefinitions=[
   ["usability-evidence.v1","../../contracts/design/usability-evidence.v1.schema.json"],
   ["design-audit.v1","../../contracts/design/design-audit.v1.schema.json"],
   ["design-approval.v1","../../contracts/design/design-approval.v1.schema.json"],
+  ["ui-design-dor-result.v1","../../contracts/design/ui-design-dor-result.v1.schema.json"],
 ];
 
 function loadSchema(path) {

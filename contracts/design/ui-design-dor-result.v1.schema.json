@@ -1,0 +1,25 @@
+{
+  "$schema":"https://json-schema.org/draft/2020-12/schema",
+  "$id":"https://toss.software/schemas/design/ui-design-dor-result.v1.schema.json",
+  "title":"TOSS UI Design Definition of Ready Result v1",
+  "type":"object",
+  "additionalProperties":false,
+  "required":["schema_version","document_type","rules_version","source_revision","source_sha256","design_level","graph_root_sha256","ready_for_ui_issue_generation","ui_issue_ids","failures","warnings"],
+  "properties":{
+    "schema_version":{"const":"ui-design-dor-result.v1"},
+    "document_type":{"const":"ui-design-dor-result"},
+    "rules_version":{"const":"ui-design-dor-rules.v1"},
+    "source_revision":{"type":["string","null"]},
+    "source_sha256":{"oneOf":[{"type":"string","pattern":"^[a-f0-9]{64}$"},{"type":"null"}]},
+    "design_level":{"oneOf":[{"enum":["LITE","STANDARD","CRITICAL","NOT_APPLICABLE"]},{"type":"null"}]},
+    "graph_root_sha256":{"oneOf":[{"type":"string","pattern":"^[a-f0-9]{64}$"},{"type":"null"}]},
+    "ready_for_ui_issue_generation":{"type":"boolean"},
+    "ui_issue_ids":{"type":"array","uniqueItems":true,"items":{"type":"string","pattern":"^ISSUE-[A-Z0-9]+(?:[._-][A-Z0-9]+)*$"}},
+    "failures":{"type":"array","items":{"$ref":"#/$defs/rule_result"}},
+    "warnings":{"type":"array","items":{"$ref":"#/$defs/rule_result"}}
+  },
+  "$defs":{
+    "evidence":{"type":"object","additionalProperties":false,"required":["artifact","path","message"],"properties":{"artifact":{"type":"string","minLength":1},"path":{"type":"string","pattern":"^/"},"message":{"type":"string","minLength":1}}},
+    "rule_result":{"type":"object","additionalProperties":false,"required":["rule_id","message","evidence"],"properties":{"rule_id":{"type":"string","pattern":"^UIDOR-[0-9]{3}-[A-Z0-9-]+$"},"message":{"type":"string","minLength":1},"evidence":{"type":"array","minItems":1,"items":{"$ref":"#/$defs/evidence"}}}}
+  }
+}
