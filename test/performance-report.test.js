@@ -68,6 +68,16 @@ test("process summaries retain external processes but duplicate only repository 
   assert.deepEqual(summary.duplicates,[{entry_path:"test/a.test.js",count:2}]);
 });
 
+test("process summaries expose only repository entry paths for slow-file analysis",() => {
+  const summary=summarizeProcessEvents([
+    {kind:"start",run_id:"run-1",pid:10,at_ms:1000,argv:["/usr/local/bin/node","/repo/test/a.test.js"]},
+    {kind:"end",run_id:"run-1",pid:10,at_ms:1030,user_cpu_us:10000,system_cpu_us:5000},
+    {kind:"start",run_id:"run-1",pid:11,at_ms:1010,argv:["/usr/bin/git","status"]},
+    {kind:"end",run_id:"run-1",pid:11,at_ms:1050,user_cpu_us:2000,system_cpu_us:1000},
+  ],"/repo","run-1");
+  assert.deepEqual(summary.entries,[{name:"test/a.test.js",duration_ms:30,status:"pass"}]);
+});
+
 test("report requires three compatible successful samples",() => {
   const report=createPerformanceReport({
     lane:"full",identity,

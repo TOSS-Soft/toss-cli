@@ -7,6 +7,7 @@ export const HISTORICAL_FULL_WALL_MS=134960;
 export const FAST_MAX_WALL_MS=15000;
 
 export const PERFORMANCE_CODES=Object.freeze({
+  INVALID_PROCESS_LOG:"INVALID_PROCESS_LOG",
   DUPLICATE_PROCESS_START:"DUPLICATE_PROCESS_START",
   DUPLICATE_PROCESS_END:"DUPLICATE_PROCESS_END",
   INCOMPLETE_PROCESS_EVIDENCE:"INCOMPLETE_PROCESS_EVIDENCE",
@@ -205,9 +206,14 @@ export function summarizeProcessEvents(events,root,runId) {
     active+=transition.delta;
     if (active>peak) peak=active;
   }
+  const slowestFiles=[];
   const counts=new Map();
   for (const start of entries) {
     counts.set(start.entry_path,(counts.get(start.entry_path) ?? 0)+1);
+    const end=ends.get(start.pid);
+    slowestFiles.push({
+      name:start.entry_path,duration_ms:end.at_ms-start.at_ms,status:"pass",
+    });
   }
   const duplicates=[...counts.entries()]
     .filter(([,count]) => count>1)
@@ -219,6 +225,8 @@ export function summarizeProcessEvents(events,root,runId) {
     user_cpu_ms:userCpuUs/1000,
     system_cpu_ms:systemCpuUs/1000,
     duplicates,
+    entries:slowestFiles.sort((left,right) => right.duration_ms-left.duration_ms ||
+      ascii(left.name,right.name)),
   };
 }
 
