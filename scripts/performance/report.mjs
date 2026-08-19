@@ -274,7 +274,7 @@ function validateSample(value,index) {
   const sample=closedRecord(value,`sample ${index+1}`,[
     "wall_ms","user_cpu_ms","system_cpu_ms","exit_status","fresh_process_count",
     "peak_process_count","duplicates","slowest_files","slowest_tests",
-  ]);
+  ],["stdout","stderr"]);
   finiteNonnegative(sample.wall_ms,`sample ${index+1} wall_ms`);
   finiteNonnegative(sample.user_cpu_ms,`sample ${index+1} user_cpu_ms`);
   finiteNonnegative(sample.system_cpu_ms,`sample ${index+1} system_cpu_ms`);
@@ -291,6 +291,12 @@ function validateSample(value,index) {
   duplicates.forEach((row,rowIndex) => validateDuplicate(row,`sample ${index+1} duplicate ${rowIndex+1}`));
   slowestFiles.forEach((row,rowIndex) => validateDurationRow(row,`sample ${index+1} slow file ${rowIndex+1}`));
   slowestTests.forEach((row,rowIndex) => validateDurationRow(row,`sample ${index+1} slow test ${rowIndex+1}`));
+  if (sample.stdout!==undefined && typeof sample.stdout!=="string") {
+    throw new TypeError(`sample ${index+1} stdout must be a string`);
+  }
+  if (sample.stderr!==undefined && typeof sample.stderr!=="string") {
+    throw new TypeError(`sample ${index+1} stderr must be a string`);
+  }
   return sample;
 }
 
@@ -308,17 +314,23 @@ function validateReportInput(input) {
 
 export function createPerformanceReport(input) {
   const {lane,identity,samples}=validateReportInput(input);
+  const normalizedSamples=samples.map(sample => ({
+    wall_ms:sample.wall_ms,user_cpu_ms:sample.user_cpu_ms,system_cpu_ms:sample.system_cpu_ms,
+    exit_status:sample.exit_status,fresh_process_count:sample.fresh_process_count,
+    peak_process_count:sample.peak_process_count,duplicates:sample.duplicates,
+    slowest_files:sample.slowest_files,slowest_tests:sample.slowest_tests,
+  }));
   return {
     schema_version:PERFORMANCE_REPORT_VERSION,
     lane,
     identity,
-    samples,
+    samples:normalizedSamples,
     medians:{
-      wall_ms:median(samples.map(sample => sample.wall_ms)),
-      user_cpu_ms:median(samples.map(sample => sample.user_cpu_ms)),
-      system_cpu_ms:median(samples.map(sample => sample.system_cpu_ms)),
-      fresh_process_count:median(samples.map(sample => sample.fresh_process_count)),
-      peak_process_count:median(samples.map(sample => sample.peak_process_count)),
+      wall_ms:median(normalizedSamples.map(sample => sample.wall_ms)),
+      user_cpu_ms:median(normalizedSamples.map(sample => sample.user_cpu_ms)),
+      system_cpu_ms:median(normalizedSamples.map(sample => sample.system_cpu_ms)),
+      fresh_process_count:median(normalizedSamples.map(sample => sample.fresh_process_count)),
+      peak_process_count:median(normalizedSamples.map(sample => sample.peak_process_count)),
     },
   };
 }
@@ -336,28 +348,31 @@ export function canonicalPerformanceJson(report) {
       canonicalJson(normalized.medians)!==canonicalJson(complete.medians)) {
     throw new TypeError("invalid performance report");
   }
-  return canonicalJson(complete);
+  return canonicalJson(normalized);
 }
 
 function validateBudgetDocument(document,label,expectedVersion,requiresBudgets) {
   const isBaseline=expectedVersion===PERFORMANCE_BASELINE_VERSION;
-  const record=closedRecord(document,label,["schema_version","identity","medians"],isBaseline ?
-    ["budgets","historical"] : ["budgets","lane","samples"]);
+  const record=closedRecord(document,label,isBaseline ?
+    ["schema_version","identity","budgets"] : ["schema_version","identity","lane","medians"],isBaseline ?
+    ["historical","medians","samples"] : ["budgets","samples"]);
   if (record.schema_version!==expectedVersion) {
     throw new TypeError(`${label} has unexpected schema_version`);
   }
   validateIdentity(record.identity);
-  if (isBaseline) {
+  if (isBaseline && record.historical!==undefined) {
     const historical=closedRecord(record.historical,`${label} historical`,["full_wall_ms"]);
     finiteNonnegative(historical.full_wall_ms,`${label} historical full_wall_ms`);
     if (historical.full_wall_ms!==HISTORICAL_FULL_WALL_MS) {
       throw new TypeError(`${label} historical full_wall_ms must match the locked baseline`);
     }
   }
-  const medians=closedRecord(record.medians,`${label} medians`,["wall_ms"],[
-    "user_cpu_ms","system_cpu_ms","fresh_process_count","peak_process_count",
-  ]);
-  for (const [key,value] of Object.entries(medians)) finiteNonnegative(value,`${label} medians ${key}`);
+  if (record.medians!==undefined) {
+    const medians=closedRecord(record.medians,`${label} medians`,["wall_ms"],[
+      "user_cpu_ms","system_cpu_ms","fresh_process_count","peak_process_count",
+    ]);
+    for (const [key,value] of Object.entries(medians)) finiteNonnegative(value,`${label} medians ${key}`);
+  }
   if (record.budgets!==undefined) {
     const budgets=closedRecord(record.budgets,`${label} budgets`,[
       "fast_max_wall_ms","full_max_wall_ms",
@@ -367,17 +382,15 @@ function validateBudgetDocument(document,label,expectedVersion,requiresBudgets) 
   } else if (requiresBudgets) {
     throw new TypeError(`${label} requires budgets`);
   }
-  if (record.lane!==undefined || record.samples!==undefined) {
+  if (record.samples!==undefined) {
     const normalized=createPerformanceReport({
-      lane:record.lane,
+      lane:isBaseline ? "full" : record.lane,
       identity:record.identity,
       samples:record.samples,
     });
     if (canonicalJson(normalized.medians)!==canonicalJson(record.medians)) {
       throw new TypeError(`${label} medians do not match samples`);
     }
-  } else if (!isBaseline) {
-    throw new TypeError(`${label} requires lane and samples`);
   }
   return record;
 }
