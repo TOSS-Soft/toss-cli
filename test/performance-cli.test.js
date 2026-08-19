@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {execFileSync,spawnSync} from "node:child_process";
+import {readFileSync} from "node:fs";
 import {chmod,mkdir,mkdtemp,readdir,rm,symlink,writeFile} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
@@ -23,6 +24,15 @@ const sample=wall_ms => ({
 
 const budgetCli=fileURLToPath(new URL("../scripts/performance/budget.mjs",import.meta.url));
 const benchmarkCli=fileURLToPath(new URL("../scripts/performance/benchmark.mjs",import.meta.url));
+
+test("package exposes opt-in performance commands without weakening full verification",() => {
+  const pkg=JSON.parse(readFileSync(new URL("../package.json",import.meta.url),"utf8"));
+  assert.equal(pkg.scripts["test:benchmark"],"node ./scripts/performance/benchmark.mjs");
+  assert.equal(pkg.scripts["test:performance-budget"],"node ./scripts/performance/budget.mjs");
+  assert.equal(pkg.scripts.prepack,"npm test");
+  assert.match(pkg.scripts.test,/release-workflow-test\.js/);
+  assert.match(pkg.scripts.test,/node --test$/);
+});
 
 async function benchmarkFixture(t) {
   const root=await mkdtemp(join(tmpdir(),"toss-benchmark-cli-"));
