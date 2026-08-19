@@ -11,7 +11,7 @@ const protocol=readFileSync(
   new URL("../docs/testing/performance-baseline.md",import.meta.url),"utf8",
 );
 const lock=readFileSync(new URL("../package-lock.json",import.meta.url));
-const BASELINE_SHA256="6456c1c8e9c44e570a11db4742802ec882e3de36aa361cbe9c09e2a1995f71a2";
+const BASELINE_SHA256="f84798183d695a7ddbcef775a9b502d3d4c393259d94ff53993303a44ed699a9";
 
 function median(samples,field) {
   return samples.map(sample => sample[field]).sort((left,right) => left-right)[1];
@@ -22,7 +22,7 @@ function assertBaselineIntegrity(candidate,source=baselineSource) {
   assert.equal(candidate.schema_version,"toss-test-performance-baseline.v1");
   assert.deepEqual(candidate.command,{arguments:["test"],executable:"npm"});
   assert.equal(candidate.lane,"full");
-  assert.equal(candidate.identity.commit,"e443a2c4492cfb7f16daec4d089218ef30cc9f81");
+  assert.equal(candidate.identity.commit,"e82a1e814f9f9eaae5c6bbd055c00062796a4f87");
   assert.equal(candidate.identity.runner_id,"toss-reference-macos-node26");
   assert.equal(candidate.identity.node_version,"v26.6.0");
   assert.equal(candidate.identity.platform,"darwin");
@@ -32,17 +32,17 @@ function assertBaselineIntegrity(candidate,source=baselineSource) {
   assert.ok(candidate.samples.every(sample => sample.exit_status===0));
   assert.equal(candidate.historical.full_wall_ms,134960);
   assert.equal(candidate.budgets.fast_max_wall_ms,15000);
-  assert.equal(candidate.medians.wall_ms,129656.356);
-  assert.equal(candidate.medians.user_cpu_ms,193493.81);
-  assert.equal(candidate.medians.system_cpu_ms,295622.443);
-  assert.equal(candidate.medians.fresh_process_count,437);
+  assert.equal(candidate.medians.wall_ms,128718.79316700001);
+  assert.equal(candidate.medians.user_cpu_ms,192557.43);
+  assert.equal(candidate.medians.system_cpu_ms,293169.077);
+  assert.equal(candidate.medians.fresh_process_count,441);
   assert.equal(candidate.medians.peak_process_count,26);
   assert.equal(candidate.medians.wall_ms,median(candidate.samples,"wall_ms"));
   assert.equal(candidate.medians.user_cpu_ms,median(candidate.samples,"user_cpu_ms"));
   assert.equal(candidate.medians.system_cpu_ms,median(candidate.samples,"system_cpu_ms"));
   assert.equal(candidate.medians.fresh_process_count,median(candidate.samples,"fresh_process_count"));
   assert.equal(candidate.medians.peak_process_count,median(candidate.samples,"peak_process_count"));
-  assert.equal(candidate.budgets.full_max_wall_ms,90759);
+  assert.equal(candidate.budgets.full_max_wall_ms,90103);
   assert.equal(
     candidate.budgets.full_max_wall_ms,
     Math.floor(Math.min(134960,candidate.medians.wall_ms)*0.70),
@@ -74,7 +74,7 @@ test("integrity rejects a replacement captured commit",() => {
 });
 
 test("integrity rejects drift in a raw nonmedian CPU sample",() => {
-  const mutatedSource=baselineSource.replace('"system_cpu_ms":293241.792','"system_cpu_ms":293241.793');
+  const mutatedSource=baselineSource.replace('"system_cpu_ms":292498.801','"system_cpu_ms":292498.802');
   assert.notEqual(mutatedSource,baselineSource);
   assert.throws(
     () => assertBaselineIntegrity(JSON.parse(mutatedSource),mutatedSource),
