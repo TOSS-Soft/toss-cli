@@ -11,22 +11,61 @@ const protocol=readFileSync(
 );
 const lock=readFileSync(new URL("../package-lock.json",import.meta.url));
 
-test("v2.1.1 baseline is exact and cannot relax its budgets",() => {
-  assert.equal(baseline.schema_version,"toss-test-performance-baseline.v1");
-  assert.equal(baseline.identity.runner_id,"toss-reference-macos-node26");
-  assert.equal(baseline.identity.node_version,"v26.6.0");
-  assert.equal(baseline.identity.platform,"darwin");
-  assert.equal(baseline.identity.arch,"arm64");
-  assert.equal(baseline.identity.lock_sha256,createHash("sha256").update(lock).digest("hex"));
-  assert.equal(baseline.samples.length,3);
-  assert.ok(baseline.samples.every(sample => sample.exit_status===0));
-  assert.equal(baseline.historical.full_wall_ms,134960);
-  assert.equal(baseline.budgets.fast_max_wall_ms,15000);
+function median(samples,field) {
+  return samples.map(sample => sample[field]).sort((left,right) => left-right)[1];
+}
+
+function assertBaselineIntegrity(candidate) {
+  assert.equal(candidate.schema_version,"toss-test-performance-baseline.v1");
+  assert.equal(candidate.identity.commit,"e443a2c4492cfb7f16daec4d089218ef30cc9f81");
+  assert.equal(candidate.identity.runner_id,"toss-reference-macos-node26");
+  assert.equal(candidate.identity.node_version,"v26.6.0");
+  assert.equal(candidate.identity.platform,"darwin");
+  assert.equal(candidate.identity.arch,"arm64");
+  assert.equal(candidate.identity.lock_sha256,createHash("sha256").update(lock).digest("hex"));
+  assert.equal(candidate.samples.length,3);
+  assert.ok(candidate.samples.every(sample => sample.exit_status===0));
+  assert.equal(candidate.historical.full_wall_ms,134960);
+  assert.equal(candidate.budgets.fast_max_wall_ms,15000);
+  assert.equal(candidate.medians.wall_ms,129656.356);
+  assert.equal(candidate.medians.user_cpu_ms,193493.81);
+  assert.equal(candidate.medians.system_cpu_ms,295622.443);
+  assert.equal(candidate.medians.fresh_process_count,437);
+  assert.equal(candidate.medians.peak_process_count,26);
+  assert.equal(candidate.medians.wall_ms,median(candidate.samples,"wall_ms"));
+  assert.equal(candidate.medians.user_cpu_ms,median(candidate.samples,"user_cpu_ms"));
+  assert.equal(candidate.medians.system_cpu_ms,median(candidate.samples,"system_cpu_ms"));
+  assert.equal(candidate.medians.fresh_process_count,median(candidate.samples,"fresh_process_count"));
+  assert.equal(candidate.medians.peak_process_count,median(candidate.samples,"peak_process_count"));
+  assert.equal(candidate.budgets.full_max_wall_ms,90759);
   assert.equal(
-    baseline.budgets.full_max_wall_ms,
-    Math.floor(Math.min(134960,baseline.medians.wall_ms)*0.70),
+    candidate.budgets.full_max_wall_ms,
+    Math.floor(Math.min(134960,candidate.medians.wall_ms)*0.70),
   );
-  assert.ok(baseline.samples.every(sample => sample.duplicates.length>0));
+  assert.ok(candidate.samples.every(sample => sample.duplicates.length>0));
+}
+
+test("v2.1.1 baseline is exact and cannot relax its budgets",() => {
+  assertBaselineIntegrity(baseline);
+});
+
+test("integrity rejects a correlated full-budget relaxation",() => {
+  const mutated=structuredClone(baseline);
+  mutated.medians.wall_ms=130000;
+  mutated.budgets.full_max_wall_ms=Math.floor(Math.min(134960,mutated.medians.wall_ms)*0.70);
+  assert.throws(() => assertBaselineIntegrity(mutated),assert.AssertionError);
+});
+
+test("integrity rejects an altered captured median",() => {
+  const mutated=structuredClone(baseline);
+  mutated.medians.user_cpu_ms=200000;
+  assert.throws(() => assertBaselineIntegrity(mutated),assert.AssertionError);
+});
+
+test("integrity rejects a replacement captured commit",() => {
+  const mutated=structuredClone(baseline);
+  mutated.identity.commit="0".repeat(40);
+  assert.throws(() => assertBaselineIntegrity(mutated),assert.AssertionError);
 });
 
 test("protocol names exact capture and refresh boundaries",() => {
