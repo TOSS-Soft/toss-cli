@@ -1,4 +1,5 @@
 import {createHash,createPublicKey} from "node:crypto";
+import {types as utilTypes} from "node:util";
 
 import {canonicalJson,sha256Canonical} from "../contracts/acp.js";
 import {validateDocument} from "../contracts/validator.js";
@@ -30,7 +31,20 @@ const ROUTES=Object.freeze({
 });
 
 function copy(value,label) {
+  const visited=new Set();
+  function rejectExoticTree(item) {
+    if (!item || typeof item!=="object" || visited.has(item)) return;
+    if (utilTypes.isProxy(item)) throw new TypeError(`${label} cannot contain proxies`);
+    visited.add(item);
+    for (const descriptor of Object.values(Object.getOwnPropertyDescriptors(item))) {
+      if (!("value" in descriptor)) {
+        throw new TypeError(`${label} cannot contain accessor properties`);
+      }
+      rejectExoticTree(descriptor.value);
+    }
+  }
   try {
+    rejectExoticTree(value);
     return JSON.parse(canonicalJson(value));
   } catch (error) {
     throw new TypeError(`${label} must be canonical JSON`,{cause:error});
@@ -61,10 +75,18 @@ function closedKeys(value,allowed,required,label) {
 }
 
 function canonicalPublicKey(value,label) {
-  if (typeof value!=="string" || value.length===0) {
+  if (typeof value!=="string" || value.length===0 ||
+      value.replace(/\r\n/gu,"").includes("\r")) {
     throw new TypeError(`${label} must be a public key`);
   }
-  const input=value.endsWith("\n") ? value : `${value}\n`;
+  const canonical=value.replace(/\r\n/gu,"\n");
+  const input=canonical.endsWith("\n") ? canonical : `${canonical}\n`;
+  const blocks=input.match(
+    /-----BEGIN PUBLIC KEY-----\n[A-Za-z0-9+/=\n]+-----END PUBLIC KEY-----\n/gu,
+  );
+  if (!blocks || blocks.length!==1 || blocks[0]!==input) {
+    throw new TypeError(`${label} must be one canonical Ed25519 SPKI key`);
+  }
   let key;
   try {
     key=createPublicKey(input);

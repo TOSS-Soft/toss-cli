@@ -648,13 +648,18 @@ test("UI readiness accepts the validated full publication registry at the public
   skip:!gateAvailable,
 },async () => {
   const {store}=await preparedUiStore();
-  const readiness=await readinessModule.runReadinessCommand(
-    command("readiness.check"),services(store,{
-      authorityRegistry:fullDesignAuthorityRegistry(),
-    }),
-  );
-  assert.equal(readiness.ui_design_readiness.ready_for_ui_issue_generation,true);
-  assert.equal(readiness.ui_design_readiness.design_level,"CRITICAL");
+  const lf=fullDesignAuthorityRegistry();
+  const crlf=clone(lf);
+  for (const actor of crlf.actors) actor.public_key=actor.public_key.replaceAll("\n","\r\n");
+  const {content_sha256,...unsigned}=crlf;
+  crlf.content_sha256=sha256Canonical(unsigned);
+  for (const authorityRegistry of [lf,crlf]) {
+    const readiness=await readinessModule.runReadinessCommand(
+      command("readiness.check"),services(store,{authorityRegistry}),
+    );
+    assert.equal(readiness.ui_design_readiness.ready_for_ui_issue_generation,true);
+    assert.equal(readiness.ui_design_readiness.design_level,"CRITICAL");
+  }
 });
 
 test("UI readiness ignores an unrelated completed design lineage",{
