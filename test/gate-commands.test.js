@@ -471,6 +471,10 @@ test("plan, audit, and readiness derive views from verified artifacts",{
   );
   assert.equal(readiness.ready_for_issue_generation,true);
   assert.deepEqual(readiness.failures,[]);
+  assert.equal(readiness.project_readiness.ready_for_issue_generation,true);
+  assert.equal(readiness.ui_design_readiness.document_type,"ui-design-dor-result");
+  assert.equal(readiness.ui_design_readiness.design_level,null);
+  assert.equal(readiness.ui_design_readiness.ready_for_ui_issue_generation,true);
 });
 
 test("readiness requires independently injected authority context and remains read-only",{

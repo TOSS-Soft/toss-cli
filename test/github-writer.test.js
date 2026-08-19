@@ -15,6 +15,7 @@ import {createArtifactStore} from "../src/artifacts/store.js";
 import {canonicalJson,sha256Canonical} from "../src/contracts/acp.js";
 import {validateDocument} from "../src/contracts/validator.js";
 import {auditSpecification} from "../src/pipeline/spec-auditor.js";
+import {createDesignOrchestrator} from "../src/pipeline/design-orchestrator.js";
 import {transition} from "../src/pipeline/state-machine.js";
 import {buildTraceGraph} from "../src/pipeline/traceability.js";
 import {
@@ -24,6 +25,13 @@ import {
   completeArtifacts,
   rehash,
 } from "./support/trace-fixture.js";
+import {criticalCompleteGraph} from "./support/design-audit-fixture.js";
+import {
+  classificationInput as designClassificationInput,
+  DIRECTION_TYPES,
+  signedStageApproval,
+  SYSTEM_TYPES,
+} from "./support/design-command-fixture.js";
 
 const writerModule=await import("../src/pipeline/github-writer.js").catch(error => {
   if (error?.code==="ERR_MODULE_NOT_FOUND") return {};
@@ -168,6 +176,91 @@ function trustedAuthorityRegistry(overrides={}) {
     ...overrides,
   };
   return {...unsigned,content_sha256:sha256Canonical(unsigned)};
+}
+
+function trustedDesignAndPublicationRegistry() {
+  const registry=trustedAuthorityRegistry();
+  const {content_sha256,...unsigned}=registry;
+  unsigned.actors.push({
+    actor_id:"verified-ceo",
+    actor_role:"CEO",
+    public_key:PUBLIC_KEY,
+    public_key_fingerprint:publicKeyFingerprint(),
+    allowed_publications:[],
+    allowed_routes:[{
+      authority:"A3",
+      verification_kind:"A3_VERIFIED_CEO_OR_USER_AUTHORITY",
+    }],
+  });
+  return {...unsigned,content_sha256:sha256Canonical(unsigned)};
+}
+
+function attachCurrentDesignBundle(context) {
+  const graph=criticalCompleteGraph();
+  const byTypes=types => graph.filter(row => types.includes(row.document_type));
+  const approvalRecords=[
+    signedStageApproval("VISUAL_DIRECTION",byTypes(DIRECTION_TYPES),{level:"CRITICAL"}),
+    signedStageApproval("DESIGN_SYSTEM",byTypes(SYSTEM_TYPES),{level:"CRITICAL"}),
+    signedStageApproval("FINAL",graph,{level:"CRITICAL"}),
+  ];
+  const outcome=createDesignOrchestrator({authorityRegistry:{actors:[{
+    actor_id:"verified-ceo",
+    actor_role:"CEO",
+    public_key:PUBLIC_KEY,
+    allowed_routes:[{
+      authority:"A3",
+      verification_kind:"A3_VERIFIED_CEO_OR_USER_AUTHORITY",
+    }],
+  }]}}).prepareDesign({
+    classification_input:designClassificationInput({
+      risk_signals:["SECURITY_PRIVACY"],
+      requested_level:"CRITICAL",
+    }),
+    source_artifact_refs:[],
+    design_artifacts:graph,
+    persisted_artifacts:graph,
+    approval_records:approvalRecords,
+    target_command:"design.approve",
+  });
+  const brief=graph.find(row => row.document_type==="design-brief");
+  const designState={
+    schema_version:"acp.v1",
+    document_type:"design-orchestration-state",
+    artifact_id:"design-orchestration-state:DESIGN-CHECKOUT",
+    revision:1,
+    run_id:"run:design-readiness:001",
+    producer:{role:"orchestrator",identity:"toss-design-orchestrator"},
+    runtime_identity:{kind:"deterministic",name:"toss-cli",version:"2.1.0"},
+    created_at:"2026-08-18T10:00:00.000Z",
+    provenance:clone(brief.provenance),
+    parents:[],
+    inputs:graph.map(artifactReference),
+    content_sha256:sha256Canonical(outcome.next_state_content),
+    content:clone(outcome.next_state_content),
+  };
+  const flow=graph.find(row => row.document_type==="user-flow");
+  const screen=graph.find(row => row.document_type==="screen-spec");
+  const system=graph.find(row => row.document_type==="design-system");
+  const entityRef=(artifact,entity_id) => ({...artifactReference(artifact),entity_id});
+  context.artifacts.issuePlan.content.issues[0].ui_design_trace={
+    design_system_ref:artifactReference(system),
+    flow_refs:[entityRef(flow,flow.content.flow_id)],
+    screen_refs:[entityRef(screen,screen.content.screen_id)],
+    component_refs:[entityRef(system,"COMP-BUTTON")],
+    state_refs:screen.content.states.map(row => entityRef(screen,row.state_id)),
+    responsive_refs:screen.content.responsive.map(row => entityRef(screen,row.target_id)),
+    accessibility_refs:screen.content.accessibility.map(row =>
+      entityRef(screen,row.criterion_id)),
+  };
+  rehash(context.artifacts.issuePlan);
+  rebuildReadyContext(context);
+  Object.assign(context.artifacts,{
+    designGraph:graph,
+    designAudit:graph.find(row => row.document_type==="design-audit"),
+    designApproval:graph.find(row => row.document_type==="design-approval"),
+    designState,
+  });
+  return context;
 }
 
 function configuredWriter({adapter,store,authorityRegistry=trustedAuthorityRegistry()}) {
@@ -335,6 +428,71 @@ test("blocked readiness and apply false cannot reach adapter or store",async () 
   assert.equal(dryRun.mode,"preview");
   assert.deepEqual(adapter.calls,[]);
   assert.deepEqual(store.calls,[]);
+});
+
+test("UI issue publication fails closed before adapter calls when exact Design DoR is absent",async () => {
+  const context=readyContext();
+  const designRef={
+    document_type:"screen-spec",
+    artifact_id:"screen-spec:DESIGN-CHECKOUT",
+    revision:1,
+    content_sha256:"d".repeat(64),
+  };
+  context.artifacts.issuePlan.content.issues[0].ui_design_trace={
+    design_system_ref:{...designRef,document_type:"design-system",
+      artifact_id:"design-system:DESIGN-CHECKOUT"},
+    flow_refs:[{...designRef,document_type:"user-flow",
+      artifact_id:"user-flow:DESIGN-CHECKOUT",entity_id:"FLOW-CHECKOUT"}],
+    screen_refs:[{...designRef,entity_id:"SCREEN-CHECKOUT"}],
+    component_refs:[{...designRef,document_type:"design-system",
+      artifact_id:"design-system:DESIGN-CHECKOUT",entity_id:"COMP-BUTTON"}],
+    state_refs:[{...designRef,entity_id:"STATE-MAIN"}],
+    responsive_refs:[{...designRef,entity_id:"RESP-MOBILE"}],
+    accessibility_refs:[{...designRef,entity_id:"A11Y-NAME"}],
+  };
+  rehash(context.artifacts.issuePlan);
+  rebuildReadyContext(context);
+  const adapter=fakeAdapter();
+  const store=fakeStore();
+
+  await assert.rejects(
+    configuredWriter({adapter,store}).publish(context,{
+      apply:true,
+      authority:authorityFor(context),
+    }),
+    /design readiness/i,
+  );
+  assert.deepEqual(adapter.calls,[]);
+  assert.deepEqual(store.calls,[]);
+});
+
+test("verified UI issue preview and apply carry exact Design DoR trace references",async () => {
+  const context=attachCurrentDesignBundle(readyContext());
+  const adapter=fakeAdapter();
+  const store=fakeStore();
+  const authorityRegistry=trustedDesignAndPublicationRegistry();
+  const writer=configuredWriter({adapter,store,authorityRegistry});
+
+  const preview=await writer.preview(context);
+  assert.match(preview.operations[0].body,/## UI Design trace/);
+  assert.match(preview.operations[0].body,/Design level: CRITICAL/);
+  assert.match(preview.operations[0].body,/design-system:DESIGN-CHECKOUT@1#[a-f0-9]{64}/);
+  assert.match(preview.operations[0].body,/FLOW-CHECKOUT/);
+  assert.match(preview.operations[0].body,/SCREEN-CHECKOUT/);
+  assert.match(preview.operations[0].body,/COMP-BUTTON/);
+  assert.match(preview.operations[0].body,/STATE-RECOVERY/);
+  assert.match(preview.operations[0].body,/RESP-DESKTOP/);
+  assert.match(preview.operations[0].body,/A11Y-NAME/);
+  assert.deepEqual(adapter.calls,[]);
+
+  const published=await writer.publish(context,{
+    apply:true,
+    authority:authorityFor(context),
+  });
+  assert.equal(published.status,"complete");
+  assert.equal(adapter.created.length,1);
+  assert.ok(published.artifact.inputs.some(row =>
+    row.document_type==="design-orchestration-state"));
 });
 
 test("apply requires a trusted source, plan, repository, role, record, and signature bound approval",async () => {

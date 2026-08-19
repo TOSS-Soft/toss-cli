@@ -1,4 +1,6 @@
 import {evaluateProjectReadiness} from "../pipeline/readiness.js";
+import {createDesignOrchestrator} from "../pipeline/design-orchestrator.js";
+import {evaluateDesignReadiness} from "../pipeline/design-readiness.js";
 import {buildTraceGraph} from "../pipeline/traceability.js";
 import {verifiedGateEvidence} from "./evidence.js";
 import {
@@ -30,6 +32,75 @@ function actionable(rows) {
     ...row,
     next_action:NEXT_ACTIONS[row.rule_id],
   }));
+}
+
+function backendOnlyDesignReadiness(projectReadiness) {
+  return deepFreeze({
+    schema_version:"ui-design-dor-result.v1",
+    document_type:"ui-design-dor-result",
+    rules_version:"ui-design-dor-rules.v1",
+    source_revision:projectReadiness.source_revision,
+    source_sha256:projectReadiness.source_sha256,
+    design_level:null,
+    graph_root_sha256:null,
+    ready_for_ui_issue_generation:true,
+    ui_issue_ids:[],
+    failures:[],
+    warnings:[],
+  });
+}
+
+async function designReadinessFromCatalog(catalog,bundle,authorityRegistry,projectReadiness) {
+  const uiIssues=bundle.issuePlan.content.issues.filter(issue =>
+    Object.hasOwn(issue,"ui_design_trace"));
+  const states=await catalog.list({document_type:"design-orchestration-state"});
+  if (states.length===0) {
+    if (uiIssues.length===0) return backendOnlyDesignReadiness(projectReadiness);
+    return evaluateDesignReadiness({designGraph:[],audit:null,approval:null,
+      issuePlan:bundle.issuePlan});
+  }
+  const verified=[];
+  const orchestrator=createDesignOrchestrator({authorityRegistry});
+  for (const state of states) {
+    try {
+      const snapshot=orchestrator.verifyStateSnapshot({
+        content:state.content,provenance:state.provenance,
+      });
+      if (new Set(["COMPLETE","NOT_APPLICABLE"]).has(snapshot.content.gate)) {
+        verified.push({state,snapshot});
+      }
+    } catch {
+      // An invalid historical state cannot establish current readiness.
+    }
+  }
+  if (verified.length!==1) {
+    if (uiIssues.length===0) return backendOnlyDesignReadiness(projectReadiness);
+    return evaluateDesignReadiness({designGraph:[],audit:null,approval:null,
+      issuePlan:bundle.issuePlan});
+  }
+  const {snapshot}=verified[0];
+  const graph=[];
+  for (const reference of snapshot.content.artifact_refs) {
+    graph.push(await catalog.get(reference));
+  }
+  if (snapshot.content.gate==="NOT_APPLICABLE") {
+    if (uiIssues.length>0) return evaluateDesignReadiness({
+      designGraph:graph,audit:null,approval:null,issuePlan:bundle.issuePlan,
+    });
+    const brief=graph.find(row => row.document_type==="design-brief");
+    return deepFreeze({
+      ...backendOnlyDesignReadiness(projectReadiness),
+      source_revision:brief.provenance.source_revision,
+      source_sha256:brief.provenance.source_sha256,
+      design_level:"NOT_APPLICABLE",
+    });
+  }
+  return evaluateDesignReadiness({
+    designGraph:graph,
+    audit:graph.find(row => row.document_type==="design-audit"),
+    approval:graph.find(row => row.document_type==="design-approval"),
+    issuePlan:bundle.issuePlan,
+  });
 }
 
 export async function runReadinessCommand(command,serviceInput) {
@@ -69,11 +140,19 @@ export async function runReadinessCommand(command,serviceInput) {
   });
   const failures=actionable(readiness.failures);
   const warnings=actionable(readiness.warnings);
+  const projectReadiness=deepFreeze({...readiness,failures,warnings});
+  const uiDesignReadiness=await designReadinessFromCatalog(
+    catalog,bundle,services.authorityRegistry,projectReadiness,
+  );
+  const blocked=readiness.ready_for_issue_generation!==true ||
+    uiDesignReadiness.ready_for_ui_issue_generation!==true;
   return deepFreeze({
     ...readiness,
     failures,
     warnings,
-    ...(readiness.ready_for_issue_generation ? {} : {
+    project_readiness:projectReadiness,
+    ui_design_readiness:uiDesignReadiness,
+    ...(!blocked ? {} : {
       blocked:true,
       command_exit_code:4,
     }),

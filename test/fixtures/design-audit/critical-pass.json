@@ -1,0 +1,18 @@
+{
+  "fixture_version": "design-audit.fixture.v1",
+  "state_names": ["Main", "Empty", "Loading", "Error", "Permission", "Recovery"],
+  "responsive": [
+    {"target_id":"RESP-MOBILE","min_width":320,"max_width":767,"behavior":"Single column."},
+    {"target_id":"RESP-TABLET","min_width":768,"max_width":1023,"behavior":"Two columns."},
+    {"target_id":"RESP-DESKTOP","min_width":1024,"max_width":1440,"behavior":"Centered content."}
+  ],
+  "accessibility": [
+    {"criterion_id":"A11Y-NAME","standard":"WCAG_2_2_AA","requirement":"Controls expose accessible names and operable focus order."}
+  ],
+  "critical_evidence": [
+    {"kind":"RESEARCH","evidence":["research: checkout interviews r1"]},
+    {"kind":"USABILITY","evidence":["usability: session SESSION-001"]},
+    {"kind":"SECURITY","evidence":["security: payment disclosure review r1"]},
+    {"kind":"PRIVACY","evidence":["privacy: personal-data notice review r1"]}
+  ]
+}
