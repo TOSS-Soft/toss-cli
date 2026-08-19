@@ -15,8 +15,7 @@ Run `npm run test:benchmark -- --runs 3 --lane full --runner-id
 toss-reference-macos-node26 --update-baseline
 docs/performance/v2.1.1-baseline.json` from a clean issue #84 checkout.
 
-The command runs the unchanged canonical `npm test` three times. Ordinary
-benchmark execution does not update the tracked baseline.
+The command runs the unchanged canonical `npm test` three times. Ordinary benchmark execution does not update the tracked baseline.
 
 ## Budgets
 
@@ -29,8 +28,7 @@ benchmark execution does not update the tracked baseline.
 
 Only an approved intentional test-topology change may refresh the baseline.
 Use `--update-baseline`, review the complete JSON diff, and record the exact
-runner, commit, Node version, platform, architecture, and lock hash. A slower
-capture cannot relax an existing budget.
+runner, commit, Node version, platform, architecture, and lock hash. A slower capture cannot relax an existing budget.
 
 ## Diagnostics
 
