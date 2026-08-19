@@ -1,0 +1,99 @@
+import assert from "node:assert/strict";
+import {spawnSync} from "node:child_process";
+import {existsSync,readFileSync} from "node:fs";
+import {dirname,join} from "node:path";
+import test from "node:test";
+import {fileURLToPath} from "node:url";
+
+const root=dirname(dirname(fileURLToPath(import.meta.url)));
+const releaseNotesPath=join(root,"docs","releases","v2.1.0.md");
+const scopedIssues=[
+  ...Array.from({length:12},(_,index) => index+12),
+  ...Array.from({length:8},(_,index) => index+25),
+];
+
+function readJson(relativePath) {
+  return JSON.parse(readFileSync(join(root,relativePath),"utf8"));
+}
+
+function readReleaseNotes() {
+  assert.equal(
+    existsSync(releaseNotesPath),
+    true,
+    "docs/releases/v2.1.0.md must exist for the release candidate",
+  );
+  return readFileSync(releaseNotesPath,"utf8");
+}
+
+test("release metadata targets v2.1.0 in the manifest and both lockfile roots",() => {
+  const pkg=readJson("package.json");
+  const lock=readJson("package-lock.json");
+
+  assert.equal(pkg.version,"2.1.0");
+  assert.equal(lock.version,"2.1.0");
+  assert.equal(lock.packages[""].version,"2.1.0");
+});
+
+test("the v2.1.0 smoke contract passes against the release candidate",() => {
+  const result=spawnSync(process.execPath,[join(root,"scripts","smoke-test.js")],{
+    cwd:root,
+    encoding:"utf8",
+  });
+
+  assert.equal(
+    result.status,
+    0,
+    `v2.1.0 smoke contract failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+  );
+  assert.match(result.stdout,/TOSS CLI smoke test: PASS/);
+});
+
+test("release notes expose the v2.1.0 heading and required categories",() => {
+  const notes=readReleaseNotes();
+  assert.match(notes,/^# TOSS CLI v2\.1\.0$/m);
+  for (const category of [
+    "Contracts","Pipeline","CLI","Design","Safety","Compatibility","Verification",
+  ]) {
+    assert.match(notes,new RegExp(`^## ${category}$`,"m"),`missing ${category} category`);
+  }
+});
+
+test("release notes inventory every completed scoped issue exactly once",() => {
+  const notes=readReleaseNotes();
+  const inventoryHeading="## Closed issues\n";
+  const inventoryStart=notes.indexOf(inventoryHeading);
+  assert.notEqual(inventoryStart,-1,"release notes omit the closed issue inventory");
+  const inventory=notes
+    .slice(inventoryStart+inventoryHeading.length)
+    .split(/^## /m,1)[0];
+  const listed=[...inventory.matchAll(/^- #(\d+) — /gm)].map(match => Number(match[1]));
+
+  assert.deepEqual(listed,scopedIssues);
+  for (const issue of scopedIssues) {
+    assert.equal(
+      listed.filter(listedIssue => listedIssue===issue).length,
+      1,
+      `issue #${issue} must appear exactly once in the closed issue inventory`,
+    );
+  }
+});
+
+test("release notes and CLI help preserve all legacy entry points",() => {
+  const notes=readReleaseNotes();
+  for (const command of [
+    "`toss init [project-brief.yaml]`",
+    "`toss create <project-brief.yaml>`",
+    "`toss \"Project Name\" [legacy scaffold options]`",
+  ]) {
+    assert.ok(notes.includes(command),`release notes omit ${command}`);
+  }
+
+  const help=spawnSync(process.execPath,[join(root,"bin","toss.js"),"--help"],{
+    cwd:root,
+    encoding:"utf8",
+  });
+  assert.equal(help.status,0,help.stderr);
+  assert.match(help.stdout,/toss init \[project-brief\.yaml\]/);
+  assert.match(help.stdout,/toss create <project-brief\.yaml>/);
+  assert.match(help.stdout,/toss "Project Name" \[legacy scaffold options\]/);
+});
