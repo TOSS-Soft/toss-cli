@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import {spawnSync} from "node:child_process";
-import {mkdtemp,readdir,rm,writeFile} from "node:fs/promises";
+import {execFileSync,spawnSync} from "node:child_process";
+import {chmod,mkdir,mkdtemp,readdir,rm,symlink,writeFile} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import test from "node:test";
@@ -22,6 +22,33 @@ const sample=wall_ms => ({
 });
 
 const budgetCli=fileURLToPath(new URL("../scripts/performance/budget.mjs",import.meta.url));
+const benchmarkCli=fileURLToPath(new URL("../scripts/performance/benchmark.mjs",import.meta.url));
+
+async function benchmarkFixture(t) {
+  const root=await mkdtemp(join(tmpdir(),"toss-benchmark-cli-"));
+  t.after(() => rm(root,{recursive:true,force:true}));
+  await mkdir(join(root,"bin"));
+  await mkdir(join(root,"docs","performance"),{recursive:true});
+  await writeFile(join(root,"package-lock.json"),"{}\n");
+  await writeFile(join(root,"tracked.json"),"tracked\n");
+  execFileSync("git",["init","--quiet"],{cwd:root});
+  execFileSync("git",["config","user.email","test@example.invalid"],{cwd:root});
+  execFileSync("git",["config","user.name","Test"],{cwd:root});
+  execFileSync("git",["add","package-lock.json","tracked.json"],{cwd:root});
+  execFileSync("git",["commit","--quiet","-m","fixture"],{cwd:root});
+  const npm=join(root,"bin","npm");
+  async function setNpm(source) {
+    await writeFile(npm,`#!/bin/sh\n${source}\n`);
+    await chmod(npm,0o755);
+  }
+  await setNpm("exit 0");
+  return {
+    root,setNpm,
+    run:argumentsToCli => spawnSync(process.execPath,[benchmarkCli,
+      "--runs","3","--lane","full","--runner-id","fixture",...argumentsToCli,
+    ],{cwd:root,encoding:"utf8",env:{...process.env,PATH:`${join(root,"bin")}:${process.env.PATH}`}}),
+  };
+}
 
 test("benchmark invokes exactly three samples",async () => {
   const walls=[130,110,120];
@@ -37,6 +64,9 @@ test("benchmark invokes exactly three samples",async () => {
   assert.equal(calls,3);
   assert.equal(report.medians.wall_ms,120);
   assert.ok(invocations.every(row => row.args[0]==="test"));
+  assert.deepEqual(invocations.map(row => row.runId),[
+    `${identity.commit}-1`,`${identity.commit}-2`,`${identity.commit}-3`,
+  ]);
 });
 
 test("ordinary benchmark orchestration writes no file",async t => {
@@ -118,4 +148,54 @@ test("budget CLI requires both input paths",() => {
   });
   assert.equal(result.status,2);
   assert.match(result.stderr,/--baseline.*--report/);
+});
+
+test("benchmark CLI maps failed samples and invalid process evidence to exit five",async t => {
+  if (process.platform==="win32") return t.skip("fixture npm script is POSIX-only");
+  const fixture=await benchmarkFixture(t);
+  for (const [script,diagnostic] of [
+    ["exit 7","INVALID_PERFORMANCE_EVIDENCE"],
+    ["printf '{not-json}\\n' > \"$TOSS_PERFORMANCE_PROCESS_LOG\"\nexit 0","INVALID_PROCESS_LOG"],
+  ]) {
+    await fixture.setNpm(script);
+    const result=fixture.run(["--json"]);
+    assert.equal(result.status,5,result.stderr);
+    assert.match(result.stderr,new RegExp(diagnostic));
+  }
+});
+
+test("benchmark CLI blocks unsafe outputs and reserves baseline updates",async t => {
+  if (process.platform==="win32") return t.skip("fixture npm script is POSIX-only");
+  const fixture=await benchmarkFixture(t);
+  const link=join(fixture.root,"linked.json");
+  await symlink("tracked.json",link);
+  for (const output of [".","linked.json","tracked.json","docs/performance/v2.1.1-baseline.json"]) {
+    const result=fixture.run(["--output",output]);
+    assert.equal(result.status,5,result.stderr);
+    assert.match(result.stderr,/UNSAFE_PERFORMANCE_OUTPUT/);
+  }
+  const unauthorized=fixture.run(["--update-baseline","tracked.json"]);
+  assert.equal(unauthorized.status,2,unauthorized.stderr);
+  assert.match(unauthorized.stderr,/--update-baseline/);
+  const updated=fixture.run(["--update-baseline","docs/performance/v2.1.1-baseline.json"]);
+  assert.equal(updated.status,0,updated.stderr);
+});
+
+test("benchmark and budget CLIs reject duplicate and missing options",() => {
+  const benchmarkMissing=spawnSync(process.execPath,[benchmarkCli,"--runs","3","--lane","full"],{
+    encoding:"utf8",
+  });
+  assert.equal(benchmarkMissing.status,2);
+  const benchmarkDuplicate=spawnSync(process.execPath,[benchmarkCli,
+    "--runs","3","--runs","3","--lane","full","--runner-id","fixture",
+  ],{encoding:"utf8"});
+  assert.equal(benchmarkDuplicate.status,2);
+  const budgetMissing=spawnSync(process.execPath,[budgetCli,
+    "--baseline","baseline.json","--report","report.json",
+  ],{encoding:"utf8"});
+  assert.equal(budgetMissing.status,2);
+  const budgetDuplicate=spawnSync(process.execPath,[budgetCli,
+    "--baseline","baseline.json","--report","report.json","--lane","full","--lane","full",
+  ],{encoding:"utf8"});
+  assert.equal(budgetDuplicate.status,2);
 });

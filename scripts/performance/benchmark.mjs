@@ -9,11 +9,19 @@ import {promisify} from "node:util";
 import {canonicalJson} from "../../src/contracts/acp.js";
 import {
   FAST_MAX_WALL_MS,HISTORICAL_FULL_WALL_MS,PERFORMANCE_BASELINE_VERSION,
-  canonicalPerformanceJson,createPerformanceReport,
+  PerformanceToolError,canonicalPerformanceJson,createPerformanceReport,
 } from "./report.mjs";
 import {runSuiteOnce} from "./run-suite.mjs";
 
 const executeFile=promisify(execFile);
+const BASELINE_RELATIVE_PATH="docs/performance/v2.1.1-baseline.json";
+
+class BenchmarkOutputError extends Error {
+  constructor(message) {
+    super(message);
+    this.code="UNSAFE_PERFORMANCE_OUTPUT";
+  }
+}
 
 function nonemptyString(value,label) {
   if (typeof value!=="string" || value.length===0) throw new TypeError(`${label} must be a nonempty string`);
@@ -28,6 +36,28 @@ function validateLane(lane) {
 function underRoot(candidate,root) {
   const contained=relative(root,candidate);
   return contained!=="" && contained!==".." && !contained.startsWith(`..${sep}`) && !contained.includes("\0");
+}
+
+function isBaselineDestination(destination,root) {
+  return relative(root,destination).split(sep).join("/")===BASELINE_RELATIVE_PATH;
+}
+
+async function isTrackedDestination(destination,root) {
+  try {
+    await executeFile("git",["ls-files","--error-unmatch","--",relative(root,destination)],{
+      cwd:root,encoding:"utf8",
+    });
+    return true;
+  } catch (error) {
+    if (error?.code===1) return false;
+    throw error;
+  }
+}
+
+function validateBaselineDestination(path,root) {
+  if (!isBaselineDestination(resolve(root,path),root)) {
+    throw new TypeError(`--update-baseline must target ${BASELINE_RELATIVE_PATH}`);
+  }
 }
 
 async function collectIdentity(cwd,runnerId) {
@@ -145,19 +175,32 @@ export function parseBenchmarkOptions(argv) {
   return Object.freeze(options);
 }
 
-export async function writeCanonicalReport(path,value,root) {
+export async function writeCanonicalReport(path,value,root,{allowBaseline=false}={}) {
   nonemptyString(path,"report path");
   nonemptyString(root,"repository root");
   const canonicalRoot=await realpath(root);
   const destination=resolve(root,path);
   const parent=dirname(destination);
   const canonicalParent=await realpath(parent);
-  if (!underRoot(canonicalParent,canonicalRoot)) throw new TypeError("report destination must remain under repository root");
-  if (!underRoot(destination,canonicalRoot)) throw new TypeError("report destination must remain under repository root");
+  if (canonicalParent!==canonicalRoot && !underRoot(canonicalParent,canonicalRoot)) {
+    throw new BenchmarkOutputError("report destination must remain under repository root");
+  }
+  if (!underRoot(destination,canonicalRoot)) {
+    throw new BenchmarkOutputError("report destination must remain under repository root");
+  }
   try {
-    if ((await lstat(destination)).isSymbolicLink()) throw new TypeError("report destination must not be a symbolic link");
+    if ((await lstat(destination)).isSymbolicLink()) {
+      throw new BenchmarkOutputError("report destination must not be a symbolic link");
+    }
   } catch (error) {
     if (error?.code!=="ENOENT") throw error;
+  }
+  if (allowBaseline && !isBaselineDestination(destination,canonicalRoot)) {
+    throw new BenchmarkOutputError("baseline updates require the approved baseline destination");
+  }
+  if ((!allowBaseline && isBaselineDestination(destination,canonicalRoot)) ||
+      (!allowBaseline && await isTrackedDestination(destination,canonicalRoot))) {
+    throw new BenchmarkOutputError("ordinary benchmark output cannot overwrite a tracked destination");
   }
   const output=value?.schema_version==="toss-test-performance-report.v1" ?
     canonicalPerformanceJson(value) : canonicalJson(value);
@@ -167,22 +210,46 @@ export async function writeCanonicalReport(path,value,root) {
 }
 
 async function main(argv) {
-  const options=parseBenchmarkOptions(argv);
-  const root=process.cwd();
-  const report=await runBenchmark({...options,cwd:root});
-  if (options.output!==undefined) await writeCanonicalReport(options.output,report,root);
-  if (options.updateBaseline!==undefined) {
-    await writeCanonicalReport(options.updateBaseline,createBaseline(report),root);
+  let options;
+  try {
+    options=parseBenchmarkOptions(argv);
+  } catch (error) {
+    process.stderr.write(`${error.message}\n`);
+    process.exitCode=2;
+    return;
   }
-  const output=renderBenchmarkOutput(report,options.json);
-  process.stdout.write(output.stdout);
-  process.stderr.write(output.stderr);
+  const root=process.cwd();
+  try {
+    if (options.updateBaseline!==undefined) validateBaselineDestination(options.updateBaseline,root);
+  } catch (error) {
+    process.stderr.write(`${error.message}\n`);
+    process.exitCode=2;
+    return;
+  }
+  try {
+    const report=await runBenchmark({...options,cwd:root});
+    if (options.output!==undefined) await writeCanonicalReport(options.output,report,root);
+    if (options.updateBaseline!==undefined) {
+      await writeCanonicalReport(options.updateBaseline,createBaseline(report),root,{allowBaseline:true});
+    }
+    const output=renderBenchmarkOutput(report,options.json);
+    process.stdout.write(output.stdout);
+    process.stderr.write(output.stderr);
+  } catch (error) {
+    if (error instanceof TypeError || error instanceof PerformanceToolError ||
+        error instanceof BenchmarkOutputError) {
+      const code=error.code ?? "INVALID_PERFORMANCE_EVIDENCE";
+      process.stderr.write(`${code}: ${error.message}\n`);
+      process.exitCode=5;
+      return;
+    }
+    throw error;
+  }
 }
 
 if (process.argv[1]===fileURLToPath(import.meta.url)) {
   main(process.argv.slice(2)).catch(error => {
-    const usage=error instanceof TypeError;
     process.stderr.write(`${error.message}\n`);
-    process.exitCode=usage ? 2 : 70;
+    process.exitCode=70;
   });
 }
