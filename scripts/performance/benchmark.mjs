@@ -60,6 +60,25 @@ function validateBaselineDestination(path,root) {
   }
 }
 
+async function rejectSymlinkParents(destination,root) {
+  const parts=relative(root,destination).split(sep);
+  parts.pop();
+  let parent=root;
+  for (const part of parts) {
+    parent=resolve(parent,part);
+    let status;
+    try {
+      status=await lstat(parent);
+    } catch (error) {
+      if (error?.code==="ENOENT") return;
+      throw error;
+    }
+    if (status.isSymbolicLink()) {
+      throw new BenchmarkOutputError("report destination must not use a symbolic-link parent");
+    }
+  }
+}
+
 async function collectIdentity(cwd,runnerId) {
   nonemptyString(cwd,"benchmark cwd");
   nonemptyString(runnerId,"benchmark runner ID");
@@ -172,6 +191,9 @@ export function parseBenchmarkOptions(argv) {
   for (const [key,option] of [["runs","--runs"],["lane","--lane"],["runnerId","--runner-id"]]) {
     if (options[key]===undefined) throw new TypeError(`benchmark requires ${option}`);
   }
+  if (options.updateBaseline!==undefined && options.lane!=="full") {
+    throw new TypeError("baseline update requires the full lane");
+  }
   return Object.freeze(options);
 }
 
@@ -181,6 +203,7 @@ export async function writeCanonicalReport(path,value,root,{allowBaseline=false}
   const canonicalRoot=await realpath(root);
   const destination=resolve(root,path);
   const parent=dirname(destination);
+  await rejectSymlinkParents(destination,root);
   const canonicalParent=await realpath(parent);
   if (canonicalParent!==canonicalRoot && !underRoot(canonicalParent,canonicalRoot)) {
     throw new BenchmarkOutputError("report destination must remain under repository root");

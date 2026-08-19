@@ -29,12 +29,14 @@ async function benchmarkFixture(t) {
   t.after(() => rm(root,{recursive:true,force:true}));
   await mkdir(join(root,"bin"));
   await mkdir(join(root,"docs","performance"),{recursive:true});
+  await mkdir(join(root,"tracked-directory"));
   await writeFile(join(root,"package-lock.json"),"{}\n");
   await writeFile(join(root,"tracked.json"),"tracked\n");
+  await writeFile(join(root,"tracked-directory","inside.json"),"tracked directory\n");
   execFileSync("git",["init","--quiet"],{cwd:root});
   execFileSync("git",["config","user.email","test@example.invalid"],{cwd:root});
   execFileSync("git",["config","user.name","Test"],{cwd:root});
-  execFileSync("git",["add","package-lock.json","tracked.json"],{cwd:root});
+  execFileSync("git",["add","package-lock.json","tracked.json","tracked-directory/inside.json"],{cwd:root});
   execFileSync("git",["commit","--quiet","-m","fixture"],{cwd:root});
   const npm=join(root,"bin","npm");
   async function setNpm(source) {
@@ -44,8 +46,8 @@ async function benchmarkFixture(t) {
   await setNpm("exit 0");
   return {
     root,setNpm,
-    run:argumentsToCli => spawnSync(process.execPath,[benchmarkCli,
-      "--runs","3","--lane","full","--runner-id","fixture",...argumentsToCli,
+    run:(argumentsToCli,{lane="full"}={}) => spawnSync(process.execPath,[benchmarkCli,
+      "--runs","3","--lane",lane,"--runner-id","fixture",...argumentsToCli,
     ],{cwd:root,encoding:"utf8",env:{...process.env,PATH:`${join(root,"bin")}:${process.env.PATH}`}}),
   };
 }
@@ -169,7 +171,12 @@ test("benchmark CLI blocks unsafe outputs and reserves baseline updates",async t
   const fixture=await benchmarkFixture(t);
   const link=join(fixture.root,"linked.json");
   await symlink("tracked.json",link);
-  for (const output of [".","linked.json","tracked.json","docs/performance/v2.1.1-baseline.json"]) {
+  await symlink(".",join(fixture.root,"alias"));
+  await symlink("tracked-directory",join(fixture.root,"alias-directory"));
+  for (const output of [
+    ".","linked.json","tracked.json","alias/tracked.json","alias-directory/inside.json",
+    "docs/performance/v2.1.1-baseline.json",
+  ]) {
     const result=fixture.run(["--output",output]);
     assert.equal(result.status,5,result.stderr);
     assert.match(result.stderr,/UNSAFE_PERFORMANCE_OUTPUT/);
@@ -179,6 +186,24 @@ test("benchmark CLI blocks unsafe outputs and reserves baseline updates",async t
   assert.match(unauthorized.stderr,/--update-baseline/);
   const updated=fixture.run(["--update-baseline","docs/performance/v2.1.1-baseline.json"]);
   assert.equal(updated.status,0,updated.stderr);
+  const ordinary=fixture.run(["--output","ordinary-report.json"]);
+  assert.equal(ordinary.status,0,ordinary.stderr);
+});
+
+test("baseline updates require the full lane before any benchmark run",async t => {
+  if (process.platform==="win32") return t.skip("fixture npm script is POSIX-only");
+  let calls=0;
+  assert.throws(() => parseBenchmarkOptions([
+    "--runs","3","--lane","fast","--runner-id",identity.runner_id,
+    "--update-baseline","docs/performance/v2.1.1-baseline.json",
+  ]),/baseline update requires the full lane/);
+  assert.equal(calls,0);
+  const fixture=await benchmarkFixture(t);
+  await fixture.setNpm("printf invoked > invoked\nexit 0");
+  const result=fixture.run(["--update-baseline","docs/performance/v2.1.1-baseline.json"],{lane:"fast"});
+  assert.equal(result.status,2,result.stderr);
+  assert.ok(!(await readdir(fixture.root)).includes("invoked"));
+  assert.ok(!(await readdir(join(fixture.root,"docs","performance"))).includes("v2.1.1-baseline.json"));
 });
 
 test("benchmark and budget CLIs reject duplicate and missing options",() => {
