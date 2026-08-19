@@ -33,7 +33,8 @@ function finiteNonnegative(value,label) {
 }
 
 export function median(values) {
-  if (!Array.isArray(values) || values.length!==3) {
+  denseArray(values,"median samples");
+  if (values.length!==3) {
     throw new TypeError("median requires exactly three samples");
   }
   return [...values]
@@ -56,14 +57,42 @@ function plainRecord(value,label) {
 function closedRecord(value,label,required,optional=[]) {
   const record=plainRecord(value,label);
   const allowed=new Set([...required,...optional]);
-  const keys=Object.keys(record);
+  const keys=Object.getOwnPropertyNames(record);
+  const symbols=Object.getOwnPropertySymbols(record);
+  if (symbols.length>0) throw new TypeError(`${label} has symbol property`);
   for (const key of keys) {
     if (!allowed.has(key)) throw new TypeError(`${label} has unknown property ${key}`);
+    const descriptor=Object.getOwnPropertyDescriptor(record,key);
+    if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
+      throw new TypeError(`${label} property ${key} must be enumerable data`);
+    }
   }
   for (const key of required) {
-    if (!(key in record)) throw new TypeError(`${label} requires ${key}`);
+    if (!Object.hasOwn(record,key)) throw new TypeError(`${label} requires ${key}`);
   }
   return record;
+}
+
+function denseArray(value,label) {
+  if (!Array.isArray(value) || Object.getPrototypeOf(value)!==Array.prototype) {
+    throw new TypeError(`${label} must be an array`);
+  }
+  if (Object.getOwnPropertySymbols(value).length>0) {
+    throw new TypeError(`${label} has symbol property`);
+  }
+  const names=Object.getOwnPropertyNames(value);
+  const keys=names.filter(key => key!=="length").sort((left,right) => Number(left)-Number(right));
+  if (names.length!==value.length+1 || keys.length!==value.length ||
+      keys.some((key,index) => key!==String(index))) {
+    throw new TypeError(`${label} must be dense`);
+  }
+  for (const key of keys) {
+    const descriptor=Object.getOwnPropertyDescriptor(value,key);
+    if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
+      throw new TypeError(`${label} items must be enumerable data`);
+    }
+  }
+  return value;
 }
 
 function nonemptyString(value,label) {
@@ -80,30 +109,22 @@ function nonnegativeInteger(value,label) {
 }
 
 function entryPath(argv,root) {
-  if (!Array.isArray(argv) || argv.length===0 || argv.some(value => typeof value!=="string")) {
+  denseArray(argv,"process argv");
+  if (argv.length===0 || argv.some(value => typeof value!=="string")) {
     throw new TypeError("process argv must be a nonempty string array");
-  }
-  const absolute=argv.filter(value => path.isAbsolute(value));
-  if (absolute.length===0) {
-    throw new PerformanceToolError(
-      PERFORMANCE_CODES.INCOMPLETE_PROCESS_EVIDENCE,
-      "process argv must include a repository entry path",
-    );
   }
   const canonicalRoot=path.resolve(root);
   let relativeEntry;
-  for (const value of absolute) {
+  for (const value of argv) {
+    if (!path.isAbsolute(value)) continue;
     const relative=path.relative(canonicalRoot,path.resolve(value));
     if (relative==="" || relative===".." || relative.startsWith(`..${path.sep}`) ||
         path.isAbsolute(relative)) {
-      throw new PerformanceToolError(
-        PERFORMANCE_CODES.INCOMPLETE_PROCESS_EVIDENCE,
-        `process path is outside repository: ${value}`,
-      );
+      continue;
     }
     relativeEntry=relative;
   }
-  return relativeEntry.split(path.sep).join("/");
+  return relativeEntry?.split(path.sep).join("/");
 }
 
 function validateStart(event,root,runId) {
@@ -133,7 +154,7 @@ function validateEnd(event,runId) {
 }
 
 export function summarizeProcessEvents(events,root,runId) {
-  if (!Array.isArray(events)) throw new TypeError("process events must be an array");
+  denseArray(events,"process events");
   nonemptyString(root,"repository root");
   nonemptyString(runId,"performance run ID");
   const starts=new Map();
@@ -148,7 +169,7 @@ export function summarizeProcessEvents(events,root,runId) {
           `duplicate process start for pid ${start.pid}`);
       }
       starts.set(start.pid,start);
-      entries.push(start);
+      if (start.entry_path!==undefined) entries.push(start);
     } else if (event.kind==="end") {
       const end=validateEnd(event,runId);
       if (ends.has(end.pid) || !starts.has(end.pid)) {
@@ -259,13 +280,12 @@ function validateSample(value,index) {
   if (sample.peak_process_count>sample.fresh_process_count) {
     throw new TypeError(`sample ${index+1} peak_process_count cannot exceed fresh_process_count`);
   }
-  if (!Array.isArray(sample.duplicates) || !Array.isArray(sample.slowest_files) ||
-      !Array.isArray(sample.slowest_tests)) {
-    throw new TypeError(`sample ${index+1} evidence collections must be arrays`);
-  }
-  sample.duplicates.forEach((row,rowIndex) => validateDuplicate(row,`sample ${index+1} duplicate ${rowIndex+1}`));
-  sample.slowest_files.forEach((row,rowIndex) => validateDurationRow(row,`sample ${index+1} slow file ${rowIndex+1}`));
-  sample.slowest_tests.forEach((row,rowIndex) => validateDurationRow(row,`sample ${index+1} slow test ${rowIndex+1}`));
+  const duplicates=denseArray(sample.duplicates,`sample ${index+1} duplicates`);
+  const slowestFiles=denseArray(sample.slowest_files,`sample ${index+1} slowest_files`);
+  const slowestTests=denseArray(sample.slowest_tests,`sample ${index+1} slowest_tests`);
+  duplicates.forEach((row,rowIndex) => validateDuplicate(row,`sample ${index+1} duplicate ${rowIndex+1}`));
+  slowestFiles.forEach((row,rowIndex) => validateDurationRow(row,`sample ${index+1} slow file ${rowIndex+1}`));
+  slowestTests.forEach((row,rowIndex) => validateDurationRow(row,`sample ${index+1} slow test ${rowIndex+1}`));
   return sample;
 }
 
@@ -273,7 +293,8 @@ function validateReportInput(input) {
   const record=closedRecord(input,"performance report input",["lane","identity","samples"]);
   nonemptyString(record.lane,"performance lane");
   validateIdentity(record.identity);
-  if (!Array.isArray(record.samples) || record.samples.length!==3) {
+  denseArray(record.samples,"performance samples");
+  if (record.samples.length!==3) {
     throw new TypeError("performance report requires exactly three samples");
   }
   record.samples.forEach(validateSample);
@@ -314,13 +335,20 @@ export function canonicalPerformanceJson(report) {
 }
 
 function validateBudgetDocument(document,label,expectedVersion,requiresBudgets) {
-  const record=closedRecord(document,label,["schema_version","identity","medians"],[
-    "budgets","lane","samples",
-  ]);
+  const isBaseline=expectedVersion===PERFORMANCE_BASELINE_VERSION;
+  const record=closedRecord(document,label,["schema_version","identity","medians"],isBaseline ?
+    ["budgets","historical"] : ["budgets","lane","samples"]);
   if (record.schema_version!==expectedVersion) {
     throw new TypeError(`${label} has unexpected schema_version`);
   }
   validateIdentity(record.identity);
+  if (isBaseline) {
+    const historical=closedRecord(record.historical,`${label} historical`,["full_wall_ms"]);
+    finiteNonnegative(historical.full_wall_ms,`${label} historical full_wall_ms`);
+    if (historical.full_wall_ms!==HISTORICAL_FULL_WALL_MS) {
+      throw new TypeError(`${label} historical full_wall_ms must match the locked baseline`);
+    }
+  }
   const medians=closedRecord(record.medians,`${label} medians`,["wall_ms"],[
     "user_cpu_ms","system_cpu_ms","fresh_process_count","peak_process_count",
   ]);
@@ -343,6 +371,8 @@ function validateBudgetDocument(document,label,expectedVersion,requiresBudgets) 
     if (canonicalJson(normalized.medians)!==canonicalJson(record.medians)) {
       throw new TypeError(`${label} medians do not match samples`);
     }
+  } else if (!isBaseline) {
+    throw new TypeError(`${label} requires lane and samples`);
   }
   return record;
 }
@@ -360,6 +390,9 @@ export function comparePerformanceBudget(baseline,candidate,lane) {
     candidate,"performance candidate",PERFORMANCE_REPORT_VERSION,false,
   );
   if (lane!=="fast" && lane!=="full") throw new TypeError("performance lane must be fast or full");
+  if (candidateReport.lane!==lane) {
+    throw new TypeError("performance candidate lane must match requested lane");
+  }
   const limit_ms=lane==="fast" ? baselineReport.budgets.fast_max_wall_ms :
     baselineReport.budgets.full_max_wall_ms;
   const actual_ms=candidateReport.medians.wall_ms;

@@ -53,6 +53,21 @@ test("process events produce counts, CPU totals, and duplicates",() => {
   assert.deepEqual(summary.duplicates,[{entry_path:"test/a.test.js",count:2}]);
 });
 
+test("process summaries retain external processes but duplicate only repository tests",() => {
+  const summary=summarizeProcessEvents([
+    {kind:"start",run_id:"run-1",pid:10,at_ms:1000,argv:["/usr/local/bin/node","/repo/test/a.test.js"]},
+    {kind:"end",run_id:"run-1",pid:10,at_ms:1030,user_cpu_us:10000,system_cpu_us:5000},
+    {kind:"start",run_id:"run-1",pid:11,at_ms:1010,argv:["/usr/bin/git","status"]},
+    {kind:"end",run_id:"run-1",pid:11,at_ms:1050,user_cpu_us:2000,system_cpu_us:1000},
+    {kind:"start",run_id:"run-1",pid:12,at_ms:1020,argv:["/usr/local/bin/node","/repo/test/a.test.js"]},
+    {kind:"end",run_id:"run-1",pid:12,at_ms:1060,user_cpu_us:20000,system_cpu_us:7000},
+  ],"/repo","run-1");
+  assert.equal(summary.fresh_process_count,3);
+  assert.equal(summary.user_cpu_ms,32);
+  assert.equal(summary.system_cpu_ms,13);
+  assert.deepEqual(summary.duplicates,[{entry_path:"test/a.test.js",count:2}]);
+});
+
 test("report requires three compatible successful samples",() => {
   const report=createPerformanceReport({
     lane:"full",identity,
@@ -67,16 +82,21 @@ test("report requires three compatible successful samples",() => {
 test("full budget has stable passing and failing results",() => {
   const baseline={
     schema_version:"toss-test-performance-baseline.v1",identity,
+    historical:{full_wall_ms:134960},
     medians:{wall_ms:140000},
     budgets:{fast_max_wall_ms:15000,full_max_wall_ms:94472},
   };
-  const candidate={...baseline,schema_version:"toss-test-performance-report.v1",medians:{wall_ms:95000}};
+  const candidate=createPerformanceReport({
+    lane:"full",identity,
+    samples:[sample(95000),sample(95000),sample(95000)],
+  });
   assert.equal(comparePerformanceBudget(baseline,candidate,"full").code,"FULL_WALL_BUDGET_EXCEEDED");
 });
 
 test("budget comparison accepts a report produced by the report model",() => {
   const baseline={
     schema_version:"toss-test-performance-baseline.v1",identity,
+    historical:{full_wall_ms:134960},
     medians:{wall_ms:140000},
     budgets:{fast_max_wall_ms:15000,full_max_wall_ms:94472},
   };
@@ -87,10 +107,53 @@ test("budget comparison accepts a report produced by the report model",() => {
   assert.equal(comparePerformanceBudget(baseline,candidate,"full").code,"PERFORMANCE_BUDGET_OK");
 });
 
+test("budget comparison accepts a complete historical baseline",() => {
+  const baseline={
+    schema_version:"toss-test-performance-baseline.v1",identity,
+    historical:{full_wall_ms:134960},
+    medians:{wall_ms:140000},
+    budgets:{fast_max_wall_ms:15000,full_max_wall_ms:94472},
+  };
+  const candidate=createPerformanceReport({
+    lane:"full",identity,
+    samples:[sample(94000),sample(93000),sample(92000)],
+  });
+  assert.equal(comparePerformanceBudget(baseline,candidate,"full").code,"PERFORMANCE_BUDGET_OK");
+});
+
+test("budget comparison rejects a candidate report from another lane",() => {
+  const baseline={
+    schema_version:"toss-test-performance-baseline.v1",identity,
+    historical:{full_wall_ms:134960},
+    medians:{wall_ms:140000},
+    budgets:{fast_max_wall_ms:15000,full_max_wall_ms:94472},
+  };
+  const candidate=createPerformanceReport({
+    lane:"fast",identity,
+    samples:[sample(1000),sample(1100),sample(1200)],
+  });
+  assert.throws(() => comparePerformanceBudget(baseline,candidate,"full"),/candidate lane/);
+});
+
 test("canonical report serialization rejects unknown report fields",() => {
   const report=createPerformanceReport({
     lane:"fast",identity,
     samples:[sample(1000),sample(1100),sample(1200)],
   });
   assert.throws(() => canonicalPerformanceJson({...report,extra:true}),/unknown property/);
+});
+
+test("report creation rejects hidden and symbol input properties",() => {
+  const hidden={lane:"fast",identity,samples:[sample(1000),sample(1100),sample(1200)]};
+  Object.defineProperty(hidden,"hidden",{value:true});
+  assert.throws(() => createPerformanceReport(hidden),/unknown property/);
+  const symbolic={lane:"fast",identity,samples:[sample(1000),sample(1100),sample(1200)]};
+  symbolic[Symbol("hidden")]=true;
+  assert.throws(() => createPerformanceReport(symbolic),/symbol property/);
+});
+
+test("report creation rejects sparse JSON arrays before sample validation",() => {
+  const samples=[sample(1000),sample(1100),sample(1200)];
+  delete samples[1];
+  assert.throws(() => createPerformanceReport({lane:"fast",identity,samples}),/dense/);
 });
