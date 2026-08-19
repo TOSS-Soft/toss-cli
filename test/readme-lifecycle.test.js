@@ -11,7 +11,7 @@ import {renderHelp} from "../src/commands/options.js";
 const root=resolve(new URL("..",import.meta.url).pathname);
 const cli=resolve(root,"bin","toss.js");
 const lifecycleFamilies=new Set([
-  "project","feature","decisions","architecture","plan","audit","readiness","issues",
+  "project","feature","design","decisions","architecture","plan","audit","readiness","issues",
   "trace","artifacts","validate",
 ]);
 const shellLanguages=new Set(["bash","console","sh","shell"]);
