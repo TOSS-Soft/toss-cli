@@ -6,18 +6,19 @@ const runId=process.env.TOSS_PERFORMANCE_RUN_ID;
 
 if (logPath && runId) {
   const at=() => performance.timeOrigin+performance.now();
+  const recordBytes=event => Buffer.byteLength(`${JSON.stringify(event)}\n`,"utf8");
   const append=event => {
     const text=JSON.stringify(event);
-    if (Buffer.byteLength(text,"utf8")>=4096) {
+    if (Buffer.byteLength(`${text}\n`,"utf8")>=4096) {
       throw new RangeError("performance process event exceeds 4095 bytes");
     }
     appendFileSync(logPath,`${text}\n`,{encoding:"utf8",flag:"a"});
   };
   const start={kind:"start",run_id:runId,pid:process.pid,at_ms:at(),argv:[...process.argv]};
-  while (Buffer.byteLength(JSON.stringify(start),"utf8")>=4096 && start.argv.length>1) {
+  while (recordBytes(start)>=4096 && start.argv.length>1) {
     start.argv.pop();
   }
-  while (Buffer.byteLength(JSON.stringify(start),"utf8")>=4096 && start.argv[0].length>0) {
+  while (recordBytes(start)>=4096 && start.argv[0].length>0) {
     start.argv[0]=start.argv[0].slice(0,Math.floor(start.argv[0].length/2));
   }
   append(start);

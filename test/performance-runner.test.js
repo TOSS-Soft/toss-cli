@@ -16,6 +16,22 @@ function event(value) {
   return `${JSON.stringify(value)}\n`;
 }
 
+async function probeRecords(argumentsToProbe=[]) {
+  const scratch=await mkdtemp(join(tmpdir(),"toss-performance-probe-"));
+  const log=join(scratch,"processes.jsonl");
+  const probe=new URL("../scripts/performance/process-probe.mjs",import.meta.url);
+  try {
+    const result=spawnSync(process.execPath,[`--import=${probe.href}`,"-e","",...argumentsToProbe],{
+      cwd:root,encoding:"utf8",
+      env:{...process.env,TOSS_PERFORMANCE_PROCESS_LOG:log,TOSS_PERFORMANCE_RUN_ID:"bounded"},
+    });
+    assert.equal(result.status,0);
+    return (await readFile(log,"utf8")).trim().split("\n");
+  } finally {
+    await rm(scratch,{recursive:true,force:true});
+  }
+}
+
 test("one run captures the inherited Node process tree",async () => {
   const sample=await runSuiteOnce({
     command:process.execPath,args:[passing],cwd:root,runId:"fixture-pass",env:{},
@@ -59,6 +75,15 @@ test("process logs reject malformed JSON and mixed run identities",() => {
   );
 });
 
+test("process logs reject valid JSON with invalid event schemas",() => {
+  for (const invalidEvent of [null,{kind:"start"},{kind:"unknown"}]) {
+    assert.throws(
+      () => parseProcessLog(event(invalidEvent),root,"expected"),
+      error => error.code==="INVALID_PROCESS_LOG",
+    );
+  }
+});
+
 test("process logs reject duplicate and incomplete evidence",() => {
   const start={kind:"start",run_id:"expected",pid:1,at_ms:1,argv:[passing]};
   assert.throws(
@@ -86,20 +111,16 @@ test("outside tool processes count without becoming test entries",() => {
 });
 
 test("process probe writes bounded JSONL records for large Unicode arguments",async () => {
-  const scratch=await mkdtemp(join(tmpdir(),"toss-performance-probe-"));
-  const log=join(scratch,"processes.jsonl");
-  const probe=new URL("../scripts/performance/process-probe.mjs",import.meta.url);
   const argumentsToProbe=Array.from({length:6},() => "🙂".repeat(512));
-  try {
-    const result=spawnSync(process.execPath,[`--import=${probe.href}`,"-e","",...argumentsToProbe],{
-      cwd:root,encoding:"utf8",
-      env:{...process.env,TOSS_PERFORMANCE_PROCESS_LOG:log,TOSS_PERFORMANCE_RUN_ID:"bounded"},
-    });
-    assert.equal(result.status,0);
-    const lines=(await readFile(log,"utf8")).trim().split("\n");
-    assert.ok(lines.length>=2);
-    assert.ok(lines.every(line => Buffer.byteLength(line,"utf8")<4096));
-  } finally {
-    await rm(scratch,{recursive:true,force:true});
-  }
+  const lines=await probeRecords(argumentsToProbe);
+  assert.ok(lines.length>=2);
+  assert.ok(lines.every(line => Buffer.byteLength(line,"utf8")<4096));
+});
+
+test("process probe keeps the terminating newline below the record limit",async () => {
+  const baseline=JSON.parse((await probeRecords())[0]);
+  const paddingLength=4095-Buffer.byteLength(JSON.stringify(baseline),"utf8")-3;
+  assert.ok(paddingLength>0);
+  const lines=await probeRecords(["x".repeat(paddingLength)]);
+  assert.ok(lines.every(line => Buffer.byteLength(`${line}\n`,"utf8")<4096));
 });

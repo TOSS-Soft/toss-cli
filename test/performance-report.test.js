@@ -78,6 +78,22 @@ test("process summaries expose only repository entry paths for slow-file analysi
   assert.deepEqual(summary.entries,[{name:"test/a.test.js",duration_ms:30,status:"pass"}]);
 });
 
+test("process summaries use the Node entry point instead of later repository arguments",() => {
+  const summary=summarizeProcessEvents([
+    {kind:"start",run_id:"run-1",pid:10,at_ms:1000,
+      argv:[process.execPath,"/opt/npm/npm-cli.js","/repo/test/a.test.js"]},
+    {kind:"end",run_id:"run-1",pid:10,at_ms:1030,user_cpu_us:10000,system_cpu_us:5000},
+    {kind:"start",run_id:"run-1",pid:11,at_ms:1010,
+      argv:[process.execPath,"/repo/test/a.test.js"]},
+    {kind:"end",run_id:"run-1",pid:11,at_ms:1050,user_cpu_us:20000,system_cpu_us:7000},
+  ],"/repo","run-1");
+  assert.equal(summary.fresh_process_count,2);
+  assert.equal(summary.user_cpu_ms,30);
+  assert.equal(summary.system_cpu_ms,12);
+  assert.deepEqual(summary.entries,[{name:"test/a.test.js",duration_ms:40,status:"pass"}]);
+  assert.deepEqual(summary.duplicates,[]);
+});
+
 test("report requires three compatible successful samples",() => {
   const report=createPerformanceReport({
     lane:"full",identity,

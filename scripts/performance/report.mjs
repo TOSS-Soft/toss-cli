@@ -115,17 +115,14 @@ function entryPath(argv,root) {
     throw new TypeError("process argv must be a nonempty string array");
   }
   const canonicalRoot=path.resolve(root);
-  let relativeEntry;
-  for (const value of argv) {
-    if (!path.isAbsolute(value)) continue;
-    const relative=path.relative(canonicalRoot,path.resolve(value));
-    if (relative==="" || relative===".." || relative.startsWith(`..${path.sep}`) ||
-        path.isAbsolute(relative)) {
-      continue;
-    }
-    relativeEntry=relative;
+  const entry=argv.length===1 ? argv[0] : argv[1];
+  if (!path.isAbsolute(entry)) return undefined;
+  const relative=path.relative(canonicalRoot,path.resolve(entry));
+  if (relative==="" || relative===".." || relative.startsWith(`..${path.sep}`) ||
+      path.isAbsolute(relative)) {
+    return undefined;
   }
-  return relativeEntry?.split(path.sep).join("/");
+  return relative.split(path.sep).join("/");
 }
 
 function validateStart(event,root,runId) {

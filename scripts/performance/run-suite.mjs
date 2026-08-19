@@ -38,7 +38,13 @@ export function parseProcessLog(text,root,runId) {
     throw new PerformanceToolError(PERFORMANCE_CODES.INVALID_PROCESS_LOG,
       "invalid process log JSONL");
   }
-  return summarizeProcessEvents(events,root,runId);
+  try {
+    return summarizeProcessEvents(events,root,runId);
+  } catch (error) {
+    if (error instanceof PerformanceToolError) throw error;
+    throw new PerformanceToolError(PERFORMANCE_CODES.INVALID_PROCESS_LOG,
+      "invalid process log event");
+  }
 }
 
 export async function runSuiteOnce({command,args,cwd,runId,env={}}) {
