@@ -33,7 +33,8 @@
       "test/orchestration-store-hardening.test.js",
       "test/performance-runner.test.js",
       "test/state-machine-trust-boundary.test.js",
-      "test/state-machine.test.js"
+      "test/state-machine.test.js",
+      "test/test-runner.test.js"
     ],
     "e2e": [
       "scripts/create-atomicity-test.js",
