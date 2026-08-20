@@ -1,5 +1,6 @@
-import {lstat,readdir} from "node:fs/promises";
-import {join} from "node:path";
+import {lstat,readFile,readdir} from "node:fs/promises";
+import {join,resolve} from "node:path";
+import {fileURLToPath} from "node:url";
 
 export const TEST_MANIFEST_VERSION="toss-test-manifest.v1";
 export const OWNERSHIP_LANES=Object.freeze([
@@ -226,4 +227,24 @@ export function validateTestManifest(manifest,{eligibleEntries}={}) {
     concurrency:root.concurrency.value,
     lanes:Object.freeze(normalizedLanes),
   });
+}
+
+async function verifyCheckedInManifest() {
+  const manifest=JSON.parse(await readFile(
+    new URL("./test-manifest.json",import.meta.url),"utf8",
+  ));
+  const root=fileURLToPath(new URL("..",import.meta.url));
+  validateTestManifest(manifest,{
+    eligibleEntries:await discoverEligibleTestEntries(root),
+  });
+}
+
+if (process.argv[1] && resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
+  try {
+    await verifyCheckedInManifest();
+    console.log("Test manifest integrity: PASS");
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode=1;
+  }
 }

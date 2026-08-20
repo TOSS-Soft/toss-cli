@@ -1,14 +1,21 @@
 import assert from "node:assert/strict";
-import {mkdir,mkdtemp,rm,symlink,writeFile} from "node:fs/promises";
+import {execFile as execFileCallback} from "node:child_process";
+import {mkdir,mkdtemp,readFile,rm,symlink,writeFile} from "node:fs/promises";
 import {join} from "node:path";
 import test from "node:test";
 import {tmpdir} from "node:os";
+import {fileURLToPath} from "node:url";
+import {promisify} from "node:util";
 
 import {
   discoverEligibleTestEntries,
   selectTestEntries,
   validateTestManifest,
 } from "../scripts/test-manifest.mjs";
+
+const root=fileURLToPath(new URL("..",import.meta.url));
+const manifestUrl=new URL("../scripts/test-manifest.json",import.meta.url);
+const execFile=promisify(execFileCallback);
 
 const eligible=["scripts/a-test.js","test/a.test.js","test/b.test.js"];
 const valid={
@@ -244,5 +251,110 @@ test("manifest rejects a missing regular test file",() => {
   assert.throws(
     () => validateTestManifest(manifest,{eligibleEntries:eligible}),
     /unknown entry.*test\/missing\.test\.js/i,
+  );
+});
+
+async function readCheckedInManifest() {
+  return JSON.parse(await readFile(manifestUrl,"utf8"));
+}
+
+async function validateCheckedInManifest(manifest) {
+  if (manifest===undefined) {
+    manifest=await readCheckedInManifest();
+  }
+  return validateTestManifest(manifest,{
+    eligibleEntries:await discoverEligibleTestEntries(root),
+  });
+}
+
+test("the checked-in inventory owns every executable entry exactly once",async () => {
+  const manifest=await readCheckedInManifest();
+  const eligibleEntries=await discoverEligibleTestEntries(root);
+  const normalized=validateTestManifest(manifest,{eligibleEntries});
+  const selected=selectTestEntries(normalized,"full");
+  assert.equal(selected.length,eligibleEntries.length);
+  assert.equal(new Set(selected).size,eligibleEntries.length);
+  assert.equal(selected.some(entry => entry.startsWith("test/support/") || entry.startsWith("test/fixtures/")),false);
+});
+
+test("the checked-in inventory rejects a removed real entry",async () => {
+  const manifest=await readCheckedInManifest();
+  manifest.lanes.fast.shift();
+  await assert.rejects(
+    () => validateCheckedInManifest(manifest),
+    /missing owner.*test\/acp-v1\.test\.js/i,
+  );
+});
+
+test("the checked-in inventory rejects a real entry with a second owner",async () => {
+  const manifest=await readCheckedInManifest();
+  manifest.lanes.integration.push("test/acp-v1.test.js");
+  manifest.lanes.integration.sort();
+  await assert.rejects(
+    () => validateCheckedInManifest(manifest),
+    /multiple owners.*test\/acp-v1\.test\.js/i,
+  );
+});
+
+test("the checked-in inventory rejects a support path",async () => {
+  const manifest=await readCheckedInManifest();
+  manifest.lanes.fast.push("test/support/helper.test.js");
+  manifest.lanes.fast.sort();
+  await assert.rejects(
+    () => validateCheckedInManifest(manifest),
+    /unsafe test entry.*test\/support\/helper\.test\.js/i,
+  );
+});
+
+test("the checked-in inventory rejects a nonexistent top-level test",async () => {
+  const manifest=await readCheckedInManifest();
+  manifest.lanes.fast.push("test/not-in-repository.test.js");
+  manifest.lanes.fast.sort();
+  await assert.rejects(
+    () => validateCheckedInManifest(manifest),
+    /unknown entry.*test\/not-in-repository\.test\.js/i,
+  );
+});
+
+test("the checked-in inventory rejects a reordered lane",async () => {
+  const manifest=await readCheckedInManifest();
+  manifest.lanes.fast.reverse();
+  await assert.rejects(
+    () => validateCheckedInManifest(manifest),
+    /stable ASCII order/i,
+  );
+});
+
+test("the checked-in inventory rejects non-explicit concurrency",async () => {
+  for (const concurrency of [0,5,1.5,"ambient","automatic"]) {
+    const manifest=await readCheckedInManifest();
+    manifest.concurrency=concurrency;
+    await assert.rejects(
+      () => validateCheckedInManifest(manifest),
+      /manifest concurrency must be an integer from 1 to 4/i,
+    );
+  }
+});
+
+test("the manifest integrity CLI reports a passing checked-in inventory",async () => {
+  const result=await execFile(process.execPath,["./scripts/test-manifest.mjs"],{cwd:root});
+  assert.equal(result.stdout,"Test manifest integrity: PASS\n");
+  assert.equal(result.stderr,"");
+});
+
+test("the manifest integrity CLI returns the validation diagnostic",async t => {
+  const original=await readFile(manifestUrl,"utf8");
+  t.after(() => writeFile(manifestUrl,original,"utf8"));
+  const manifest=JSON.parse(original);
+  manifest.concurrency=0;
+  await writeFile(manifestUrl,`${JSON.stringify(manifest,null,2)}\n`,"utf8");
+  await assert.rejects(
+    () => execFile(process.execPath,["./scripts/test-manifest.mjs"],{cwd:root}),
+    error => {
+      assert.equal(error.code,1);
+      assert.equal(error.stdout,"");
+      assert.equal(error.stderr,"manifest concurrency must be an integer from 1 to 4\n");
+      return true;
+    },
   );
 });
