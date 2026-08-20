@@ -254,7 +254,11 @@ async function runCli(argumentsToRunner) {
   process.exitCode=result.exit_status;
 }
 
-if (process.argv[1] && resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
+if (
+  process.argv[1] &&
+  resolve(process.argv[1])===fileURLToPath(import.meta.url) &&
+  process.env.NODE_TEST_CONTEXT===undefined
+) {
   try {
     await runCli(process.argv.slice(2));
   } catch (error) {

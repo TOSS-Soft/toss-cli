@@ -9,9 +9,12 @@ import {executeTestEntry,runTestLane} from "../scripts/test-runner.mjs";
 const execFile=promisify(execFileCallback);
 const root=fileURLToPath(new URL("..",import.meta.url));
 const runner=fileURLToPath(new URL("../scripts/test-runner.mjs",import.meta.url));
+const failingFixture=fileURLToPath(new URL(
+  "./fixtures/test-runner/failing-entry.mjs",import.meta.url,
+));
 
-function entryEnvironment() {
-  const env={...process.env};
+function entryEnvironment(overrides={}) {
+  const env={...process.env,...overrides};
   delete env.NODE_TEST_CONTEXT;
   return env;
 }
@@ -218,7 +221,10 @@ test("executeTestEntry runs only one explicit passing platform path",async () =>
 
 test("executeTestEntry retains a single explicit failing child result",async () => {
   const entry="test/fixtures/test-runner/failing-entry.mjs";
-  const result=await executeTestEntry(entry,{cwd:root,env:entryEnvironment()});
+  const result=await executeTestEntry(entry,{
+    cwd:root,
+    env:entryEnvironment({TOSS_TEST_RUNNER_FIXTURE_MODE:"intentional-failure"}),
+  });
   assert.equal(result.entry,entry);
   assert.equal(result.outcome,"failed");
   assert.equal(Number.isInteger(result.exit_status),true);
@@ -229,6 +235,25 @@ test("executeTestEntry retains a single explicit failing child result",async () 
   assert.match(`${result.stdout}${result.stderr}`,/FAILING_STDERR_MARKER/);
 });
 
+test("the runner module is inert when loaded as a Node test entry",async () => {
+  const result=await execFile(process.execPath,[
+    "--test","--test-concurrency=1",runner,
+  ],{cwd:root,env:entryEnvironment()});
+  assert.equal(result.stderr,"");
+  assert.match(result.stdout,/pass 1/i);
+  assert.doesNotMatch(result.stdout,/requires exactly one lane/i);
+});
+
+test("the intentional failure fixture is inert without its explicit signal",async () => {
+  const result=await execFile(process.execPath,[
+    "--test","--test-concurrency=1",failingFixture,
+  ],{cwd:root,env:entryEnvironment()});
+  assert.equal(result.stderr,"");
+  assert.match(result.stdout,/pass 1/i);
+  assert.doesNotMatch(result.stdout,/intentional runner fixture failure/i);
+  assert.doesNotMatch(result.stdout,/FAILING_(?:STDOUT|STDERR)_MARKER/);
+});
+
 for (const argumentsToRunner of [
   [],
   ["fast","integration"],
@@ -237,7 +262,9 @@ for (const argumentsToRunner of [
 ]) {
   test(`runner CLI rejects closed arguments ${JSON.stringify(argumentsToRunner)}`,async () => {
     await assert.rejects(
-      () => execFile(process.execPath,[runner,...argumentsToRunner],{cwd:root}),
+      () => execFile(process.execPath,[runner,...argumentsToRunner],{
+        cwd:root,env:entryEnvironment(),
+      }),
       error => {
         assert.equal(error.code,1);
         assert.equal(error.stdout,"");
