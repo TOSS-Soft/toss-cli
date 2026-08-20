@@ -409,6 +409,15 @@ function matchingDecision(supplied,derived) {
   return normalized;
 }
 
+function requirePersistableSelectionEvidence(evidence) {
+  if (evidence.standalone_focused_median_ms!==null ||
+      evidence.standalone_drift_verified) {
+    throw new TypeError(
+      "validator report cannot retain standalone eligibility evidence",
+    );
+  }
+}
+
 export function createValidatorColdStartReport(value) {
   const input=closedRecord(value,"validator report input",[
     "identity","probes","strategies","focused_gate_cli","evidence",
@@ -418,6 +427,7 @@ export function createValidatorColdStartReport(value) {
   const strategies=normalizeStrategies(input.strategies);
   const focusedGate=normalizeFocusedGate(input.focused_gate_cli);
   const evidence=normalizeSelectionEvidence(input.evidence,{includeDemand:false});
+  requirePersistableSelectionEvidence(evidence);
   const decision=selectNormalizedStrategy({
     demand_focused_median_ms:focusedGate.after_median_ms,
     ...evidence,
@@ -445,6 +455,7 @@ export function validateValidatorColdStartReport(value) {
   const strategies=normalizeStrategies(report.strategies,{verifyMedians:true});
   const focusedGate=normalizeFocusedGate(report.focused_gate_cli,{verifyDerived:true});
   const suppliedDecision=normalizeDecision(report.decision);
+  requirePersistableSelectionEvidence(suppliedDecision);
   const derivedDecision=selectNormalizedStrategy({
     demand_focused_median_ms:focusedGate.after_median_ms,
     standalone_deterministic:suppliedDecision.standalone_deterministic,

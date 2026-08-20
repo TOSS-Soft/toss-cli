@@ -1032,6 +1032,52 @@ test("validator report creation rejects a supplied decision that is not derived"
   );
 });
 
+test("validator report validation rejects a coherent standalone decision without retained proof",() => {
+  const report=createValidatorColdStartReport(validatorReportInput());
+  report.decision={
+    selected:"standalone-experiment",
+    rejected:["demand-driven","eager-reference"],
+    standalone_deterministic:true,
+    standalone_drift_verified:true,
+    standalone_equivalent:true,
+    standalone_focused_median_ms:7000,
+    reason_code:null,
+  };
+  assert.throws(
+    () => validateValidatorColdStartReport(report),
+    /cannot retain standalone eligibility evidence/i,
+  );
+});
+
+test("validator report construction rejects standalone evidence its schema cannot retain",() => {
+  const cases=[
+    {
+      name:"focused samples",
+      mutate:evidence => { evidence.standalone_focused_samples_ms=[6900,7000,7100]; },
+    },
+    {
+      name:"all-schema drift claim",
+      mutate:evidence => { evidence.standalone_drift_verified=true; },
+    },
+    {
+      name:"coherent standalone eligibility",
+      mutate:evidence => {
+        evidence.standalone_focused_samples_ms=[6900,7000,7100];
+        evidence.standalone_drift_verified=true;
+      },
+    },
+  ];
+  for (const {name,mutate} of cases) {
+    const input=validatorReportInput();
+    mutate(input.evidence);
+    assert.throws(
+      () => createValidatorColdStartReport(input),
+      /cannot retain standalone eligibility evidence/i,
+      name,
+    );
+  }
+});
+
 test("validator strategy selection is fail-closed with stable single-condition reasons",() => {
   const qualifying={
     demand_focused_median_ms:100,
