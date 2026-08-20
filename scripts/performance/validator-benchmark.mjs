@@ -2,6 +2,7 @@ import {execFile} from "node:child_process";
 import {createHash,randomBytes} from "node:crypto";
 import {lstat,readFile,realpath,rename,rm,writeFile} from "node:fs/promises";
 import {arch,platform} from "node:os";
+import * as nativePath from "node:path";
 import {dirname,relative,resolve,sep} from "node:path";
 import {fileURLToPath} from "node:url";
 import {promisify} from "node:util";
@@ -335,10 +336,13 @@ export function parseValidatorBenchmarkOptions(argv) {
   return options;
 }
 
-function contained(candidate,root,{allowRoot=false}={}) {
-  const path=relative(root,candidate);
+export function isPathContained(candidate,root,{
+  allowRoot=false,pathImplementation=nativePath,
+}={}) {
+  const path=pathImplementation.relative(root,candidate);
   return (allowRoot && path==="") ||
-    (path!=="" && path!==".." && !path.startsWith(`..${sep}`) && !path.includes("\0"));
+    (path!=="" && path!==".." && !pathImplementation.isAbsolute(path) &&
+      !path.startsWith(`..${pathImplementation.sep}`) && !path.includes("\0"));
 }
 
 async function rejectSymlinkPath(destination,root) {
@@ -361,15 +365,12 @@ async function rejectSymlinkPath(destination,root) {
 }
 
 async function tracked(destination,root) {
-  try {
-    await executeFile("git",[
-      "ls-files","--error-unmatch","--",relative(root,destination),
-    ],{cwd:root,encoding:"utf8",shell:false});
-    return true;
-  } catch (error) {
-    if (error?.code===1) return false;
-    throw error;
-  }
+  const entry=relative(root,destination).split(sep).join("/").toLowerCase();
+  const {stdout}=await executeFile("git",[
+    "ls-files","-z","--full-name","--",".superpowers",
+  ],{cwd:root,encoding:"utf8",shell:false});
+  return stdout.split("\0").some(candidate =>
+    candidate!=="" && candidate.toLowerCase()===entry);
 }
 
 async function safeOutputDestination(path,root) {
@@ -378,16 +379,27 @@ async function safeOutputDestination(path,root) {
   const canonicalRoot=await realpath(root);
   const superpowers=resolve(canonicalRoot,".superpowers");
   const destination=resolve(canonicalRoot,path);
-  if (!contained(destination,superpowers,{allowRoot:false})) {
+  if (!isPathContained(destination,superpowers,{allowRoot:false})) {
     throw new ValidatorBenchmarkOutputError(
       "validator report output must be below repository .superpowers",
     );
   }
-  await rejectSymlinkPath(destination,canonicalRoot);
   const parent=dirname(destination);
-  const canonicalParent=await realpath(parent);
+  let canonicalParent;
+  try {
+    await rejectSymlinkPath(destination,canonicalRoot);
+    canonicalParent=await realpath(parent);
+  } catch (error) {
+    if (error instanceof ValidatorBenchmarkOutputError) throw error;
+    if (error?.code==="ENOENT" || error?.code==="ENOTDIR") {
+      throw new ValidatorBenchmarkOutputError(
+        "validator report parent must be an existing directory",
+      );
+    }
+    throw error;
+  }
   const canonicalSuperpowers=await realpath(superpowers);
-  if (!contained(canonicalParent,canonicalSuperpowers,{allowRoot:true})) {
+  if (!isPathContained(canonicalParent,canonicalSuperpowers,{allowRoot:true})) {
     throw new ValidatorBenchmarkOutputError(
       "validator report output must remain below repository .superpowers",
     );

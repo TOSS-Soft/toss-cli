@@ -3,14 +3,16 @@ import {execFileSync,spawnSync} from "node:child_process";
 import {readFileSync} from "node:fs";
 import {chmod,mkdir,mkdtemp,readdir,realpath,rm,symlink,writeFile} from "node:fs/promises";
 import {tmpdir} from "node:os";
-import {join} from "node:path";
+import {join,win32} from "node:path";
 import test from "node:test";
 import {fileURLToPath} from "node:url";
 
 import {
   createBaseline,parseBenchmarkOptions,renderBenchmarkOutput,runBenchmark,writeCanonicalReport,
 } from "../scripts/performance/benchmark.mjs";
-import {writeValidatorBenchmarkReport} from "../scripts/performance/validator-benchmark.mjs";
+import * as validatorBenchmark from "../scripts/performance/validator-benchmark.mjs";
+
+const {writeValidatorBenchmarkReport}=validatorBenchmark;
 
 const identity={
   commit:"4472175eac91275cafab2993f68722febdb9eb59",
@@ -54,6 +56,18 @@ function baselineDocument({walls,fullLimit=100,exactIdentity,exactCommand}={}) {
 
 const budgetCli=fileURLToPath(new URL("../scripts/performance/budget.mjs",import.meta.url));
 const benchmarkCli=fileURLToPath(new URL("../scripts/performance/benchmark.mjs",import.meta.url));
+const validatorBenchmarkCli=fileURLToPath(
+  new URL("../scripts/performance/validator-benchmark.mjs",import.meta.url),
+);
+
+test("validator output containment rejects Win32 cross-volume paths",() => {
+  const candidate="D:\\evidence\\validator-report.json";
+  const root="C:\\repo\\.superpowers";
+  assert.equal(
+    validatorBenchmark.isPathContained(candidate,root,{pathImplementation:win32}),
+    false,
+  );
+});
 
 test("package exposes opt-in performance commands without weakening full verification",() => {
   const pkg=JSON.parse(readFileSync(new URL("../package.json",import.meta.url),"utf8"));
@@ -80,11 +94,13 @@ test("validator benchmark output is restricted to safe untracked .superpowers fi
   await mkdir(join(root,"docs","performance"),{recursive:true});
   await writeFile(join(root,"package-lock.json"),"{}\n");
   await writeFile(join(root,".superpowers","tracked.json"),"tracked\n");
+  await writeFile(join(root,".superpowers","Tracked [final] $.json"),"special tracked\n");
   await writeFile(join(root,"docs","performance","v2.1.1-baseline.json"),"protected\n");
   execFileSync("git",["init","--quiet"],{cwd:root});
   execFileSync("git",["config","user.email","test@example.invalid"],{cwd:root});
   execFileSync("git",["config","user.name","Test"],{cwd:root});
   execFileSync("git",["add","package-lock.json",".superpowers/tracked.json",
+    ".superpowers/Tracked [final] $.json",
     "docs/performance/v2.1.1-baseline.json"],{cwd:root});
   execFileSync("git",["commit","--quiet","-m","fixture"],{cwd:root});
   const unsafe=[
@@ -92,6 +108,8 @@ test("validator benchmark output is restricted to safe untracked .superpowers fi
     "../outside.json",
     "docs/performance/v2.1.1-baseline.json",
     ".superpowers/tracked.json",
+    ".superpowers/TRACKED.JSON",
+    ".superpowers/tracked [FINAL] $.json",
   ];
   if (process.platform!=="win32") {
     await symlink("tracked.json",join(root,".superpowers","linked.json"));
@@ -104,7 +122,9 @@ test("validator benchmark output is restricted to safe untracked .superpowers fi
 
   for (const output of unsafe) {
     await assert.rejects(
-      writeValidatorBenchmarkReport(output,{ok:true},root),
+      writeValidatorBenchmarkReport(output,{ok:true},root,{
+        canonicalize:value => JSON.stringify(value),
+      }),
       /\.superpowers|symbolic|tracked|baseline|safe/i,
       output,
     );
@@ -119,6 +139,30 @@ test("validator benchmark output is restricted to safe untracked .superpowers fi
     (await readdir(join(root,".superpowers","evidence"))).sort(),
     ["validator-report.json"],
   );
+  assert.equal(readFileSync(join(root,".superpowers","tracked.json"),"utf8"),"tracked\n");
+  assert.equal(
+    readFileSync(join(root,".superpowers","Tracked [final] $.json"),"utf8"),
+    "special tracked\n",
+  );
+});
+
+test("validator benchmark CLI maps invalid output parents to exit five",async t => {
+  const root=await mkdtemp(join(tmpdir(),"toss-validator-parent-"));
+  t.after(() => rm(root,{recursive:true,force:true}));
+  await mkdir(join(root,".superpowers"));
+  await writeFile(join(root,".superpowers","not-a-directory"),"file\n");
+
+  for (const output of [
+    ".superpowers/missing/validator-report.json",
+    ".superpowers/not-a-directory/validator-report.json",
+  ]) {
+    const result=spawnSync(process.execPath,[validatorBenchmarkCli,
+      "--runs","3","--runner-id","fixture","--output",output,"--json",
+    ],{cwd:root,encoding:"utf8"});
+    assert.equal(result.status,5,`${output}: ${result.stderr}`);
+    assert.match(result.stderr,/UNSAFE_VALIDATOR_BENCHMARK_OUTPUT/);
+    assert.equal(result.stdout,"");
+  }
 });
 
 async function benchmarkFixture(t) {
