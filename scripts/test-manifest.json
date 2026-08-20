@@ -18,7 +18,8 @@
       "test/readiness.test.js",
       "test/spec-auditor.test.js",
       "test/test-manifest.test.js",
-      "test/traceability.test.js"
+      "test/traceability.test.js",
+      "test/validator-cold-start.test.js"
     ],
     "integration": [
       "scripts/profile-assets-test.js",

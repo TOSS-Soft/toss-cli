@@ -1,66 +1,10 @@
 import fs from "node:fs";
+import {createRequire} from "node:module";
 
-import Ajv2020 from "ajv/dist/2020.js";
+import {CONTRACT_SCHEMA_CATALOG} from "./schema-catalog.js";
+import {createValidatorRuntime} from "./validator-runtime.js";
 
-import {canonicalJson} from "./acp.js";
-
-const schemaDefinitions=[
-  ["artifact-envelope.v1","../../contracts/common/artifact-envelope.schema.json"],
-  ["entity.v1","../../contracts/common/entity.schema.json"],
-  ["provenance.v1","../../contracts/common/provenance.schema.json"],
-  ["reference.v1","../../contracts/common/reference.schema.json"],
-  ["question.v1","../../contracts/common/question.schema.json"],
-  ["pm-analysis.v1","../../contracts/agents/pm-analysis.v1.schema.json"],
-  ["architecture-constraint.v1","../../contracts/agents/architecture-constraint.v1.schema.json"],
-  ["architecture.v1","../../contracts/agents/architecture.v1.schema.json"],
-  ["adr.v1","../../contracts/agents/adr.v1.schema.json"],
-  ["issue-plan.v1","../../contracts/agents/issue-plan.v1.schema.json"],
-  ["finding.v1","../../contracts/agents/finding.v1.schema.json"],
-  ["spec-audit.v1","../../contracts/agents/spec-audit.v1.schema.json"],
-  ["decision-package.v1","../../contracts/pipeline/decision-package.v1.schema.json"],
-  ["trace-graph.v1","../../contracts/pipeline/trace-graph.v1.schema.json"],
-  ["trace-result.v1","../../contracts/pipeline/trace-result.v1.schema.json"],
-  ["command-result.v1","../../contracts/pipeline/command-result.v1.schema.json"],
-  ["transition-event.v1","../../contracts/pipeline/transition-event.v1.schema.json"],
-  ["project-input.v1","../../contracts/pipeline/project-input.v1.schema.json"],
-  ["feature-delta.v1","../../contracts/pipeline/feature-delta.v1.schema.json"],
-  ["design-orchestration-state.v1","../../contracts/pipeline/design-orchestration-state.v1.schema.json"],
-  ["pdor-result.v1","../../contracts/pipeline/pdor-result.v1.schema.json"],
-  ["github-publication-result.v1","../../contracts/pipeline/github-publication-result.v1.schema.json"],
-  ["decision-answer.v1","../../contracts/pipeline/decision-answer.v1.schema.json"],
-  ["adr-approval.v1","../../contracts/pipeline/adr-approval.v1.schema.json"],
-  ["design-brief.v1","../../contracts/design/design-brief.v1.schema.json"],
-  ["ux-analysis.v1","../../contracts/design/ux-analysis.v1.schema.json"],
-  ["user-flow.v1","../../contracts/design/user-flow.v1.schema.json"],
-  ["information-architecture.v1","../../contracts/design/information-architecture.v1.schema.json"],
-  ["wireframe-plan.v1","../../contracts/design/wireframe-plan.v1.schema.json"],
-  ["visual-direction.v1","../../contracts/design/visual-direction.v1.schema.json"],
-  ["design-system.v1","../../contracts/design/design-system.v1.schema.json"],
-  ["screen-spec.v1","../../contracts/design/screen-spec.v1.schema.json"],
-  ["prototype-manifest.v1","../../contracts/design/prototype-manifest.v1.schema.json"],
-  ["usability-evidence.v1","../../contracts/design/usability-evidence.v1.schema.json"],
-  ["design-audit.v1","../../contracts/design/design-audit.v1.schema.json"],
-  ["design-approval.v1","../../contracts/design/design-approval.v1.schema.json"],
-  ["ui-design-dor-result.v1","../../contracts/design/ui-design-dor-result.v1.schema.json"],
-];
-
-function loadSchema(path) {
-  return JSON.parse(fs.readFileSync(new URL(path,import.meta.url),"utf8"));
-}
-
-function copyErrors(errors) {
-  return (errors ?? []).map(error => ({...error}));
-}
-
-function canonicalJsonError(error) {
-  return [{
-    instancePath:"",
-    schemaPath:"#",
-    keyword:"canonical-json",
-    params:{},
-    message:error instanceof Error ? error.message : "Value is not canonical JSON",
-  }];
-}
+const require=createRequire(import.meta.url);
 
 function isLeapYear(year) {
   return year%4===0 && (year%100!==0 || year%400===0);
@@ -98,15 +42,9 @@ function isRfc3339DateTime(value) {
   return true;
 }
 
-function canonicalDocument(value) {
-  try {
-    return {value:JSON.parse(canonicalJson(value))};
-  } catch (error) {
-    return {errors:canonicalJsonError(error)};
-  }
-}
-
-export function createContractValidator() {
+function createAjv() {
+  const loaded=require("ajv/dist/2020.js");
+  const Ajv2020=loaded.default ?? loaded;
   const ajv=new Ajv2020({
     allErrors:true,
     strict:true,
@@ -116,30 +54,25 @@ export function createContractValidator() {
     type:"string",
     validate:isRfc3339DateTime,
   });
-  const validators=new Map();
-
-  for (const [schemaId,path] of schemaDefinitions) {
-    const schema=loadSchema(path);
-    ajv.addSchema(schema);
-    validators.set(schemaId,schema.$id);
-  }
-
-  function validateDocument(value,schemaId) {
-    const schemaUri=validators.get(schemaId) ?? schemaId;
-    const validate=ajv.getSchema(schemaUri);
-    if (!validate) {
-      throw new Error(`Unknown contract schema: ${String(schemaId)}`);
-    }
-    const document=canonicalDocument(value);
-    if (document.errors) return {valid:false,errors:document.errors};
-    const valid=validate(document.value);
-    return {valid,errors:valid ? [] : copyErrors(validate.errors)};
-  }
-
-  return Object.freeze({validateDocument});
+  return ajv;
 }
 
-const defaultValidator=createContractValidator();
+function productionRuntime() {
+  return createValidatorRuntime({
+    catalog:CONTRACT_SCHEMA_CATALOG,
+    readSchema:row => JSON.parse(fs.readFileSync(
+      new URL(row.relativePath,import.meta.url),"utf8",
+    )),
+    createAjv,
+    observe:() => {},
+  });
+}
+
+export function createContractValidator() {
+  return productionRuntime();
+}
+
+const defaultValidator=productionRuntime();
 
 export function validateDocument(value,schemaId) {
   return defaultValidator.validateDocument(value,schemaId);

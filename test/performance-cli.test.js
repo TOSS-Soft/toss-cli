@@ -1,15 +1,18 @@
 import assert from "node:assert/strict";
 import {execFileSync,spawnSync} from "node:child_process";
 import {readFileSync} from "node:fs";
-import {chmod,mkdir,mkdtemp,readdir,realpath,rm,symlink,writeFile} from "node:fs/promises";
+import {chmod,link,mkdir,mkdtemp,readdir,realpath,rm,symlink,writeFile} from "node:fs/promises";
 import {tmpdir} from "node:os";
-import {join} from "node:path";
+import {join,win32} from "node:path";
 import test from "node:test";
 import {fileURLToPath} from "node:url";
 
 import {
   createBaseline,parseBenchmarkOptions,renderBenchmarkOutput,runBenchmark,writeCanonicalReport,
 } from "../scripts/performance/benchmark.mjs";
+import * as validatorBenchmark from "../scripts/performance/validator-benchmark.mjs";
+
+const {writeValidatorBenchmarkReport}=validatorBenchmark;
 
 const identity={
   commit:"4472175eac91275cafab2993f68722febdb9eb59",
@@ -53,11 +56,27 @@ function baselineDocument({walls,fullLimit=100,exactIdentity,exactCommand}={}) {
 
 const budgetCli=fileURLToPath(new URL("../scripts/performance/budget.mjs",import.meta.url));
 const benchmarkCli=fileURLToPath(new URL("../scripts/performance/benchmark.mjs",import.meta.url));
+const validatorBenchmarkCli=fileURLToPath(
+  new URL("../scripts/performance/validator-benchmark.mjs",import.meta.url),
+);
+
+test("validator output containment rejects Win32 cross-volume paths",() => {
+  const candidate="D:\\evidence\\validator-report.json";
+  const root="C:\\repo\\.superpowers";
+  assert.equal(
+    validatorBenchmark.isPathContained(candidate,root,{pathImplementation:win32}),
+    false,
+  );
+});
 
 test("package exposes opt-in performance commands without weakening full verification",() => {
   const pkg=JSON.parse(readFileSync(new URL("../package.json",import.meta.url),"utf8"));
   assert.equal(pkg.scripts["test:benchmark"],"node ./scripts/performance/benchmark.mjs");
   assert.equal(pkg.scripts["test:performance-budget"],"node ./scripts/performance/budget.mjs");
+  assert.equal(
+    pkg.scripts["test:validator-benchmark"],
+    "node ./scripts/performance/validator-benchmark.mjs",
+  );
   assert.equal(pkg.scripts.test,"npm run test:full");
   assert.equal(pkg.scripts["test:fast"],"node ./scripts/test-runner.mjs fast");
   assert.equal(pkg.scripts["test:integration"],"node ./scripts/test-runner.mjs integration");
@@ -66,6 +85,145 @@ test("package exposes opt-in performance commands without weakening full verific
   assert.equal(pkg.scripts["test:release"],"node ./scripts/test-runner.mjs release");
   assert.equal(pkg.scripts["test:full"],"node ./scripts/test-runner.mjs full");
   assert.equal(pkg.scripts.prepack,"npm test");
+});
+
+test("validator benchmark output is restricted to safe untracked .superpowers files",async t => {
+  const root=await mkdtemp(join(tmpdir(),"toss-validator-output-"));
+  t.after(() => rm(root,{recursive:true,force:true}));
+  await mkdir(join(root,".superpowers","evidence"),{recursive:true});
+  await mkdir(join(root,"docs","performance"),{recursive:true});
+  await writeFile(join(root,"package-lock.json"),"{}\n");
+  await writeFile(join(root,".superpowers","tracked.json"),"tracked\n");
+  await writeFile(join(root,".superpowers","Tracked [final] $.json"),"special tracked\n");
+  await writeFile(join(root,"docs","performance","v2.1.1-baseline.json"),"protected\n");
+  execFileSync("git",["init","--quiet"],{cwd:root});
+  execFileSync("git",["config","user.email","test@example.invalid"],{cwd:root});
+  execFileSync("git",["config","user.name","Test"],{cwd:root});
+  execFileSync("git",["add","package-lock.json",".superpowers/tracked.json",
+    ".superpowers/Tracked [final] $.json",
+    "docs/performance/v2.1.1-baseline.json"],{cwd:root});
+  execFileSync("git",["commit","--quiet","-m","fixture"],{cwd:root});
+  const unsafe=[
+    "outside.json",
+    "../outside.json",
+    "docs/performance/v2.1.1-baseline.json",
+    ".superpowers/tracked.json",
+    ".superpowers/TRACKED.JSON",
+    ".superpowers/tracked [FINAL] $.json",
+  ];
+  if (process.platform!=="win32") {
+    await symlink("tracked.json",join(root,".superpowers","linked.json"));
+    await symlink("evidence",join(root,".superpowers","linked-parent"));
+    unsafe.push(
+      ".superpowers/linked.json",
+      ".superpowers/linked-parent/report.json",
+    );
+  }
+
+  for (const output of unsafe) {
+    await assert.rejects(
+      writeValidatorBenchmarkReport(output,{ok:true},root,{
+        canonicalize:value => JSON.stringify(value),
+      }),
+      /\.superpowers|symbolic|tracked|baseline|safe/i,
+      output,
+    );
+  }
+
+  const output=".superpowers/evidence/validator-report.json";
+  await writeValidatorBenchmarkReport(output,{ok:true},root,{
+    canonicalize:value => JSON.stringify(value),
+  });
+  assert.equal(readFileSync(join(root,output),"utf8"),'{"ok":true}');
+  assert.deepEqual(
+    (await readdir(join(root,".superpowers","evidence"))).sort(),
+    ["validator-report.json"],
+  );
+  assert.equal(readFileSync(join(root,".superpowers","tracked.json"),"utf8"),"tracked\n");
+  assert.equal(
+    readFileSync(join(root,".superpowers","Tracked [final] $.json"),"utf8"),
+    "special tracked\n",
+  );
+});
+
+function addTrackedIndexEntry(root,entry,contents="tracked\n") {
+  const object=execFileSync("git",["hash-object","-w","--stdin"],{
+    cwd:root,encoding:"utf8",input:contents,
+  }).trim();
+  execFileSync("git",["update-index","--add","--cacheinfo","100644",object,entry],{
+    cwd:root,
+  });
+}
+
+async function validatorAliasFixture(t) {
+  const root=await mkdtemp(join(tmpdir(),"toss-validator-alias-"));
+  t.after(() => rm(root,{recursive:true,force:true}));
+  await mkdir(join(root,".superpowers"));
+  execFileSync("git",["init","--quiet"],{cwd:root});
+  return root;
+}
+
+test("validator output rejects a tracked alias with differently cased .superpowers",async t => {
+  const root=await validatorAliasFixture(t);
+  addTrackedIndexEntry(root,".SUPERPOWERS/report.json");
+
+  await assert.rejects(
+    writeValidatorBenchmarkReport(".superpowers/report.json",{ok:true},root,{
+      canonicalize:value => JSON.stringify(value),
+    }),
+    /tracked/i,
+  );
+  assert.deepEqual(await readdir(join(root,".superpowers")),[]);
+});
+
+test("validator output rejects canonically equivalent Unicode tracked aliases",async t => {
+  const root=await validatorAliasFixture(t);
+  addTrackedIndexEntry(root,".superpowers/caf\u00e9.json");
+
+  await assert.rejects(
+    writeValidatorBenchmarkReport(".superpowers/cafe\u0301.json",{ok:true},root,{
+      canonicalize:value => JSON.stringify(value),
+    }),
+    /tracked/i,
+  );
+  assert.deepEqual(await readdir(join(root,".superpowers")),[]);
+});
+
+test("validator output rejects an existing destination sharing tracked file identity",async t => {
+  const root=await validatorAliasFixture(t);
+  const tracked=join(root,".superpowers","tracked-identity.json");
+  const alias=join(root,".superpowers","identity-alias.json");
+  await writeFile(tracked,"tracked identity\n");
+  execFileSync("git",["add",".superpowers/tracked-identity.json"],{cwd:root});
+  await link(tracked,alias);
+
+  await assert.rejects(
+    writeValidatorBenchmarkReport(".superpowers/identity-alias.json",{ok:true},root,{
+      canonicalize:value => JSON.stringify(value),
+    }),
+    /tracked/i,
+  );
+  assert.equal(readFileSync(tracked,"utf8"),"tracked identity\n");
+  assert.equal(readFileSync(alias,"utf8"),"tracked identity\n");
+});
+
+test("validator benchmark CLI maps invalid output parents to exit five",async t => {
+  const root=await mkdtemp(join(tmpdir(),"toss-validator-parent-"));
+  t.after(() => rm(root,{recursive:true,force:true}));
+  await mkdir(join(root,".superpowers"));
+  await writeFile(join(root,".superpowers","not-a-directory"),"file\n");
+
+  for (const output of [
+    ".superpowers/missing/validator-report.json",
+    ".superpowers/not-a-directory/validator-report.json",
+  ]) {
+    const result=spawnSync(process.execPath,[validatorBenchmarkCli,
+      "--runs","3","--runner-id","fixture","--output",output,"--json",
+    ],{cwd:root,encoding:"utf8"});
+    assert.equal(result.status,5,`${output}: ${result.stderr}`);
+    assert.match(result.stderr,/UNSAFE_VALIDATOR_BENCHMARK_OUTPUT/);
+    assert.equal(result.stdout,"");
+  }
 });
 
 async function benchmarkFixture(t) {
@@ -341,6 +499,40 @@ test("failed atomic rename removes its exclusive temporary file",async t => {
     error => error===renameFailure,
   );
   assert.deepEqual((await readdir(canonicalRoot)).filter(name => name.includes("report")),[]);
+});
+
+test("validator report write failure removes a partial temporary without masking the failure",async t => {
+  const root=await mkdtemp(join(tmpdir(),"toss-validator-write-cleanup-"));
+  t.after(() => rm(root,{recursive:true,force:true}));
+  await mkdir(join(root,".superpowers","evidence"),{recursive:true});
+  execFileSync("git",["init","--quiet"],{cwd:root});
+  const writeFailure=Object.assign(new Error("intentional partial write failure"),{
+    code:"ENOSPC",
+  });
+  const cleanupFailure=Object.assign(new Error("intentional cleanup diagnostic"),{
+    code:"EIO",
+  });
+  let temporary;
+  await assert.rejects(
+    writeValidatorBenchmarkReport(
+      ".superpowers/evidence/validator-report.json",{ok:true},root,{
+        canonicalize:value => JSON.stringify(value),
+        writeTemporary:async (path,...argumentsToWrite) => {
+          temporary=path;
+          await writeFile(path,...argumentsToWrite);
+          throw writeFailure;
+        },
+        removeTemporary:async path => {
+          await rm(path,{force:true});
+          throw cleanupFailure;
+        },
+      },
+    ),
+    error => error===writeFailure,
+  );
+  assert.equal(typeof temporary,"string");
+  assert.equal(writeFailure.cleanupError,cleanupFailure);
+  assert.deepEqual(await readdir(join(root,".superpowers","evidence")),[]);
 });
 
 test("baseline updates require the full lane while ordinary fast captures remain measurable",async t => {
