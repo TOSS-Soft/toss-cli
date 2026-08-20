@@ -7,6 +7,8 @@ export const OWNERSHIP_LANES=Object.freeze([
 ]);
 export const REQUESTED_LANES=Object.freeze([...OWNERSHIP_LANES,"full"]);
 
+const IGNORED_TREE_ROOTS=Object.freeze(["node_modules","worktrees","evidence"]);
+
 function ownDataProperties(value,label) {
   if (value===null || typeof value!=="object" || Object.getPrototypeOf(value)!==Object.prototype) {
     throw new TypeError(`${label} must be a plain JSON record`);
@@ -138,6 +140,9 @@ export async function discoverEligibleTestEntries(root) {
         const childPath=join(path,name);
         const childSegments=[...segments,name];
         const entry=relativePath(directory,childSegments);
+        if (childSegments.length===1 && IGNORED_TREE_ROOTS.includes(name)) {
+          continue;
+        }
         const stat=await lstat(childPath);
         if (stat.isSymbolicLink()) {
           throw new TypeError(`symbolic link is not allowed: ${entry}`);

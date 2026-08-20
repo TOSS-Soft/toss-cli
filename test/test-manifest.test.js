@@ -169,6 +169,21 @@ test("eligibility scan includes only direct regular test entries in ASCII order"
   ]);
 });
 
+test("eligibility scan does not traverse ignored generated or dependency trees",async t => {
+  const root=await createRepository(t);
+  await Promise.all([
+    write(root,"scripts/a-test.js"),
+    write(root,"test/a.test.js"),
+    write(root,"scripts/node_modules/example/ignored-test.js"),
+    write(root,"scripts/worktrees/issue/ignored.test.js"),
+    write(root,"test/evidence/run/ignored.test.js"),
+  ]);
+  assert.deepEqual(await discoverEligibleTestEntries(root),[
+    "scripts/a-test.js",
+    "test/a.test.js",
+  ]);
+});
+
 for (const extension of ["js","mjs","cjs"]) {
   test(`eligibility scan rejects nested test ${extension} files outside declared test imports`,async t => {
     const root=await createRepository(t);
