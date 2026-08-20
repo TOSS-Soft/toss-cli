@@ -6,6 +6,7 @@ import {dirname,join} from "node:path";
 import test from "node:test";
 import {fileURLToPath} from "node:url";
 
+import * as performanceRunner from "../scripts/performance/run-suite.mjs";
 import {parseProcessLog,runSuiteOnce} from "../scripts/performance/run-suite.mjs";
 
 const root=dirname(dirname(fileURLToPath(import.meta.url)));
@@ -31,6 +32,34 @@ async function probeRecords(argumentsToProbe=[]) {
     await rm(scratch,{recursive:true,force:true});
   }
 }
+
+test("Windows npm.cmd capture invokes the selected command interpreter without changing report command arguments",() => {
+  assert.deepEqual(performanceRunner.performanceInvocationForPlatform(
+    "npm.cmd",["run","test:fast"],{
+      platform:"win32",comSpec:"C:\\Windows\\System32\\cmd.exe",
+    },
+  ),{
+    command:"C:\\Windows\\System32\\cmd.exe",
+    args:["/d","/c","npm.cmd","run","test:fast"],
+  });
+});
+
+test("non-Windows performance capture preserves a direct executable invocation",() => {
+  assert.deepEqual(performanceRunner.performanceInvocationForPlatform(
+    "npm.cmd",["run","test:fast"],{platform:"darwin",comSpec:"ignored"},
+  ),{
+    command:"npm.cmd",args:["run","test:fast"],
+  });
+});
+
+test("Windows npm.cmd capture rejects an empty command interpreter",() => {
+  assert.throws(
+    () => performanceRunner.performanceInvocationForPlatform(
+      "npm.cmd",["run","test:fast"],{platform:"win32",comSpec:""},
+    ),
+    /command interpreter.*nonempty string/,
+  );
+});
 
 test("one run captures the inherited Node process tree",async () => {
   const sample=await runSuiteOnce({
