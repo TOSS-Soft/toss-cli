@@ -4,6 +4,15 @@ import {readFile} from "node:fs/promises";
 import test from "node:test";
 
 import {
+  VALIDATOR_PHASES,
+  VALIDATOR_REPORT_VERSION,
+  VALIDATOR_STRATEGIES,
+  canonicalValidatorColdStartJson,
+  createValidatorColdStartReport,
+  selectValidatorStrategy,
+  validateValidatorColdStartReport,
+} from "../scripts/performance/validator-report.mjs";
+import {
   CONTRACT_SCHEMA_CATALOG,
   validateContractSchemaCatalog,
 } from "../src/contracts/schema-catalog.js";
@@ -764,4 +773,338 @@ test("failed registration and compilation are retried without false cache succes
   assert.deepEqual(compileRuntime.validateDocument({},"root.v1"),{valid:true,errors:[]});
   assert.equal(compileAttempts,2);
   assert.deepEqual(compileCalls.compile,[pipelineUri("root.v1"),pipelineUri("root.v1")]);
+});
+
+const VALIDATOR_REPORT_IDENTITY={
+  commit:"0123456789abcdef0123456789abcdef01234567",
+  node_version:"v26.6.0",
+  platform:"darwin",
+  arch:"arm64",
+  lock_sha256:"a".repeat(64),
+  runner_id:"fixture",
+};
+
+function validatorSample(offset=0) {
+  return {
+    exit_status:0,
+    process_ms:1+offset,
+    module_ms:2+offset,
+    schema_io_ms:3+offset,
+    dependency_discovery_ms:4+offset,
+    ajv_creation_ms:5+offset,
+    schema_registration_ms:6+offset,
+    compilation_ms:7+offset,
+    first_validation_ms:8+offset,
+    command_ms:9+offset,
+    total_ms:20+offset,
+  };
+}
+
+function validatorSamples() {
+  return [validatorSample(20),validatorSample(0),validatorSample(10)];
+}
+
+const VALIDATOR_PHASE_MEDIANS={
+  process_ms:11,
+  module_ms:12,
+  schema_io_ms:13,
+  dependency_discovery_ms:14,
+  ajv_creation_ms:15,
+  schema_registration_ms:16,
+  compilation_ms:17,
+  first_validation_ms:18,
+  command_ms:19,
+  total_ms:30,
+};
+
+function validatorReportInput() {
+  return {
+    identity:{...VALIDATOR_REPORT_IDENTITY},
+    probes:{
+      empty_process:{
+        samples:validatorSamples(),
+        medians:{...VALIDATOR_PHASE_MEDIANS,total_ms:999},
+      },
+      cli_module:{samples:validatorSamples()},
+      representative_command:{samples:validatorSamples()},
+    },
+    strategies:VALIDATOR_STRATEGIES.map(name => ({name,samples:validatorSamples()})),
+    focused_gate_cli:{
+      base_commit:"2caf811f521ee1c1664104a68ea35512fc87fdc8",
+      before_samples_ms:[32581.98975,32685.560625,32656.405041],
+      before_median_ms:1,
+      after_samples_ms:[8100,8000,8200],
+      after_median_ms:2,
+      improvement_percent:3,
+    },
+    evidence:{
+      standalone_deterministic:true,
+      standalone_drift_verified:false,
+      standalone_equivalent:true,
+      standalone_focused_samples_ms:null,
+    },
+  };
+}
+
+test("validator report constants close the phases and strategy ordering",() => {
+  assert.equal(VALIDATOR_REPORT_VERSION,"toss-validator-cold-start-report.v1");
+  assert.deepEqual(VALIDATOR_STRATEGIES,[
+    "demand-driven","eager-reference","standalone-experiment",
+  ]);
+  assert.deepEqual(VALIDATOR_PHASES,[
+    "process_ms","module_ms","schema_io_ms","dependency_discovery_ms",
+    "ajv_creation_ms","schema_registration_ms","compilation_ms",
+    "first_validation_ms","command_ms","total_ms",
+  ]);
+  assert.equal(Object.isFrozen(VALIDATOR_STRATEGIES),true);
+  assert.equal(Object.isFrozen(VALIDATOR_PHASES),true);
+});
+
+test("validator report derives exact medians, focused arithmetic, and the conservative decision",() => {
+  const report=createValidatorColdStartReport(validatorReportInput());
+  assert.equal(report.schema_version,VALIDATOR_REPORT_VERSION);
+  assert.deepEqual(Object.keys(report.identity),[
+    "commit","node_version","platform","arch","lock_sha256","runner_id",
+  ]);
+  assert.deepEqual(Object.keys(report.probes),[
+    "empty_process","cli_module","representative_command",
+  ]);
+  assert.deepEqual(report.probes.empty_process.medians,VALIDATOR_PHASE_MEDIANS);
+  assert.ok(Object.values(report.probes).every(row =>
+    JSON.stringify(row.medians)===JSON.stringify(VALIDATOR_PHASE_MEDIANS)));
+  assert.deepEqual(report.strategies.map(row => row.name),VALIDATOR_STRATEGIES);
+  assert.ok(report.strategies.every(row =>
+    JSON.stringify(row.medians)===JSON.stringify(VALIDATOR_PHASE_MEDIANS)));
+  assert.deepEqual(report.focused_gate_cli,{
+    base_commit:"2caf811f521ee1c1664104a68ea35512fc87fdc8",
+    before_samples_ms:[32581.98975,32685.560625,32656.405041],
+    before_median_ms:32656.405041,
+    after_samples_ms:[8100,8000,8200],
+    after_median_ms:8100,
+    improvement_percent:75.196,
+  });
+  assert.deepEqual(report.decision,{
+    selected:"demand-driven",
+    rejected:["eager-reference","standalone-experiment"],
+    standalone_deterministic:true,
+    standalone_drift_verified:false,
+    standalone_equivalent:true,
+    standalone_focused_median_ms:null,
+    reason_code:"STANDALONE_FOCUSED_GAIN_UNPROVEN",
+  });
+  assert.deepEqual(validateValidatorColdStartReport(report),report);
+});
+
+test("validator report requires exact successful samples and truthful total time",() => {
+  const cases=[
+    {
+      name:"nonzero exit",
+      mutate:input => { input.probes.empty_process.samples[0].exit_status=1; },
+      expected:/successful exit_status/i,
+    },
+    {
+      name:"nonfinite phase",
+      mutate:input => { input.strategies[0].samples[0].schema_io_ms=Number.NaN; },
+      expected:/finite nonnegative/i,
+    },
+    {
+      name:"total below a component",
+      mutate:input => { input.probes.cli_module.samples[0].total_ms=1; },
+      expected:/total_ms.*at least/i,
+    },
+    {
+      name:"wrong sample count",
+      mutate:input => { input.strategies[1].samples.pop(); },
+      expected:/exactly three samples/i,
+    },
+    {
+      name:"focused base drift",
+      mutate:input => { input.focused_gate_cli.base_commit="f".repeat(40); },
+      expected:/locked base commit/i,
+    },
+    {
+      name:"focused before-sample drift",
+      mutate:input => { input.focused_gate_cli.before_samples_ms[0]=1; },
+      expected:/locked before samples/i,
+    },
+  ];
+  for (const {name,mutate,expected} of cases) {
+    const input=validatorReportInput();
+    mutate(input);
+    assert.throws(() => createValidatorColdStartReport(input),expected,name);
+  }
+});
+
+test("validator report rejects unknown, hidden, symbol, sparse, and exotic input data",() => {
+  const cases=[
+    {
+      name:"unknown property",
+      mutate:input => { input.extra=true; },
+      expected:/unknown property extra/i,
+    },
+    {
+      name:"hidden property",
+      mutate:input => Object.defineProperty(input.identity,"hidden",{value:true}),
+      expected:/unknown property hidden/i,
+    },
+    {
+      name:"symbol property",
+      mutate:input => { input.evidence[Symbol("hidden")]=true; },
+      expected:/symbol property/i,
+    },
+    {
+      name:"sparse samples",
+      mutate:input => { delete input.probes.representative_command.samples[1]; },
+      expected:/dense/i,
+    },
+    {
+      name:"exotic record",
+      mutate:input => Object.setPrototypeOf(input.probes.empty_process,{custom:true}),
+      expected:/plain object/i,
+    },
+  ];
+  for (const {name,mutate,expected} of cases) {
+    const input=validatorReportInput();
+    mutate(input);
+    assert.throws(() => createValidatorColdStartReport(input),expected,name);
+  }
+});
+
+test("validator report rejects accessors without invoking them",() => {
+  const input=validatorReportInput();
+  let invoked=false;
+  Object.defineProperty(input.strategies[0].samples[0],"process_ms",{
+    enumerable:true,
+    get() {
+      invoked=true;
+      return 1;
+    },
+  });
+  assert.throws(
+    () => createValidatorColdStartReport(input),
+    /property process_ms must be enumerable data/i,
+  );
+  assert.equal(invoked,false);
+});
+
+test("validator report validation rejects untrusted derived fields and ordering",() => {
+  const cases=[
+    {
+      name:"phase median",
+      mutate:report => { report.probes.empty_process.medians.total_ms=31; },
+      expected:/medians do not match samples/i,
+    },
+    {
+      name:"focused median",
+      mutate:report => { report.focused_gate_cli.after_median_ms=8000; },
+      expected:/focused gate.*derived values/i,
+    },
+    {
+      name:"decision",
+      mutate:report => { report.decision.selected="standalone-experiment"; },
+      expected:/decision does not match evidence/i,
+    },
+    {
+      name:"strategy order",
+      mutate:report => { report.strategies.reverse(); },
+      expected:/strategy.*order/i,
+    },
+    {
+      name:"probe key",
+      mutate:report => { report.probes.other=report.probes.empty_process; },
+      expected:/unknown property other/i,
+    },
+  ];
+  for (const {name,mutate,expected} of cases) {
+    const report=createValidatorColdStartReport(validatorReportInput());
+    mutate(report);
+    assert.throws(() => validateValidatorColdStartReport(report),expected,name);
+  }
+});
+
+test("validator report creation rejects a supplied decision that is not derived",() => {
+  const input=validatorReportInput();
+  const report=createValidatorColdStartReport(input);
+  input.decision={...report.decision,reason_code:"STANDALONE_DRIFT_UNVERIFIED"};
+  assert.throws(
+    () => createValidatorColdStartReport(input),
+    /decision does not match evidence/i,
+  );
+});
+
+test("validator strategy selection is fail-closed with stable single-condition reasons",() => {
+  const qualifying={
+    demand_focused_median_ms:100,
+    standalone_focused_samples_ms:[91,89,90],
+    standalone_deterministic:true,
+    standalone_drift_verified:true,
+    standalone_equivalent:true,
+  };
+  assert.deepEqual(selectValidatorStrategy(qualifying),{
+    selected:"standalone-experiment",
+    rejected:["demand-driven","eager-reference"],
+    standalone_deterministic:true,
+    standalone_drift_verified:true,
+    standalone_equivalent:true,
+    standalone_focused_median_ms:90,
+    reason_code:null,
+  });
+  const cases=[
+    ["missing focused evidence",{standalone_focused_samples_ms:null},
+      "STANDALONE_FOCUSED_GAIN_UNPROVEN"],
+    ["gain below ten percent",{standalone_focused_samples_ms:[90.002,90.001,90.003]},
+      "STANDALONE_FOCUSED_GAIN_BELOW_TEN_PERCENT"],
+    ["nondeterministic output",{standalone_deterministic:false},
+      "STANDALONE_NONDETERMINISTIC"],
+    ["unverified all-schema drift",{standalone_drift_verified:false},
+      "STANDALONE_DRIFT_UNVERIFIED"],
+    ["result mismatch",{standalone_equivalent:false},
+      "STANDALONE_RESULT_MISMATCH"],
+  ];
+  for (const [name,mutation,reasonCode] of cases) {
+    const evidence={...qualifying,...mutation};
+    assert.deepEqual(selectValidatorStrategy(evidence),{
+      selected:"demand-driven",
+      rejected:["eager-reference","standalone-experiment"],
+      standalone_deterministic:evidence.standalone_deterministic,
+      standalone_drift_verified:evidence.standalone_drift_verified,
+      standalone_equivalent:evidence.standalone_equivalent,
+      standalone_focused_median_ms:evidence.standalone_focused_samples_ms===null ? null :
+        [...evidence.standalone_focused_samples_ms].sort((left,right) => left-right)[1],
+      reason_code:reasonCode,
+    },name);
+  }
+});
+
+test("validator strategy selection requires three real standalone focused samples",() => {
+  const evidence={
+    demand_focused_median_ms:100,
+    standalone_focused_samples_ms:[80,81],
+    standalone_deterministic:true,
+    standalone_drift_verified:true,
+    standalone_equivalent:true,
+  };
+  assert.throws(() => selectValidatorStrategy(evidence),/exactly three samples/i);
+  assert.throws(() => selectValidatorStrategy({
+    ...evidence,
+    standalone_focused_samples_ms:[80,81,82],
+    standalone_focused_median_ms:81,
+  }),/unknown property standalone_focused_median_ms/i);
+});
+
+test("validator report canonical JSON is deterministic",() => {
+  const report=createValidatorColdStartReport(validatorReportInput());
+  const reordered={
+    decision:report.decision,
+    focused_gate_cli:report.focused_gate_cli,
+    strategies:report.strategies,
+    probes:report.probes,
+    identity:report.identity,
+    schema_version:report.schema_version,
+  };
+  assert.equal(
+    canonicalValidatorColdStartJson(reordered),
+    canonicalValidatorColdStartJson(report),
+  );
+  assert.deepEqual(JSON.parse(canonicalValidatorColdStartJson(report)),report);
 });
