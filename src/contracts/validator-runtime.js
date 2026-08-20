@@ -15,12 +15,23 @@ function eventFor(phase,state,row) {
 }
 
 function observed(phase,observe,row,operation) {
-  observe(eventFor(phase,"start",row));
+  let result;
+  let failure;
+  let failed=false;
   try {
-    return operation();
-  } finally {
-    observe(eventFor(phase,"end",row));
+    observe(eventFor(phase,"start",row));
+    result=operation();
+  } catch (error) {
+    failed=true;
+    failure=error;
   }
+  try {
+    observe(eventFor(phase,"end",row));
+  } catch (error) {
+    if (!failed) throw error;
+  }
+  if (failed) throw failure;
+  return result;
 }
 
 function verifySchemaIdentity(schema,row) {

@@ -488,6 +488,78 @@ test("observer events are frozen closed pairs and first validation is observed o
   }
 });
 
+test("a throwing end observer cannot replace the wrapped operation failure",() => {
+  const calls=emptyCalls();
+  const operationError=new Error("schema read failed");
+  const observerError=new Error("observer end failed");
+  let readAttempts=0;
+  let endAttempts=0;
+  const runtime=createValidatorRuntime(countedDependencies(calls,{
+    readSchema:() => {
+      readAttempts+=1;
+      throw operationError;
+    },
+    observe:event => {
+      if (event.phase==="schema_io" && event.state==="end") {
+        endAttempts+=1;
+        throw observerError;
+      }
+    },
+  }));
+  assert.throws(
+    () => runtime.validateDocument({},"root.v1"),
+    error => error===operationError,
+  );
+  assert.equal(readAttempts,1);
+  assert.equal(endAttempts,1);
+});
+
+test("a throwing start observer still attempts end without running the operation",() => {
+  const calls=emptyCalls();
+  const startError=new Error("observer start failed");
+  const endError=new Error("observer end failed");
+  let readAttempts=0;
+  let endAttempts=0;
+  const runtime=createValidatorRuntime(countedDependencies(calls,{
+    readSchema:() => {
+      readAttempts+=1;
+      return {$id:pipelineUri("root.v1")};
+    },
+    observe:event => {
+      if (event.phase!=="schema_io") return;
+      if (event.state==="start") throw startError;
+      endAttempts+=1;
+      throw endError;
+    },
+  }));
+  assert.throws(
+    () => runtime.validateDocument({},"root.v1"),
+    error => error===startError,
+  );
+  assert.equal(readAttempts,0);
+  assert.equal(endAttempts,1);
+});
+
+test("a throwing end observer fails closed after a successful operation",() => {
+  const calls=emptyCalls();
+  const observerError=new Error("observer end failed");
+  let readAttempts=0;
+  const runtime=createValidatorRuntime(countedDependencies(calls,{
+    readSchema:(row,schemas) => {
+      readAttempts+=1;
+      return structuredClone(schemas[row.schemaId]);
+    },
+    observe:event => {
+      if (event.phase==="schema_io" && event.state==="end") throw observerError;
+    },
+  }));
+  assert.throws(
+    () => runtime.validateDocument({},"root.v1"),
+    error => error===observerError,
+  );
+  assert.equal(readAttempts,1);
+});
+
 test("schema reads and dependency discovery fail closed",() => {
   const cases=[
     {
