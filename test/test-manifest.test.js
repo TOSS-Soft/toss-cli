@@ -125,6 +125,63 @@ test("manifest rejects exotic records and sparse arrays",() => {
   );
 });
 
+function withNonEnumerableIndex(entries,index) {
+  Object.defineProperty(entries,String(index),{
+    value:entries[index],enumerable:false,writable:true,configurable:true,
+  });
+  return entries;
+}
+
+for (const example of [
+  {
+    name:"duplicate entries",
+    entries:["scripts/a-test.js","test/a.test.js","test/a.test.js","test/b.test.js"],
+    expected:/duplicate eligible entry.*test\/a\.test\.js/i,
+  },
+  {
+    name:"unstable entries",
+    entries:["test/a.test.js","scripts/a-test.js","test/b.test.js"],
+    expected:/eligible entries.*stable ASCII order/i,
+  },
+  {
+    name:"an unsafe entry",
+    entries:[...eligible,"../test/escape.test.js"],
+    expected:/unsafe test entry.*\.\.\/test\/escape\.test\.js/i,
+  },
+  {
+    name:"a non-string entry",
+    entries:[...eligible,7],
+    expected:/eligible entries must be strings/i,
+  },
+  {
+    name:"a sparse entry",
+    entries:[...eligible,,],
+    expected:/eligible entries must be a dense JSON array/i,
+  },
+  {
+    name:"a non-enumerable numeric entry",
+    entries:withNonEnumerableIndex([...eligible],1),
+    expected:/eligible entries must be a dense JSON array/i,
+  },
+]) {
+  test(`manifest rejects injected eligible entries with ${example.name}`,() => {
+    assert.throws(
+      () => validateTestManifest(valid,{eligibleEntries:example.entries}),
+      example.expected,
+    );
+  });
+}
+
+test("manifest rejects a non-enumerable lane entry",() => {
+  const entries=withNonEnumerableIndex(["test/a.test.js"],0);
+  assert.throws(
+    () => validateTestManifest({
+      ...valid,lanes:{...valid.lanes,fast:entries},
+    },{eligibleEntries:eligible}),
+    /lane fast must be a dense JSON array/i,
+  );
+});
+
 test("manifest rejects unsupported lanes, invalid concurrency, and unknown selection",() => {
   assert.throws(
     () => validateTestManifest({
@@ -190,6 +247,54 @@ test("eligibility scan does not traverse ignored generated or dependency trees",
     "scripts/a-test.js",
     "test/a.test.js",
   ]);
+});
+
+for (const example of [
+  {
+    basename:"node_modules",
+    nestedEntry:"scripts/nested/node_modules/example/ignored-test.js",
+  },
+  {
+    basename:"worktrees",
+    nestedEntry:"test/nested/worktrees/issue/ignored.test.js",
+  },
+  {
+    basename:"evidence",
+    nestedEntry:"scripts/nested/evidence/run/ignored-test.js",
+  },
+]) {
+  test(`eligibility scan recursively prunes nested ${example.basename} trees`,async t => {
+    const root=await createRepository(t);
+    await Promise.all([
+      write(root,"scripts/a-test.js"),
+      write(root,"test/a.test.js"),
+      write(root,example.nestedEntry),
+    ]);
+    assert.deepEqual(await discoverEligibleTestEntries(root),[
+      "scripts/a-test.js",
+      "test/a.test.js",
+    ]);
+  });
+}
+
+test("eligibility scan rejects a symlink named like an ignored tree",async t => {
+  const root=await createRepository(t);
+  const outside=join(root,"outside-node-modules");
+  await mkdir(outside);
+  await symlink(outside,join(root,"scripts","node_modules"),"dir");
+  await assert.rejects(
+    () => discoverEligibleTestEntries(root),
+    /symbolic link.*scripts\/node_modules/i,
+  );
+});
+
+test("eligibility scan rejects a file named like an ignored tree",async t => {
+  const root=await createRepository(t);
+  await write(root,"scripts/node_modules");
+  await assert.rejects(
+    () => discoverEligibleTestEntries(root),
+    /ignored test tree must be a directory.*scripts\/node_modules/i,
+  );
 });
 
 for (const extension of ["js","mjs","cjs"]) {

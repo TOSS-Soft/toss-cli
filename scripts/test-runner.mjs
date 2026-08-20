@@ -72,7 +72,6 @@ export async function executeTestEntry(entry,{cwd,env}) {
     try {
       child=spawn(process.execPath,[
         "--test",
-        "--test-concurrency=1",
         absolutePlatformEntry,
       ],{
         cwd,

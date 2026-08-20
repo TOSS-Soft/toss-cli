@@ -50,7 +50,7 @@ function denseArray(value,label) {
   }
   for (const key of Reflect.ownKeys(descriptors)) {
     if (key==="length") continue;
-    if (typeof key!=="string" || !/^(0|[1-9]\d*)$/.test(key) || Number(key)>=length.value || !("value" in descriptors[key])) {
+    if (typeof key!=="string" || !/^(0|[1-9]\d*)$/.test(key) || Number(key)>=length.value || !("value" in descriptors[key]) || !descriptors[key].enumerable) {
       throw new TypeError(`${label} must be a dense JSON array`);
     }
   }
@@ -77,6 +77,24 @@ function asciiSortedUnique(entries,lane) {
       throw new TypeError(`lane ${lane} entries must use stable ASCII order`);
     }
   }
+}
+
+function validateEligibleEntries(eligibleEntries) {
+  const entries=denseArray(eligibleEntries,"eligible entries");
+  for (let index=0;index<entries.length;index+=1) {
+    const entry=entries[index];
+    if (typeof entry!=="string") {
+      throw new TypeError("eligible entries must be strings");
+    }
+    assertSafeEntryPath(entry);
+    if (index>0 && entries[index-1]>=entry) {
+      if (entries[index-1]===entry) {
+        throw new TypeError(`duplicate eligible entry: ${entry}`);
+      }
+      throw new TypeError("eligible entries must use stable ASCII order");
+    }
+  }
+  return entries;
 }
 
 function assertSafeEntryPath(entry) {
@@ -141,12 +159,15 @@ export async function discoverEligibleTestEntries(root) {
         const childPath=join(path,name);
         const childSegments=[...segments,name];
         const entry=relativePath(directory,childSegments);
-        if (childSegments.length===1 && IGNORED_TREE_ROOTS.includes(name)) {
-          continue;
-        }
         const stat=await lstat(childPath);
         if (stat.isSymbolicLink()) {
           throw new TypeError(`symbolic link is not allowed: ${entry}`);
+        }
+        if (IGNORED_TREE_ROOTS.includes(name)) {
+          if (!stat.isDirectory()) {
+            throw new TypeError(`ignored test tree must be a directory: ${entry}`);
+          }
+          continue;
         }
         const direct=childSegments.length===1;
         const candidate=isDirectCandidate(directory,name);
@@ -195,10 +216,8 @@ export function validateTestManifest(manifest,{eligibleEntries}={}) {
   if (!Number.isInteger(root.concurrency.value) || root.concurrency.value<1 || root.concurrency.value>4) {
     throw new TypeError("manifest concurrency must be an integer from 1 to 4");
   }
-  if (!Array.isArray(eligibleEntries)) {
-    throw new TypeError("eligible entries must be an array");
-  }
-  const eligible=new Set(eligibleEntries);
+  const normalizedEligibleEntries=validateEligibleEntries(eligibleEntries);
+  const eligible=new Set(normalizedEligibleEntries);
   const lanes=exactFields(root.lanes.value,OWNERSHIP_LANES,"lanes");
   const owners=new Map();
   const normalizedLanes={};
@@ -217,7 +236,7 @@ export function validateTestManifest(manifest,{eligibleEntries}={}) {
     }
     normalizedLanes[lane]=Object.freeze(entries);
   }
-  for (const entry of eligibleEntries) {
+  for (const entry of normalizedEligibleEntries) {
     if (!owners.has(entry)) {
       throw new TypeError(`missing owner for ${entry}`);
     }

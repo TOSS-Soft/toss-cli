@@ -9,6 +9,9 @@ import {executeTestEntry,runTestLane} from "../scripts/test-runner.mjs";
 const execFile=promisify(execFileCallback);
 const root=fileURLToPath(new URL("..",import.meta.url));
 const runner=fileURLToPath(new URL("../scripts/test-runner.mjs",import.meta.url));
+const passingFixture=fileURLToPath(new URL(
+  "./fixtures/test-runner/passing-entry.mjs",import.meta.url,
+));
 const failingFixture=fileURLToPath(new URL(
   "./fixtures/test-runner/failing-entry.mjs",import.meta.url,
 ));
@@ -206,7 +209,7 @@ for (const example of [
   });
 }
 
-test("executeTestEntry runs only one explicit passing platform path",async () => {
+test("executeTestEntry runs only one explicit passing platform path without an unsupported child flag",async () => {
   const entry="test/fixtures/test-runner/passing-entry.mjs";
   const result=await executeTestEntry(entry,{cwd:root,env:entryEnvironment()});
   assert.deepEqual({
@@ -217,6 +220,13 @@ test("executeTestEntry runs only one explicit passing platform path",async () =>
   });
   assert.match(`${result.stdout}${result.stderr}`,/PASSING_STDOUT_MARKER/);
   assert.match(`${result.stdout}${result.stderr}`,/PASSING_STDERR_MARKER/);
+  const output=`${result.stdout}${result.stderr}`;
+  const execArgv=output.match(/PASSING_EXEC_ARGV:(\[[^\n]+\])/);
+  const argv=output.match(/PASSING_ARGV:(\[[^\n]+\])/);
+  assert.notEqual(execArgv,null);
+  assert.notEqual(argv,null);
+  assert.equal(JSON.parse(execArgv[1]).includes("--test-concurrency=1"),false);
+  assert.deepEqual(JSON.parse(argv[1]),[passingFixture]);
 });
 
 test("executeTestEntry retains a single explicit failing child result",async () => {
@@ -237,7 +247,7 @@ test("executeTestEntry retains a single explicit failing child result",async () 
 
 test("the runner module is inert when loaded as a Node test entry",async () => {
   const result=await execFile(process.execPath,[
-    "--test","--test-concurrency=1",runner,
+    "--test",runner,
   ],{cwd:root,env:entryEnvironment()});
   assert.equal(result.stderr,"");
   assert.match(result.stdout,/pass 1/i);
@@ -246,7 +256,7 @@ test("the runner module is inert when loaded as a Node test entry",async () => {
 
 test("the intentional failure fixture is inert without its explicit signal",async () => {
   const result=await execFile(process.execPath,[
-    "--test","--test-concurrency=1",failingFixture,
+    "--test",failingFixture,
   ],{cwd:root,env:entryEnvironment()});
   assert.equal(result.stderr,"");
   assert.match(result.stdout,/pass 1/i);
