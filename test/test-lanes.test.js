@@ -59,6 +59,10 @@ test("PR and publish workflows preserve the canonical full and package gates",as
     readYaml(".github/workflows/publish.yml"),
   ]);
   assert.ok(ci.on.pull_request,"CI must run for pull requests");
+  assert.equal(
+    ci.jobs.test["timeout-minutes"],30,
+    "PR CI must leave room for npm test plus the prepack full gate",
+  );
   assert.equal(stepRun(ci,"test","Run smoke tests"),"npm test");
   assert.equal(stepRun(ci,"test","Validate npm package"),"npm pack --dry-run");
   assert.equal(stepRun(publish,"validate","Test"),"npm test");
