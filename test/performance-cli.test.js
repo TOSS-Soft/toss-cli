@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import {execFileSync,spawnSync} from "node:child_process";
 import {readFileSync} from "node:fs";
-import {chmod,mkdir,mkdtemp,readdir,realpath,rm,symlink,writeFile} from "node:fs/promises";
+import {chmod,link,mkdir,mkdtemp,readdir,realpath,rm,symlink,writeFile} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join,win32} from "node:path";
 import test from "node:test";
@@ -144,6 +144,67 @@ test("validator benchmark output is restricted to safe untracked .superpowers fi
     readFileSync(join(root,".superpowers","Tracked [final] $.json"),"utf8"),
     "special tracked\n",
   );
+});
+
+function addTrackedIndexEntry(root,entry,contents="tracked\n") {
+  const object=execFileSync("git",["hash-object","-w","--stdin"],{
+    cwd:root,encoding:"utf8",input:contents,
+  }).trim();
+  execFileSync("git",["update-index","--add","--cacheinfo","100644",object,entry],{
+    cwd:root,
+  });
+}
+
+async function validatorAliasFixture(t) {
+  const root=await mkdtemp(join(tmpdir(),"toss-validator-alias-"));
+  t.after(() => rm(root,{recursive:true,force:true}));
+  await mkdir(join(root,".superpowers"));
+  execFileSync("git",["init","--quiet"],{cwd:root});
+  return root;
+}
+
+test("validator output rejects a tracked alias with differently cased .superpowers",async t => {
+  const root=await validatorAliasFixture(t);
+  addTrackedIndexEntry(root,".SUPERPOWERS/report.json");
+
+  await assert.rejects(
+    writeValidatorBenchmarkReport(".superpowers/report.json",{ok:true},root,{
+      canonicalize:value => JSON.stringify(value),
+    }),
+    /tracked/i,
+  );
+  assert.deepEqual(await readdir(join(root,".superpowers")),[]);
+});
+
+test("validator output rejects canonically equivalent Unicode tracked aliases",async t => {
+  const root=await validatorAliasFixture(t);
+  addTrackedIndexEntry(root,".superpowers/caf\u00e9.json");
+
+  await assert.rejects(
+    writeValidatorBenchmarkReport(".superpowers/cafe\u0301.json",{ok:true},root,{
+      canonicalize:value => JSON.stringify(value),
+    }),
+    /tracked/i,
+  );
+  assert.deepEqual(await readdir(join(root,".superpowers")),[]);
+});
+
+test("validator output rejects an existing destination sharing tracked file identity",async t => {
+  const root=await validatorAliasFixture(t);
+  const tracked=join(root,".superpowers","tracked-identity.json");
+  const alias=join(root,".superpowers","identity-alias.json");
+  await writeFile(tracked,"tracked identity\n");
+  execFileSync("git",["add",".superpowers/tracked-identity.json"],{cwd:root});
+  await link(tracked,alias);
+
+  await assert.rejects(
+    writeValidatorBenchmarkReport(".superpowers/identity-alias.json",{ok:true},root,{
+      canonicalize:value => JSON.stringify(value),
+    }),
+    /tracked/i,
+  );
+  assert.equal(readFileSync(tracked,"utf8"),"tracked identity\n");
+  assert.equal(readFileSync(alias,"utf8"),"tracked identity\n");
 });
 
 test("validator benchmark CLI maps invalid output parents to exit five",async t => {

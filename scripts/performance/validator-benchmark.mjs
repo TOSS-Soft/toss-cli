@@ -364,13 +364,37 @@ async function rejectSymlinkPath(destination,root) {
   }
 }
 
+function portablePathKey(path) {
+  return path.normalize("NFC").toLowerCase();
+}
+
 async function tracked(destination,root) {
-  const entry=relative(root,destination).split(sep).join("/").toLowerCase();
+  const entry=portablePathKey(relative(root,destination).split(sep).join("/"));
   const {stdout}=await executeFile("git",[
-    "ls-files","-z","--full-name","--",".superpowers",
+    "ls-files","-z","--full-name",
   ],{cwd:root,encoding:"utf8",shell:false});
-  return stdout.split("\0").some(candidate =>
-    candidate!=="" && candidate.toLowerCase()===entry);
+  const candidates=stdout.split("\0").filter(candidate => candidate!=="");
+  if (candidates.some(candidate => portablePathKey(candidate)===entry)) return true;
+
+  let destinationStatus;
+  try {
+    destinationStatus=await lstat(destination,{bigint:true});
+  } catch (error) {
+    if (error?.code==="ENOENT") return false;
+    throw error;
+  }
+  for (const candidate of candidates) {
+    try {
+      const candidateStatus=await lstat(resolve(root,candidate),{bigint:true});
+      if (candidateStatus.dev===destinationStatus.dev &&
+          candidateStatus.ino===destinationStatus.ino) {
+        return true;
+      }
+    } catch (error) {
+      if (error?.code!=="ENOENT" && error?.code!=="ENOTDIR") throw error;
+    }
+  }
+  return false;
 }
 
 async function safeOutputDestination(path,root) {
