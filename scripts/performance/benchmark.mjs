@@ -10,7 +10,7 @@ import {canonicalJson} from "../../src/contracts/acp.js";
 import {
   FAST_MAX_WALL_MS,HISTORICAL_FULL_WALL_MS,PERFORMANCE_BASELINE_VERSION,
   PerformanceToolError,canonicalPerformanceJson,compatiblePerformanceIdentity,
-  createPerformanceReport,validatePerformanceBaseline,validatePerformanceIdentity,
+  createPerformanceReport,performanceCommandForLane,validatePerformanceBaseline,validatePerformanceIdentity,
   validatePerformanceReport,
 } from "./report.mjs";
 import {runSuiteOnce} from "./run-suite.mjs";
@@ -31,7 +31,7 @@ function nonemptyString(value,label) {
 }
 
 function validateLane(lane) {
-  if (lane!=="full") throw new TypeError("benchmark capture requires the full lane");
+  if (lane!=="fast" && lane!=="full") throw new TypeError("benchmark lane must be fast or full");
   return lane;
 }
 
@@ -129,12 +129,12 @@ export async function runBenchmark({runs,lane,runnerId,cwd,identity,runOnce=runS
   nonemptyString(cwd,"benchmark cwd");
   if (typeof runOnce!=="function") throw new TypeError("benchmark runOnce must be a function");
   const exactIdentity=identity===undefined ? await collectIdentity(cwd,runnerId) : validateIdentity(identity,runnerId);
-  const npm=process.platform==="win32" ? "npm.cmd" : "npm";
-  const command={executable:npm,arguments:["test"]};
+  const executable=process.platform==="win32" ? "npm.cmd" : "npm";
+  const command=performanceCommandForLane(lane,{executable});
   const samples=[];
   for (let index=0;index<3;index+=1) {
     samples.push(await runOnce({
-      command:npm,args:["test"],cwd,
+      command:command.executable,args:command.arguments,cwd,
       runId:`${exactIdentity.commit}-${index+1}`,env:{},
     }));
   }
@@ -144,6 +144,12 @@ export async function runBenchmark({runs,lane,runnerId,cwd,identity,runOnce=runS
 export function createBaseline(report,existingBaseline) {
   const normalized=validatePerformanceReport(report);
   if (normalized.lane!=="full") throw new TypeError("baseline requires the full lane");
+  const expectedCommand=performanceCommandForLane("full",{
+    executable:normalized.command.executable,
+  });
+  if (canonicalJson(normalized.command)!==canonicalJson(expectedCommand)) {
+    throw new TypeError("baseline requires canonical full command evidence");
+  }
   const basis=Math.min(HISTORICAL_FULL_WALL_MS,normalized.medians.wall_ms);
   const calculatedLimit=Math.floor(basis*0.70);
   let fullLimit=calculatedLimit;
