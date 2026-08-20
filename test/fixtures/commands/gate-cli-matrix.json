@@ -1,0 +1,12 @@
+[
+  {"name":"decisions list","argv":["decisions","list"],"service_profile":"read-only","exit_code":4},
+  {"name":"decisions answer","argv":["decisions","answer","Q-001","--from","answer.json","--non-interactive"],"service_profile":"input","exit_code":4},
+  {"name":"architecture review","argv":["architecture","review"],"service_profile":"read-only","exit_code":0},
+  {"name":"architecture approve","argv":["architecture","approve","ADR-001","--from","approval.json","--non-interactive"],"service_profile":"input","exit_code":4},
+  {"name":"plan show","argv":["plan","show"],"service_profile":"read-only","exit_code":0},
+  {"name":"audit run","argv":["audit","run"],"service_profile":"read-only","exit_code":0},
+  {"name":"readiness check","argv":["readiness","check"],"service_profile":"read-only","exit_code":4},
+  {"name":"issues preview","argv":["issues","preview"],"service_profile":"issues","exit_code":4},
+  {"name":"issues publish dry-run","argv":["issues","publish"],"service_profile":"issues","exit_code":4},
+  {"name":"issues publish apply","argv":["issues","publish","--apply","--from","publication.json","--non-interactive"],"service_profile":"issues","exit_code":4}
+]
