@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
 
@@ -54,14 +55,18 @@ function launchEnvironment() {
   return env;
 }
 
-async function runProductionCli({ cwd, root, argv }) {
+function cliFilesystemPath(url) {
+  return fileURLToPath(url);
+}
+
+async function runProductionCli({ cwd, root, argv, cliUrl = CLI }) {
   productionCliStarts += 1;
   let invoked;
   try {
     const { stdout, stderr } = await execFileAsync(process.execPath, [
       "--import",
       NETWORK_GUARD.href,
-      CLI.pathname,
+      cliFilesystemPath(cliUrl),
       ...argv,
       "--project",
       root,
@@ -133,14 +138,22 @@ test("two production CLI sentinels preserve the executable boundary", async (t) 
     commandServices(store, input)
   );
 
+  const escapedCliUrl = new URL(CLI.href.replace(/cli\.js$/u, "%63li.js"));
+  assert.match(escapedCliUrl.href, /%63/u);
   const jsonSuccess = await runProductionCli({
     cwd: outsideRoot,
     root,
     argv: ["architecture", "review", "--json"],
+    cliUrl: escapedCliUrl,
   });
   assert.equal(jsonSuccess.exitCode, 0);
   assert.equal(jsonSuccess.stderr, "");
   assert.equal(JSON.parse(jsonSuccess.stdout).ok, true);
+
+  const nativeSpacedCliPath = join(tmpdir(), "toss cli", "src", "cli.js");
+  const escapedSpaceCliUrl = pathToFileURL(nativeSpacedCliPath);
+  assert.match(escapedSpaceCliUrl.href, /%20/u);
+  assert.equal(cliFilesystemPath(escapedSpaceCliUrl), nativeSpacedCliPath);
 
   const humanBlocked = await runProductionCli({
     cwd: outsideRoot,
