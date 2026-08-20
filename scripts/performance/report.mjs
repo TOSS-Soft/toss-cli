@@ -103,6 +103,15 @@ function nonemptyString(value,label) {
   return value;
 }
 
+export function performanceCommandForLane(lane,{executable}) {
+  if (typeof executable!=="string" || executable.length===0) {
+    throw new TypeError("performance executable must be a nonempty string");
+  }
+  if (lane==="full") return {executable,arguments:["test"]};
+  if (lane==="fast") return {executable,arguments:["run","test:fast"]};
+  throw new TypeError("performance lane must be fast or full");
+}
+
 function nonnegativeInteger(value,label) {
   finiteNonnegative(value,label);
   if (!Number.isInteger(value)) throw new TypeError(`${label} must be an integer`);
@@ -325,6 +334,9 @@ function validateReportInput(input) {
   const record=closedRecord(input,"performance report input",["command","lane","identity","samples"]);
   validateCommand(record.command);
   nonemptyString(record.lane,"performance lane");
+  if (record.lane!=="fast" && record.lane!=="full") {
+    throw new TypeError("performance lane must be fast or full");
+  }
   validateIdentity(record.identity);
   denseArray(record.samples,"performance samples");
   if (record.samples.length!==3) {
@@ -446,16 +458,25 @@ export function compatiblePerformanceIdentity(baseline,candidate) {
 
 export function comparePerformanceBudget(baseline,candidate,lane) {
   const baselineReport=validatePerformanceBaseline(baseline);
-  const candidateReport=validatePerformanceReport(candidate);
   if (lane!=="fast" && lane!=="full") throw new TypeError("performance lane must be fast or full");
-  if (baselineReport.lane!==lane) {
-    throw new TypeError("performance baseline lane must match requested lane");
+  if (baselineReport.lane!=="full") {
+    throw new TypeError("performance baseline must use the full lane");
   }
+  const baselineCommand=performanceCommandForLane("full",{
+    executable:baselineReport.command.executable,
+  });
+  if (canonicalJson(baselineReport.command)!==canonicalJson(baselineCommand)) {
+    throw new TypeError("performance baseline command must match canonical full command");
+  }
+  const candidateReport=validatePerformanceReport(candidate);
   if (candidateReport.lane!==lane) {
     throw new TypeError("performance candidate lane must match requested lane");
   }
-  if (canonicalJson(baselineReport.command)!==canonicalJson(candidateReport.command)) {
-    throw new TypeError("performance candidate command must match baseline command");
+  const expectedCommand=lane==="full" ? baselineReport.command : performanceCommandForLane("fast",{
+    executable:baselineReport.command.executable,
+  });
+  if (canonicalJson(candidateReport.command)!==canonicalJson(expectedCommand)) {
+    throw new TypeError("performance candidate command must match the requested lane");
   }
   const limit_ms=lane==="fast" ? baselineReport.budgets.fast_max_wall_ms :
     baselineReport.budgets.full_max_wall_ms;

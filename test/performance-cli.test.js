@@ -23,13 +23,15 @@ const sample=wall_ms => ({
   slowest_files:[],slowest_tests:[],stdout:"",stderr:"",
 });
 
-function reportDocument({walls=[139,140,141],exactIdentity=identity}={}) {
+function reportDocument({
+  walls=[139,140,141],lane="full",exactIdentity=identity,exactCommand=command,
+}={}) {
   const samples=walls.map(wall => {
     const {stdout,stderr,...evidence}=sample(wall);
     return evidence;
   });
   return {
-    schema_version:"toss-test-performance-report.v1",command,lane:"full",identity:exactIdentity,
+    schema_version:"toss-test-performance-report.v1",command:exactCommand,lane,identity:exactIdentity,
     samples,
     medians:{
       wall_ms:walls[1],user_cpu_ms:10,system_cpu_ms:5,
@@ -38,8 +40,10 @@ function reportDocument({walls=[139,140,141],exactIdentity=identity}={}) {
   };
 }
 
-function baselineDocument({walls,fullLimit=100,exactIdentity}={}) {
-  const report=reportDocument({walls:walls ?? [143,144,145],exactIdentity});
+function baselineDocument({walls,fullLimit=100,exactIdentity,exactCommand}={}) {
+  const report=reportDocument({
+    walls:walls ?? [143,144,145],lane:"full",exactIdentity,exactCommand,
+  });
   return {
     ...report,schema_version:"toss-test-performance-baseline.v1",
     historical:{full_wall_ms:134960},
@@ -54,9 +58,14 @@ test("package exposes opt-in performance commands without weakening full verific
   const pkg=JSON.parse(readFileSync(new URL("../package.json",import.meta.url),"utf8"));
   assert.equal(pkg.scripts["test:benchmark"],"node ./scripts/performance/benchmark.mjs");
   assert.equal(pkg.scripts["test:performance-budget"],"node ./scripts/performance/budget.mjs");
+  assert.equal(pkg.scripts.test,"npm run test:full");
+  assert.equal(pkg.scripts["test:fast"],"node ./scripts/test-runner.mjs fast");
+  assert.equal(pkg.scripts["test:integration"],"node ./scripts/test-runner.mjs integration");
+  assert.equal(pkg.scripts["test:e2e"],"node ./scripts/test-runner.mjs e2e");
+  assert.equal(pkg.scripts["test:package"],"node ./scripts/test-runner.mjs package");
+  assert.equal(pkg.scripts["test:release"],"node ./scripts/test-runner.mjs release");
+  assert.equal(pkg.scripts["test:full"],"node ./scripts/test-runner.mjs full");
   assert.equal(pkg.scripts.prepack,"npm test");
-  assert.match(pkg.scripts.test,/release-workflow-test\.js/);
-  assert.match(pkg.scripts.test,/node --test$/);
 });
 
 async function benchmarkFixture(t) {
@@ -109,6 +118,33 @@ test("benchmark invokes exactly three samples",async () => {
   ]);
 });
 
+test("benchmark runs the truthful canonical command for each measurable lane",async () => {
+  const rows=[];
+  const executable=process.platform==="win32" ? "npm.cmd" : "npm";
+  const runOnce=async input => {
+    rows.push({command:input.command,args:input.args});
+    return sample(1000);
+  };
+  const full=await runBenchmark({
+    runs:3,lane:"full",runnerId:identity.runner_id,cwd:process.cwd(),identity,runOnce,
+  });
+  assert.deepEqual(full.command,{executable,arguments:["test"]});
+  const fast=await runBenchmark({
+    runs:3,lane:"fast",runnerId:identity.runner_id,cwd:process.cwd(),identity,runOnce,
+  });
+  assert.deepEqual(fast.command,{executable,arguments:["run","test:fast"]});
+  assert.deepEqual(rows.slice(0,3),[
+    {command:executable,args:["test"]},
+    {command:executable,args:["test"]},
+    {command:executable,args:["test"]},
+  ]);
+  assert.deepEqual(rows.slice(3),[
+    {command:executable,args:["run","test:fast"]},
+    {command:executable,args:["run","test:fast"]},
+    {command:executable,args:["run","test:fast"]},
+  ]);
+});
+
 test("ordinary benchmark orchestration writes no file",async t => {
   const root=await mkdtemp(join(tmpdir(),"toss-performance-no-write-"));
   t.after(() => rm(root,{recursive:true,force:true}));
@@ -134,6 +170,13 @@ test("baseline construction never relaxes budgets",() => {
   assert.equal(baseline.historical.full_wall_ms,134960);
   assert.equal(baseline.budgets.fast_max_wall_ms,15000);
   assert.equal(baseline.budgets.full_max_wall_ms,89600);
+});
+
+test("baseline construction requires canonical full-command evidence",() => {
+  const noncanonical=reportDocument({
+    exactCommand:{executable:"npm",arguments:["run","test:fast"]},
+  });
+  assert.throws(() => createBaseline(noncanonical),/canonical full command/);
 });
 
 test("baseline refresh retains a stricter limit and tightens for a faster capture",() => {
@@ -167,7 +210,7 @@ test("benchmark renders deterministic JSON and readable human output",() => {
   assert.match(human.stdout,/processes: 2/);
 });
 
-test("budget CLI returns stable pass, exceed, and incompatibility results",async t => {
+test("budget CLI returns stable full pass, exceed, and incompatibility results",async t => {
   const root=await mkdtemp(join(tmpdir(),"toss-budget-cli-"));
   t.after(() => rm(root,{recursive:true,force:true}));
   const baseline=baselineDocument();
@@ -188,6 +231,33 @@ test("budget CLI returns stable pass, exceed, and incompatibility results",async
     assert.equal(result.status,status,result.stderr);
     assert.equal(result.stderr,"");
     assert.equal(JSON.parse(result.stdout).code,code);
+  }
+});
+
+test("budget CLI compares truthful fast reports against the full-origin baseline",async t => {
+  const root=await mkdtemp(join(tmpdir(),"toss-fast-budget-cli-"));
+  t.after(() => rm(root,{recursive:true,force:true}));
+  const baselinePath=join(root,"baseline.json");
+  await writeFile(baselinePath,JSON.stringify(baselineDocument()));
+  const fastCommand={executable:"npm",arguments:["run","test:fast"]};
+  for (const [name,walls,exactCommand,identityOverride,status,code,message] of [
+    ["pass",[14999,14999,14999],fastCommand,{},0,"PERFORMANCE_BUDGET_OK",undefined],
+    ["exceeds",[15001,15001,15001],fastCommand,{},5,"FAST_WALL_BUDGET_EXCEEDED",undefined],
+    ["command-mismatch",[1000,1000,1000],command,{},5,"INVALID_PERFORMANCE_EVIDENCE",/candidate command/],
+    ["identity-mismatch",[1000,1000,1000],fastCommand,{lock_sha256:"b".repeat(64)},5,
+      "INCOMPATIBLE_PERFORMANCE_ENVIRONMENT",undefined],
+  ]) {
+    const reportPath=join(root,`${name}.json`);
+    await writeFile(reportPath,JSON.stringify(reportDocument({
+      walls,lane:"fast",exactCommand,exactIdentity:{...identity,...identityOverride},
+    })));
+    const result=spawnSync(process.execPath,[budgetCli,
+      "--baseline",baselinePath,"--report",reportPath,"--lane","fast","--json",
+    ],{encoding:"utf8"});
+    assert.equal(result.status,status,result.stderr);
+    const payload=JSON.parse(result.stdout);
+    assert.equal(payload.code,code);
+    if (message) assert.match(payload.message,message);
   }
 });
 
@@ -273,20 +343,23 @@ test("failed atomic rename removes its exclusive temporary file",async t => {
   assert.deepEqual((await readdir(canonicalRoot)).filter(name => name.includes("report")),[]);
 });
 
-test("baseline updates require the full lane before any benchmark run",async t => {
+test("baseline updates require the full lane while ordinary fast captures remain measurable",async t => {
   if (process.platform==="win32") return t.skip("fixture npm script is POSIX-only");
   let calls=0;
-  assert.throws(() => parseBenchmarkOptions([
+  assert.equal(parseBenchmarkOptions([
     "--runs","3","--lane","fast","--runner-id",identity.runner_id,
-  ]),/full lane/);
-  await assert.rejects(runBenchmark({
-    runs:3,lane:"fast",runnerId:identity.runner_id,cwd:"/does-not-exist",
+  ]).lane,"fast");
+  const fast=await runBenchmark({
+    runs:3,lane:"fast",runnerId:identity.runner_id,cwd:"/does-not-exist",identity,
     runOnce:async () => { calls+=1; return sample(1); },
-  }),/full lane/);
-  assert.equal(calls,0);
+  });
+  assert.equal(fast.lane,"fast");
+  assert.equal(calls,3);
   const fixture=await benchmarkFixture(t);
   await fixture.setNpm("printf invoked > invoked\nnode -e ''");
-  const result=fixture.run(["--output","fast-report.json"],{lane:"fast"});
+  const result=fixture.run([
+    "--update-baseline","docs/performance/v2.1.1-baseline.json",
+  ],{lane:"fast"});
   assert.equal(result.status,2,result.stderr);
   assert.ok(!(await readdir(fixture.root)).includes("invoked"));
   assert.ok(!(await readdir(fixture.root)).includes("fast-report.json"));
