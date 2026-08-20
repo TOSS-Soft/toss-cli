@@ -6,6 +6,7 @@ import {
   createContractValidator,
   validateDocument,
 } from "../src/contracts/validator.js";
+import {canonicalJson} from "../src/contracts/acp.js";
 import {
   SEMANTIC_VALIDATION_BOUNDARY,
   validateArtifactGraph,
@@ -14,6 +15,7 @@ import {
   fromYamlProjection,
   toYamlProjection,
 } from "../src/contracts/yaml-projection.js";
+import {createEagerContractValidator} from "./support/eager-contract-validator.mjs";
 
 async function fixture(path) {
   return JSON.parse(await readFile(new URL(
@@ -50,6 +52,297 @@ const acpFixture=JSON.parse(await readFile(new URL(
   "./fixtures/acp/full-pipeline.json",
   import.meta.url,
 ),"utf8"));
+const pmAnalysisFixture=JSON.parse(await readFile(new URL(
+  "./fixtures/pm-analysis/valid/complete-artifact.json",
+  import.meta.url,
+),"utf8"));
+const issuePlanFixture=JSON.parse(await readFile(new URL(
+  "./fixtures/issue-plan/valid/complete-artifact.json",
+  import.meta.url,
+),"utf8"));
+const designGraphFixture=JSON.parse(await readFile(new URL(
+  "./fixtures/design-contracts/valid-graph.json",
+  import.meta.url,
+),"utf8"));
+
+const logicalSchemaIds=[
+  "adr-approval.v1",
+  "adr.v1",
+  "architecture-constraint.v1",
+  "architecture.v1",
+  "artifact-envelope.v1",
+  "command-result.v1",
+  "decision-answer.v1",
+  "decision-package.v1",
+  "design-approval.v1",
+  "design-audit.v1",
+  "design-brief.v1",
+  "design-orchestration-state.v1",
+  "design-system.v1",
+  "entity.v1",
+  "feature-delta.v1",
+  "finding.v1",
+  "github-publication-result.v1",
+  "information-architecture.v1",
+  "issue-plan.v1",
+  "pdor-result.v1",
+  "pm-analysis.v1",
+  "project-input.v1",
+  "prototype-manifest.v1",
+  "provenance.v1",
+  "question.v1",
+  "reference.v1",
+  "screen-spec.v1",
+  "spec-audit.v1",
+  "trace-graph.v1",
+  "trace-result.v1",
+  "transition-event.v1",
+  "ui-design-dor-result.v1",
+  "usability-evidence.v1",
+  "user-flow.v1",
+  "ux-analysis.v1",
+  "visual-direction.v1",
+  "wireframe-plan.v1",
+];
+
+const designSchemaByDocumentType={
+  "design-brief":"design-brief.v1",
+  "ux-analysis":"ux-analysis.v1",
+  "user-flow":"user-flow.v1",
+  "information-architecture":"information-architecture.v1",
+  "wireframe-plan":"wireframe-plan.v1",
+  "visual-direction":"visual-direction.v1",
+  "design-system":"design-system.v1",
+  "screen-spec":"screen-spec.v1",
+  "prototype-manifest":"prototype-manifest.v1",
+  "usability-evidence":"usability-evidence.v1",
+  "design-audit":"design-audit.v1",
+  "design-approval":"design-approval.v1",
+};
+
+function replaceDesignHashTokens(value,hash) {
+  if (Array.isArray(value)) return value.map(item => replaceDesignHashTokens(item,hash));
+  if (!value || typeof value!=="object") {
+    return typeof value==="string" && value.startsWith("@") ? hash : value;
+  }
+  return Object.fromEntries(Object.entries(value).map(([key,item]) => [
+    key,replaceDesignHashTokens(item,hash),
+  ]));
+}
+
+function designDocuments() {
+  const hash="d".repeat(64);
+  const documents=[];
+  for (const descriptor of designGraphFixture.artifacts) {
+    const referenceFor=documentType => ({
+      document_type:documentType,
+      artifact_id:`${documentType}:DESIGN-CHECKOUT`,
+      revision:1,
+      content_sha256:hash,
+    });
+    const parents=(descriptor.parents ?? []).map(referenceFor);
+    const content=replaceDesignHashTokens(descriptor.content,hash);
+    if (descriptor.document_type==="design-approval") {
+      content.graph_manifest=documents.map(document => referenceFor(document.document_type));
+      content.graph_root_sha256=hash;
+    }
+    documents.push({
+      schema_version:"acp.v1",
+      document_type:descriptor.document_type,
+      artifact_id:`${descriptor.document_type}:DESIGN-CHECKOUT`,
+      revision:1,
+      run_id:"run:design-equivalence:001",
+      producer:{role:descriptor.producer_role,identity:`toss-${descriptor.producer_role}`},
+      runtime_identity:{kind:"agent",name:"fixture-runtime",version:"1.0.0"},
+      created_at:"2026-08-17T12:00:00Z",
+      provenance:{
+        source_revision:designGraphFixture.source_revision,
+        source_sha256:designGraphFixture.source_sha256,
+        locations:["project-brief.md#design"],
+      },
+      parents,
+      inputs:parents,
+      content_sha256:hash,
+      content,
+    });
+  }
+  return documents;
+}
+
+function programmaticCanonicalFailures() {
+  const undefinedContent=cloneJson(validArtifactEnvelope);
+  undefinedContent.content=undefined;
+
+  const dateContent=cloneJson(validArtifactEnvelope);
+  dateContent.content=new Date("2026-08-17T00:00:00.000Z");
+
+  const customPrototypeContent=cloneJson(validArtifactEnvelope);
+  customPrototypeContent.content=Object.create({inherited:true});
+
+  const hiddenContent=cloneJson(validArtifactEnvelope);
+  Object.defineProperty(hiddenContent.content,"hidden",{
+    enumerable:false,
+    value:true,
+  });
+
+  const symbolContent=cloneJson(validArtifactEnvelope);
+  symbolContent.content[Symbol("hidden")]=true;
+
+  const accessorContent=cloneJson(validArtifactEnvelope);
+  Object.defineProperty(accessorContent.content,"computed",{
+    enumerable:true,
+    get() {
+      return true;
+    },
+  });
+
+  const inheritedEnvelope=Object.create(validArtifactEnvelope);
+  return [
+    ["undefined content",undefinedContent],
+    ["Date content",dateContent],
+    ["custom-prototype content",customPrototypeContent],
+    ["non-enumerable content",hiddenContent],
+    ["symbol content",symbolContent],
+    ["accessor content",accessorContent],
+    ["inherited envelope",inheritedEnvelope],
+  ];
+}
+
+function assertEquivalentValidation(eager,demand,value,schemaId,label) {
+  const expected=eager.validateDocument(value,schemaId);
+  const actual=demand.validateDocument(value,schemaId);
+  assert.deepStrictEqual(actual,expected,label);
+  assert.equal(canonicalJson(actual),canonicalJson(expected),label);
+  return actual;
+}
+
+test("demand validation remains byte-equivalent to the issue 86 eager reference",() => {
+  const eager=createEagerContractValidator();
+  const demand=createContractValidator();
+
+  for (const schemaId of logicalSchemaIds) {
+    assertEquivalentValidation(eager,demand,{},schemaId,`empty ${schemaId}`);
+  }
+
+  const commonCases=[
+    [validArtifactEnvelope,"artifact-envelope.v1"],
+    [validEntity,"entity.v1"],
+    [validProvenance,"provenance.v1"],
+    [validInternalReference,"reference.v1"],
+    [validExternalReference,"reference.v1"],
+    [validQuestion,"question.v1"],
+    [invalidPrefix,"entity.v1"],
+    [invalidEnvelopeProperty,"artifact-envelope.v1"],
+    [invalidReferenceVariant,"reference.v1"],
+    [invalidQuestion,"question.v1"],
+  ];
+  for (const [value,schemaId] of commonCases) {
+    assertEquivalentValidation(eager,demand,value,schemaId,`common ${schemaId}`);
+  }
+  for (const graph of [
+    validGraph,
+    danglingGraph,
+    danglingQuestionAffectedEntityGraph,
+    danglingArtifactGraph,
+    mismatchedArtifactTypeGraph,
+    duplicateGraph,
+    conflictingPrefixGraph,
+  ]) {
+    for (const artifact of graph) {
+      assertEquivalentValidation(
+        eager,demand,artifact,"artifact-envelope.v1","common graph artifact",
+      );
+    }
+  }
+
+  assert.equal(assertEquivalentValidation(
+    eager,demand,pmAnalysisFixture,"pm-analysis.v1","valid PM analysis",
+  ).valid,true);
+  assert.equal(assertEquivalentValidation(
+    eager,demand,{...pmAnalysisFixture,unexpected:true},"pm-analysis.v1","invalid PM analysis",
+  ).valid,false);
+  assert.equal(assertEquivalentValidation(
+    eager,demand,issuePlanFixture,"issue-plan.v1","valid issue plan",
+  ).valid,true);
+  assert.equal(assertEquivalentValidation(
+    eager,demand,{...issuePlanFixture,unexpected:true},"issue-plan.v1","invalid issue plan",
+  ).valid,false);
+
+  const designs=designDocuments();
+  for (const document of designs) {
+    const schemaId=designSchemaByDocumentType[document.document_type];
+    assert.equal(assertEquivalentValidation(
+      eager,demand,document,schemaId,`valid design ${document.document_type}`,
+    ).valid,true);
+  }
+  assert.equal(assertEquivalentValidation(
+    eager,
+    demand,
+    {...designs[0],unexpected:true},
+    "design-brief.v1",
+    "invalid design brief",
+  ).valid,false);
+
+  const commandSuccess={
+    schema_version:"command-result.v1",
+    document_type:"command-result",
+    ok:true,
+    data:{ready:true,evidence:["PDOR-001"]},
+    error:null,
+  };
+  const commandFailure={
+    schema_version:"command-result.v1",
+    document_type:"command-result",
+    ok:false,
+    data:null,
+    error:{code:"READINESS_BLOCKED",message:"Audit failed"},
+  };
+  for (const value of [
+    commandSuccess,
+    commandFailure,
+    {...commandSuccess,extra:true},
+    {...commandFailure,error:{...commandFailure.error,extra:true}},
+  ]) {
+    assertEquivalentValidation(eager,demand,value,"command-result.v1","command result");
+  }
+
+  for (const [name,value] of programmaticCanonicalFailures()) {
+    assert.equal(assertEquivalentValidation(
+      eager,demand,value,"artifact-envelope.v1",name,
+    ).valid,false);
+  }
+
+  const impossibleDate=cloneJson(validArtifactEnvelope);
+  impossibleDate.created_at="2026-02-30T12:00:00Z";
+  for (const [label,value,schemaId] of [
+    ["impossible RFC3339 date",impossibleDate,"artifact-envelope.v1"],
+    ["additional property",invalidEnvelopeProperty,"artifact-envelope.v1"],
+    ["broken reference",invalidReferenceVariant,"reference.v1"],
+  ]) {
+    assert.equal(assertEquivalentValidation(eager,demand,value,schemaId,label).valid,false);
+  }
+
+  let eagerOutput;
+  let demandOutput;
+  let eagerError;
+  let demandError;
+  try {
+    eagerOutput=eager.validateDocument({},"unknown.v1");
+  } catch (error) {
+    eagerError=error;
+  }
+  try {
+    demandOutput=demand.validateDocument({},"unknown.v1");
+  } catch (error) {
+    demandError=error;
+  }
+  assert.equal(eagerOutput,undefined);
+  assert.equal(demandOutput,undefined);
+  assert.deepStrictEqual(
+    {constructorName:demandError?.constructor.name,message:demandError?.message},
+    {constructorName:eagerError?.constructor.name,message:eagerError?.message},
+  );
+});
 
 test("common schemas accept complete normative documents and reject closed-shape violations",() => {
   const validator=createContractValidator();
@@ -116,43 +409,7 @@ test("shape validation remains separate from graph-level prefix meaning validati
 });
 
 test("public document validation fails closed for programmatic values outside canonical JSON",() => {
-  const undefinedContent=cloneJson(validArtifactEnvelope);
-  undefinedContent.content=undefined;
-
-  const dateContent=cloneJson(validArtifactEnvelope);
-  dateContent.content=new Date("2026-08-17T00:00:00.000Z");
-
-  const customPrototypeContent=cloneJson(validArtifactEnvelope);
-  customPrototypeContent.content=Object.create({inherited:true});
-
-  const hiddenContent=cloneJson(validArtifactEnvelope);
-  Object.defineProperty(hiddenContent.content,"hidden",{
-    enumerable:false,
-    value:true,
-  });
-
-  const symbolContent=cloneJson(validArtifactEnvelope);
-  symbolContent.content[Symbol("hidden")]=true;
-
-  const accessorContent=cloneJson(validArtifactEnvelope);
-  Object.defineProperty(accessorContent.content,"computed",{
-    enumerable:true,
-    get() {
-      return true;
-    },
-  });
-
-  const inheritedEnvelope=Object.create(validArtifactEnvelope);
-  const cases=[
-    ["undefined content",undefinedContent],
-    ["Date content",dateContent],
-    ["custom-prototype content",customPrototypeContent],
-    ["non-enumerable content",hiddenContent],
-    ["symbol content",symbolContent],
-    ["accessor content",accessorContent],
-    ["inherited envelope",inheritedEnvelope],
-  ];
-  for (const [name,value] of cases) {
+  for (const [name,value] of programmaticCanonicalFailures()) {
     let result;
     assert.doesNotThrow(() => {
       result=validateDocument(value,"artifact-envelope.v1");

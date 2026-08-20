@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import {spawnSync} from "node:child_process";
 import {readFile} from "node:fs/promises";
 import test from "node:test";
 
@@ -7,6 +8,43 @@ import {
   validateContractSchemaCatalog,
 } from "../src/contracts/schema-catalog.js";
 import {createValidatorRuntime} from "../src/contracts/validator-runtime.js";
+
+const validatorModuleUrl=new URL("../src/contracts/validator.js",import.meta.url).href;
+
+function runFreshValidatorProbe(body) {
+  return spawnSync(process.execPath,[
+    "--input-type=module",
+    "--eval",
+    `
+      import {createRequire} from "node:module";
+      const require=createRequire(import.meta.url);
+      const ajvIsCached=() => Object.keys(require.cache).some(cachedPath =>
+        cachedPath.replaceAll("\\\\","/").includes("/node_modules/ajv/"));
+      const validator=await import(${JSON.stringify(validatorModuleUrl)});
+      const publicExports=Object.keys(validator).sort();
+      if (JSON.stringify(publicExports)!==JSON.stringify([
+        "createContractValidator","validateDocument",
+      ])) throw new Error("Unexpected validator exports: "+publicExports.join(", "));
+      ${body}
+    `,
+  ],{encoding:"utf8"});
+}
+
+test("public validator import and factory construction leave Ajv cold until validation",() => {
+  const cold=runFreshValidatorProbe(`
+    if (ajvIsCached()) throw new Error("Ajv loaded during validator import");
+    validator.createContractValidator();
+    if (ajvIsCached()) throw new Error("Ajv loaded during validator factory construction");
+  `);
+  assert.equal(cold.status,0,cold.stderr || cold.stdout);
+
+  const firstValidation=runFreshValidatorProbe(`
+    if (ajvIsCached()) throw new Error("Ajv loaded before validation");
+    validator.validateDocument({},"command-result.v1");
+    if (!ajvIsCached()) throw new Error("Ajv did not load during validation");
+  `);
+  assert.equal(firstValidation.status,0,firstValidation.stderr || firstValidation.stdout);
+});
 
 const BASE_CATALOG=[
   {
