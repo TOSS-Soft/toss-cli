@@ -15,6 +15,7 @@ import {
 
 const root=fileURLToPath(new URL("..",import.meta.url));
 const manifestUrl=new URL("../scripts/test-manifest.json",import.meta.url);
+const manifestModuleUrl=new URL("../scripts/test-manifest.mjs",import.meta.url);
 const execFile=promisify(execFileCallback);
 
 const eligible=["scripts/a-test.js","test/a.test.js","test/b.test.js"];
@@ -342,14 +343,22 @@ test("the manifest integrity CLI reports a passing checked-in inventory",async (
   assert.equal(result.stderr,"");
 });
 
-test("the manifest integrity CLI returns the validation diagnostic",async t => {
-  const original=await readFile(manifestUrl,"utf8");
-  t.after(() => writeFile(manifestUrl,original,"utf8"));
-  const manifest=JSON.parse(original);
+test("the manifest integrity CLI returns the validation diagnostic from an isolated fixture",async t => {
+  const isolatedRoot=await createRepository(t);
+  const manifest=await readCheckedInManifest();
   manifest.concurrency=0;
-  await writeFile(manifestUrl,`${JSON.stringify(manifest,null,2)}\n`,"utf8");
+  await write(
+    isolatedRoot,
+    "scripts/test-manifest.json",
+    `${JSON.stringify(manifest,null,2)}\n`,
+  );
+  await write(
+    isolatedRoot,
+    "scripts/test-manifest.mjs",
+    await readFile(manifestModuleUrl,"utf8"),
+  );
   await assert.rejects(
-    () => execFile(process.execPath,["./scripts/test-manifest.mjs"],{cwd:root}),
+    () => execFile(process.execPath,["./scripts/test-manifest.mjs"],{cwd:isolatedRoot}),
     error => {
       assert.equal(error.code,1);
       assert.equal(error.stdout,"");
