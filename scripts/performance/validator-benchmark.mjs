@@ -1,5 +1,5 @@
 import {execFile} from "node:child_process";
-import {createHash} from "node:crypto";
+import {createHash,randomBytes} from "node:crypto";
 import {lstat,readFile,realpath,rename,rm,writeFile} from "node:fs/promises";
 import {arch,platform} from "node:os";
 import {dirname,relative,resolve,sep} from "node:path";
@@ -413,26 +413,44 @@ async function safeOutputDestination(path,root) {
 export async function writeValidatorBenchmarkReport(path,value,root,{
   canonicalize=canonicalValidatorColdStartJson,
   renameFile=rename,
+  writeTemporary=writeFile,
+  removeTemporary=rm,
 }={}) {
-  if (typeof canonicalize!=="function" || typeof renameFile!=="function") {
+  if (typeof canonicalize!=="function" || typeof renameFile!=="function" ||
+      typeof writeTemporary!=="function" || typeof removeTemporary!=="function") {
     throw new TypeError("validator report writer dependencies must be functions");
   }
   const {destination,parent}=await safeOutputDestination(path,root);
   const output=canonicalize(value);
   const leaf=destination.split(sep).at(-1);
-  const temporary=resolve(parent,`.${leaf}.${process.pid}.${Date.now()}.tmp`);
-  await writeFile(temporary,output,{encoding:"utf8",flag:"wx",mode:0o600});
+  const nonce=randomBytes(16).toString("hex");
+  const temporary=resolve(parent,`.${leaf}.${process.pid}.${nonce}.tmp`);
+  let completed=false;
+  let primaryFailure;
   try {
+    await writeTemporary(temporary,output,{encoding:"utf8",flag:"wx",mode:0o600});
     await renameFile(temporary,destination);
+    completed=true;
   } catch (error) {
-    try {
-      await rm(temporary,{force:true});
-    } catch (cleanupError) {
-      throw new AggregateError(
-        [error,cleanupError],"validator report rename and cleanup failed",
-      );
-    }
+    primaryFailure=error;
     throw error;
+  } finally {
+    if (!completed) {
+      try {
+        await removeTemporary(temporary,{force:true});
+      } catch (cleanupError) {
+        try {
+          if (((typeof primaryFailure==="object" && primaryFailure!==null) ||
+              typeof primaryFailure==="function") && Object.isExtensible(primaryFailure)) {
+            Object.defineProperty(primaryFailure,"cleanupError",{
+              value:cleanupError,enumerable:false,configurable:true,
+            });
+          }
+        } catch {
+          // Cleanup diagnostics must never replace the primary write or rename failure.
+        }
+      }
+    }
   }
 }
 

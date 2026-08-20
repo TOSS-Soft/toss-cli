@@ -396,6 +396,40 @@ test("failed atomic rename removes its exclusive temporary file",async t => {
   assert.deepEqual((await readdir(canonicalRoot)).filter(name => name.includes("report")),[]);
 });
 
+test("validator report write failure removes a partial temporary without masking the failure",async t => {
+  const root=await mkdtemp(join(tmpdir(),"toss-validator-write-cleanup-"));
+  t.after(() => rm(root,{recursive:true,force:true}));
+  await mkdir(join(root,".superpowers","evidence"),{recursive:true});
+  execFileSync("git",["init","--quiet"],{cwd:root});
+  const writeFailure=Object.assign(new Error("intentional partial write failure"),{
+    code:"ENOSPC",
+  });
+  const cleanupFailure=Object.assign(new Error("intentional cleanup diagnostic"),{
+    code:"EIO",
+  });
+  let temporary;
+  await assert.rejects(
+    writeValidatorBenchmarkReport(
+      ".superpowers/evidence/validator-report.json",{ok:true},root,{
+        canonicalize:value => JSON.stringify(value),
+        writeTemporary:async (path,...argumentsToWrite) => {
+          temporary=path;
+          await writeFile(path,...argumentsToWrite);
+          throw writeFailure;
+        },
+        removeTemporary:async path => {
+          await rm(path,{force:true});
+          throw cleanupFailure;
+        },
+      },
+    ),
+    error => error===writeFailure,
+  );
+  assert.equal(typeof temporary,"string");
+  assert.equal(writeFailure.cleanupError,cleanupFailure);
+  assert.deepEqual(await readdir(join(root,".superpowers","evidence")),[]);
+});
+
 test("baseline updates require the full lane while ordinary fast captures remain measurable",async t => {
   if (process.platform==="win32") return t.skip("fixture npm script is POSIX-only");
   let calls=0;
