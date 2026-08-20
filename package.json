@@ -24,7 +24,13 @@
     "yaml": "^2.8.1"
   },
   "scripts": {
-    "test": "node ./scripts/governance-config-test.js && node ./scripts/profile-assets-test.js && node ./scripts/smoke-test.js && node ./scripts/reference-integrity-test.js && node --test ./scripts/create-atomicity-test.js && node ./scripts/overlay-safety-test.js && node ./scripts/project-state-hydration-test.js && node --test ./scripts/governance-contract-test.js && node ./scripts/package-artifact-test.js && node ./scripts/release-workflow-test.js && node --test",
+    "test": "npm run test:full",
+    "test:fast": "node ./scripts/test-runner.mjs fast",
+    "test:integration": "node ./scripts/test-runner.mjs integration",
+    "test:e2e": "node ./scripts/test-runner.mjs e2e",
+    "test:package": "node ./scripts/test-runner.mjs package",
+    "test:release": "node ./scripts/test-runner.mjs release",
+    "test:full": "node ./scripts/test-runner.mjs full",
     "test:benchmark": "node ./scripts/performance/benchmark.mjs",
     "test:performance-budget": "node ./scripts/performance/budget.mjs",
     "prepack": "npm test",

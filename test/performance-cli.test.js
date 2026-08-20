@@ -54,9 +54,14 @@ test("package exposes opt-in performance commands without weakening full verific
   const pkg=JSON.parse(readFileSync(new URL("../package.json",import.meta.url),"utf8"));
   assert.equal(pkg.scripts["test:benchmark"],"node ./scripts/performance/benchmark.mjs");
   assert.equal(pkg.scripts["test:performance-budget"],"node ./scripts/performance/budget.mjs");
+  assert.equal(pkg.scripts.test,"npm run test:full");
+  assert.equal(pkg.scripts["test:fast"],"node ./scripts/test-runner.mjs fast");
+  assert.equal(pkg.scripts["test:integration"],"node ./scripts/test-runner.mjs integration");
+  assert.equal(pkg.scripts["test:e2e"],"node ./scripts/test-runner.mjs e2e");
+  assert.equal(pkg.scripts["test:package"],"node ./scripts/test-runner.mjs package");
+  assert.equal(pkg.scripts["test:release"],"node ./scripts/test-runner.mjs release");
+  assert.equal(pkg.scripts["test:full"],"node ./scripts/test-runner.mjs full");
   assert.equal(pkg.scripts.prepack,"npm test");
-  assert.match(pkg.scripts.test,/release-workflow-test\.js/);
-  assert.match(pkg.scripts.test,/node --test$/);
 });
 
 async function benchmarkFixture(t) {

@@ -5,6 +5,12 @@ import {dirname,join} from "node:path";
 import test from "node:test";
 import {fileURLToPath} from "node:url";
 
+import {
+  discoverEligibleTestEntries,
+  selectTestEntries,
+  validateTestManifest,
+} from "../scripts/test-manifest.mjs";
+
 const root=dirname(dirname(fileURLToPath(import.meta.url)));
 const releaseNotesPath=join(root,"docs","releases","v2.1.0.md");
 const scopedIssues=[
@@ -34,18 +40,16 @@ test("release metadata targets v2.1.0 in the manifest and both lockfile roots",(
   assert.equal(lock.packages[""].version,"2.1.0");
 });
 
-test("the v2.1.0 smoke contract passes against the release candidate",() => {
-  const result=spawnSync(process.execPath,[join(root,"scripts","smoke-test.js")],{
-    cwd:root,
-    encoding:"utf8",
+test("release inventory retains the independent e2e smoke contract once in full",async () => {
+  const manifest=validateTestManifest(readJson("scripts/test-manifest.json"),{
+    eligibleEntries:await discoverEligibleTestEntries(root),
   });
-
+  assert.equal(manifest.lanes.e2e.includes("scripts/smoke-test.js"),true);
   assert.equal(
-    result.status,
-    0,
-    `v2.1.0 smoke contract failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    selectTestEntries(manifest,"full")
+      .filter(entry => entry==="scripts/smoke-test.js").length,
+    1,
   );
-  assert.match(result.stdout,/TOSS CLI smoke test: PASS/);
 });
 
 test("release notes expose the v2.1.0 heading and required categories",() => {
