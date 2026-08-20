@@ -1,8 +1,14 @@
 import assert from "node:assert/strict";
 import {spawnSync} from "node:child_process";
-import {readFile} from "node:fs/promises";
+import {mkdtemp,readdir,readFile,rm} from "node:fs/promises";
+import {tmpdir} from "node:os";
+import {join} from "node:path";
 import test from "node:test";
 
+import {
+  parseValidatorBenchmarkOptions,
+  runValidatorBenchmark,
+} from "../scripts/performance/validator-benchmark.mjs";
 import {
   VALIDATOR_PHASES,
   VALIDATOR_REPORT_VERSION,
@@ -1153,4 +1159,167 @@ test("validator report canonical JSON is deterministic",() => {
     canonicalValidatorColdStartJson(report),
   );
   assert.deepEqual(JSON.parse(canonicalValidatorColdStartJson(report)),report);
+});
+
+const VALIDATOR_WORKER_MODES=[
+  "empty-process",
+  "cli-module",
+  "representative-command",
+  "eager-reference",
+  "demand-driven",
+  "standalone-experiment",
+];
+
+function benchmarkWorkerSample(mode,overrides={}) {
+  const strategy=mode==="eager-reference" || mode==="demand-driven" ||
+    mode==="standalone-experiment";
+  return {
+    mode,
+    ...validatorSample(),
+    ...(strategy ? {result_sha256:"b".repeat(64)} : {}),
+    ...(mode==="standalone-experiment" ? {
+      standalone_source_sha256:"c".repeat(64),
+      standalone_source_bytes:1234,
+      input_schema_sha256:"d".repeat(64),
+    } : {}),
+    ...overrides,
+  };
+}
+
+test("validator benchmark captures six serial worker modes and the focused gate exactly three times",async () => {
+  const calls=[];
+  let active=false;
+  const report=await runValidatorBenchmark({
+    runs:3,
+    runnerId:"fixture",
+    cwd:"/repo",
+    identity:VALIDATOR_REPORT_IDENTITY,
+    runWorker:async mode => {
+      assert.equal(active,false,"worker samples must not overlap");
+      active=true;
+      calls.push(mode);
+      await Promise.resolve();
+      active=false;
+      return benchmarkWorkerSample(mode);
+    },
+    runFocused:async invocation => {
+      assert.equal(active,false,"focused samples must not overlap");
+      active=true;
+      calls.push({focused:invocation});
+      await Promise.resolve();
+      active=false;
+      return {exit_status:0,wall_ms:8000};
+    },
+  });
+  assert.deepEqual(calls.slice(0,18),VALIDATOR_WORKER_MODES.flatMap(mode =>
+    [mode,mode,mode]));
+  assert.deepEqual(calls.slice(18),Array.from({length:3},() => ({focused:{
+    command:process.execPath,
+    args:["--test","test/gate-cli-round1.test.js"],
+    cwd:"/repo",
+  }})));
+  assert.deepEqual(report.focused_gate_cli.after_samples_ms,[8000,8000,8000]);
+  assert.deepEqual(Object.keys(report.probes),[
+    "empty_process","cli_module","representative_command",
+  ]);
+  assert.deepEqual(report.strategies.map(row => row.name),VALIDATOR_STRATEGIES);
+  assert.ok(Object.values(report.probes).every(row => row.samples.length===3));
+  assert.ok(report.strategies.every(row => row.samples.length===3));
+  assert.equal(report.decision.selected,"demand-driven");
+  assert.equal(report.decision.standalone_deterministic,true);
+  assert.equal(report.decision.standalone_drift_verified,false);
+  assert.equal(report.decision.standalone_equivalent,true);
+  assert.equal(report.decision.standalone_focused_median_ms,null);
+});
+
+test("validator benchmark orchestration performs no filesystem writes",async t => {
+  const root=await mkdtemp(join(tmpdir(),"toss-validator-no-write-"));
+  t.after(() => rm(root,{recursive:true,force:true}));
+  const before=await readdir(root);
+  await runValidatorBenchmark({
+    runs:3,
+    runnerId:"fixture",
+    cwd:root,
+    identity:VALIDATOR_REPORT_IDENTITY,
+    runWorker:async mode => benchmarkWorkerSample(mode),
+    runFocused:async () => ({exit_status:0,wall_ms:8000}),
+  });
+  assert.deepEqual(await readdir(root),before);
+});
+
+test("validator benchmark fails closed on mismatched, failed, or malformed worker evidence",async () => {
+  const cases=[
+    ["mode mismatch",(mode,index) => benchmarkWorkerSample(
+      index===0 ? "cli-module" : mode,
+    ),/mode.*match/i],
+    ["nonzero worker",(mode,index) => benchmarkWorkerSample(mode,index===0 ? {
+      exit_status:7,
+    } : {}),/successful exit_status/i],
+    ["missing phase",(mode,index) => {
+      const sample=benchmarkWorkerSample(mode);
+      if (index===0) delete sample.module_ms;
+      return sample;
+    },/module_ms/i],
+    ["malformed hash",mode => benchmarkWorkerSample(mode,
+      mode==="demand-driven" ? {result_sha256:"not-a-hash"} : {},
+    ),/SHA-256/i],
+    ["missing standalone diagnostic",mode => {
+      const sample=benchmarkWorkerSample(mode);
+      if (mode==="standalone-experiment") {
+        delete sample.standalone_source_sha256;
+      }
+      return sample;
+    },/standalone_source_sha256/i],
+  ];
+  for (const [name,sampleFor,expected] of cases) {
+    let index=0;
+    await assert.rejects(runValidatorBenchmark({
+      runs:3,runnerId:"fixture",cwd:"/repo",identity:VALIDATOR_REPORT_IDENTITY,
+      runWorker:async mode => sampleFor(mode,index++),
+      runFocused:async () => ({exit_status:0,wall_ms:8000}),
+    }),expected,name);
+  }
+  await assert.rejects(runValidatorBenchmark({
+    runs:3,runnerId:"fixture",cwd:"/repo",identity:VALIDATOR_REPORT_IDENTITY,
+    runWorker:async mode => benchmarkWorkerSample(mode),
+    runFocused:async () => ({exit_status:1,wall_ms:8000}),
+  }),/focused.*exit_status/i);
+});
+
+test("validator benchmark derives conservative standalone evidence from worker hashes",async () => {
+  let standaloneRun=0;
+  const report=await runValidatorBenchmark({
+    runs:3,runnerId:"fixture",cwd:"/repo",identity:VALIDATOR_REPORT_IDENTITY,
+    runWorker:async mode => benchmarkWorkerSample(mode,
+      mode==="standalone-experiment" ? {
+        standalone_source_sha256:(standaloneRun++===1 ? "e" : "c").repeat(64),
+        result_sha256:"f".repeat(64),
+      } : {},
+    ),
+    runFocused:async () => ({exit_status:0,wall_ms:8000}),
+  });
+  assert.equal(report.decision.standalone_deterministic,false);
+  assert.equal(report.decision.standalone_drift_verified,false);
+  assert.equal(report.decision.standalone_equivalent,false);
+  assert.equal(report.decision.selected,"demand-driven");
+});
+
+test("validator benchmark grammar accepts only the closed Task 5 options",() => {
+  assert.deepEqual(parseValidatorBenchmarkOptions([
+    "--runs","3","--runner-id","fixture","--json",
+    "--output",".superpowers/validator-report.json",
+  ]),{
+    runs:3,runnerId:"fixture",json:true,
+    output:".superpowers/validator-report.json",
+  });
+  for (const argv of [
+    [],
+    ["--runs","2","--runner-id","fixture"],
+    ["--runs","3"],
+    ["--runs","3","--runner-id","fixture","--unknown"],
+    ["--runs","3","--runner-id","fixture","--runs","3"],
+    ["--runs","3","--runner-id","fixture","--standalone-drift-verified"],
+  ]) {
+    assert.throws(() => parseValidatorBenchmarkOptions(argv));
+  }
 });

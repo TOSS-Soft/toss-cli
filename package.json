@@ -33,6 +33,7 @@
     "test:full": "node ./scripts/test-runner.mjs full",
     "test:benchmark": "node ./scripts/performance/benchmark.mjs",
     "test:performance-budget": "node ./scripts/performance/budget.mjs",
+    "test:validator-benchmark": "node ./scripts/performance/validator-benchmark.mjs",
     "prepack": "npm test",
     "release:version": "node ./scripts/release-version.mjs"
   },
