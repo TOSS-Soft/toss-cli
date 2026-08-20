@@ -472,6 +472,39 @@ test("external fragments are stripped only for lookup and local refs stay local"
   assert.equal(calls.read.includes(undefined),false);
 });
 
+test("canonical URI and subschema requests compile exact targets and reuse one closure",() => {
+  const calls=emptyCalls();
+  const events=[];
+  const rootUri=pipelineUri("root.v1");
+  const subschemaUri=`${rootUri}#/$defs/local`;
+  const runtime=createValidatorRuntime(countedDependencies(calls,{
+    observe:event => events.push(event),
+  }));
+
+  assert.equal(runtime.validateDocument({kind:"ok"},subschemaUri).valid,true);
+  const afterSubschema=structuredClone(calls);
+  runtime.validateDocument({kind:"ok"},subschemaUri);
+  assert.deepEqual(calls,afterSubschema);
+  assert.equal(runtime.validateDocument({kind:"ok"},"root.v1").valid,true);
+  const afterLogical=structuredClone(calls);
+  runtime.validateDocument({kind:"ok"},rootUri);
+  assert.deepEqual(calls,afterLogical);
+
+  assert.deepEqual(calls.read,["root.v1","b.v1","d.v1","c.v1"]);
+  assert.deepEqual(calls.add,["d.v1","b.v1","c.v1","root.v1"]);
+  assert.deepEqual(calls.compile,[subschemaUri,rootUri]);
+  assert.deepEqual(
+    events.filter(event => event.phase==="compilation" && event.state==="start")
+      .map(event => event.schema_uri),
+    [subschemaUri,rootUri],
+  );
+  assert.deepEqual(
+    events.filter(event => event.phase==="first_validation" && event.state==="start")
+      .map(event => event.schema_uri),
+    [subschemaUri,rootUri],
+  );
+});
+
 test("validation canonicalizes input and returns fresh deeply copied errors",() => {
   const calls=emptyCalls();
   const values=[];

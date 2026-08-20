@@ -216,6 +216,65 @@ function assertEquivalentValidation(eager,demand,value,schemaId,label) {
   return actual;
 }
 
+test("demand validation accepts the eager-compatible canonical schema URI",() => {
+  const eager=createEagerContractValidator();
+  const demand=createContractValidator();
+  const schemaUri="https://toss.software/schemas/common/artifact-envelope.v1.schema.json";
+  assert.equal(assertEquivalentValidation(
+    eager,demand,validArtifactEnvelope,schemaUri,"canonical artifact-envelope URI",
+  ).valid,true);
+});
+
+test("demand validation accepts an eager-compatible catalog subschema URI",() => {
+  const eager=createEagerContractValidator();
+  const demand=createContractValidator();
+  const schemaUri="https://toss.software/schemas/common/artifact-envelope.v1.schema.json"+
+    "#/$defs/artifact_revision_reference";
+  const reference={
+    artifact_id:"artifact:parent",
+    revision:1,
+    content_sha256:"a".repeat(64),
+  };
+  assert.equal(assertEquivalentValidation(
+    eager,demand,reference,schemaUri,"artifact revision subschema URI",
+  ).valid,true);
+});
+
+test("logical schema IDs retain eager-compatible validation",() => {
+  const eager=createEagerContractValidator();
+  const demand=createContractValidator();
+  assert.equal(assertEquivalentValidation(
+    eager,demand,validArtifactEnvelope,"artifact-envelope.v1","logical artifact-envelope ID",
+  ).valid,true);
+});
+
+test("unknown schema URIs and references retain eager-compatible errors",() => {
+  const eager=createEagerContractValidator();
+  const demand=createContractValidator();
+  for (const schemaId of [
+    "https://toss.software/schemas/common/missing.v1.schema.json",
+    "https://toss.software/schemas/common/artifact-envelope.v1.schema.json#/$defs/missing",
+    "#/$defs/artifact_revision_reference",
+  ]) {
+    const expected={
+      constructorName:"Error",
+      message:`Unknown contract schema: ${schemaId}`,
+    };
+    for (const validator of [eager,demand]) {
+      assert.throws(
+        () => validator.validateDocument({},schemaId),
+        error => {
+          assert.deepEqual({
+            constructorName:error?.constructor.name,
+            message:error?.message,
+          },expected);
+          return true;
+        },
+      );
+    }
+  }
+});
+
 test("demand validation remains byte-equivalent to the issue 86 eager reference",() => {
   const eager=createEagerContractValidator();
   const demand=createContractValidator();

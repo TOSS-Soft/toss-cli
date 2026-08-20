@@ -213,10 +213,21 @@ export function createValidatorRuntime({catalog,readSchema,createAjv,observe=() 
   let ajv;
 
   function validateDocument(value,schemaId) {
-    const row=byId.get(schemaId);
+    let row=byId.get(schemaId);
+    let requestedUri=row?.uri;
+    if (!row && typeof schemaId==="string") {
+      const fragmentIndex=schemaId.indexOf("#");
+      const closureUri=fragmentIndex===-1 ? schemaId : schemaId.slice(0,fragmentIndex);
+      row=byUri.get(closureUri);
+      if (row) requestedUri=schemaId;
+    }
     if (!row) throw new Error(`Unknown contract schema: ${String(schemaId)}`);
+    const observationRow=requestedUri===row.uri && schemaId===row.schemaId ? row : {
+      schemaId,
+      uri:requestedUri,
+    };
 
-    let validate=compiled.get(row.uri);
+    let validate=compiled.get(requestedUri);
     if (!validate) {
       const registrationOrder=loadClosure(row,byUri,loaded,readSchema,observe);
       if (!ajv) {
@@ -232,21 +243,25 @@ export function createValidatorRuntime({catalog,readSchema,createAjv,observe=() 
         );
         registered.add(dependency.row.uri);
       }
-      validate=observed("compilation",observe,row,() => ajv.getSchema(row.uri));
+      validate=observed("compilation",observe,observationRow,
+        () => ajv.getSchema(requestedUri));
       if (typeof validate!=="function") {
+        if (schemaId!==row.schemaId) {
+          throw new Error(`Unknown contract schema: ${String(schemaId)}`);
+        }
         throw new TypeError(`Contract schema failed to compile: ${row.schemaId}`);
       }
-      compiled.set(row.uri,validate);
+      compiled.set(requestedUri,validate);
     }
 
-    if (!firstValidated.has(row.uri)) {
+    if (!firstValidated.has(requestedUri)) {
       const result=observed(
         "first_validation",
         observe,
-        row,
+        observationRow,
         () => normalizedValidation(validate,value),
       );
-      firstValidated.add(row.uri);
+      firstValidated.add(requestedUri);
       return result;
     }
     return normalizedValidation(validate,value);
