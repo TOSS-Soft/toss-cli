@@ -7,12 +7,19 @@ import {fileURLToPath} from "node:url";
 import {promisify} from "node:util";
 
 import {runSuiteOnce} from "./run-suite.mjs";
+import {PerformanceToolError} from "./report.mjs";
 import {
   STORE_FOCUSED_ENTRIES,canonicalStoreFocusedJson,createStoreFocusedReport,
 } from "./store-focused-report.mjs";
 import {writeValidatorBenchmarkReport} from "./validator-benchmark.mjs";
 
 const executeFile=promisify(execFile);
+const UNSAFE_OUTPUT_CODE="UNSAFE_VALIDATOR_BENCHMARK_OUTPUT";
+
+function isHandledFocusedBenchmarkError(error) {
+  return error instanceof TypeError || error instanceof PerformanceToolError ||
+    error?.code===UNSAFE_OUTPUT_CODE;
+}
 
 function nonemptyString(value,label) {
   if (typeof value!=="string" || value.length===0) throw new TypeError(`${label} must be a nonempty string`);
@@ -104,7 +111,7 @@ async function main(argv) {
     await writeValidatorBenchmarkReport(options.output,report,cwd,{canonicalize:canonicalStoreFocusedJson});
     process.stdout.write(canonicalStoreFocusedJson(report));
   } catch (error) {
-    if (error instanceof TypeError || typeof error?.code==="string") {
+    if (isHandledFocusedBenchmarkError(error)) {
       process.stderr.write(`${error.code ?? "INVALID_STORE_FOCUSED_EVIDENCE"}: ${error.message}\n`);
       process.exitCode=5;
       return;
