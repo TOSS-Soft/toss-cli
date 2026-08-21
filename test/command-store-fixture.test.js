@@ -33,6 +33,7 @@ async function errorCategory(operation) {
   try {
     await operation();
   } catch (error) {
+    if (/already bound to document type/i.test(error.message)) return "bound-document-type";
     if (/overwrite|reinterpret/i.test(error.message)) return "immutable-overwrite";
     if (/missing|not found/i.test(error.message)) return "missing-reference";
     throw error;
@@ -157,6 +158,17 @@ test("memory command store matches real command-store semantic behavior",async t
     memory:memory.list({document_type:first.memory.document_type}),
     real:real.list({document_type:first.real.document_type}),
   });
+
+  const conflictingIdentity=copy(commandFixture.projectCommandInput().artifacts.architecture);
+  conflictingIdentity.artifact_id=first.memory.artifact_id;
+  delete conflictingIdentity.content_sha256;
+  const [memoryConflict,realConflict]=await Promise.all([
+    errorCategory(() => memory.append(copy(conflictingIdentity))),
+    errorCategory(() => real.append(copy(conflictingIdentity))),
+  ]);
+  assert.equal(memoryConflict,"bound-document-type");
+  assert.equal(realConflict,"bound-document-type");
+  assert.equal(memoryConflict,realConflict);
 
   const second=await parity({
     memory:memory.append(nextRevision(first.memory)),

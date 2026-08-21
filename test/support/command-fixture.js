@@ -3,6 +3,7 @@ import {tmpdir} from "node:os";
 import {join} from "node:path";
 
 import {createArtifactStore} from "../../src/artifacts/store.js";
+import {ArtifactValidationError} from "../../src/artifacts/errors.js";
 import {parseCommand} from "../../src/commands/router.js";
 import {canonicalJson,sha256Canonical} from "../../src/contracts/acp.js";
 import {clone,completeArtifacts,rehash} from "./trace-fixture.js";
@@ -90,6 +91,14 @@ export function memoryCommandStore() {
   async function append(draft) {
     const artifact=copy(draft);
     artifact.content_sha256=sha256Canonical(artifact.content);
+    const conflictingIdentity=records.find(record =>
+      record.artifact_id===artifact.artifact_id &&
+      record.document_type!==artifact.document_type);
+    if (conflictingIdentity) {
+      throw new ArtifactValidationError(
+        `artifact_id ${artifact.artifact_id} is already bound to document type ${conflictingIdentity.document_type}`,
+      );
+    }
     for (const reference of [...artifact.parents,...artifact.inputs]) await verify(reference);
     const identity=ordered(records.filter(record =>
       record.document_type===artifact.document_type &&

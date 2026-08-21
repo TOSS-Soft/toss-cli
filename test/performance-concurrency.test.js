@@ -51,12 +51,12 @@ const entries=Object.freeze([
   "test/d.test.js",
 ]);
 
-function entryResult(entry,{outcome="passed",duration_ms=1}={}) {
+function entryResult(entry,{outcome="passed",duration_ms=1,exit_status=7}={}) {
   if (outcome==="passed") {
     return {entry,outcome,exit_status:0,signal:null,error_code:null,duration_ms};
   }
   if (outcome==="failed") {
-    return {entry,outcome,exit_status:7,signal:null,error_code:null,duration_ms};
+    return {entry,outcome,exit_status,signal:null,error_code:null,duration_ms};
   }
   if (outcome==="signaled") {
     return {entry,outcome,exit_status:null,signal:"SIGTERM",error_code:null,duration_ms};
@@ -189,6 +189,46 @@ test("failed and capture-error samples are retained and make medians unavailable
   });
   assert.equal(report.candidates[1].stable,false);
   assert.equal(report.candidates[1].medians,null);
+});
+
+test("aggregate status exactly follows the first non-passing entry",() => {
+  const mismatchedFailure=reportInput();
+  mismatchedFailure.candidates[0].samples[0].evidence.entry_results[0]=entryResult(
+    entries[0],{outcome:"failed",exit_status:7},
+  );
+  mismatchedFailure.candidates[0].samples[0].evidence.exit_status=2;
+  assert.throws(
+    () => createConcurrencyReport(mismatchedFailure),
+    /aggregate|exit_status/i,
+  );
+
+  const orderedFailures=reportInput();
+  orderedFailures.candidates[0].samples[0].evidence.entry_results[0]=entryResult(
+    entries[0],{outcome:"failed",exit_status:7},
+  );
+  orderedFailures.candidates[0].samples[0].evidence.entry_results[2]=entryResult(
+    entries[2],{outcome:"failed",exit_status:9},
+  );
+  orderedFailures.candidates[0].samples[0].evidence.exit_status=7;
+  assert.doesNotThrow(() => createConcurrencyReport(orderedFailures));
+
+  for (const outcome of ["signaled","spawn_error"]) {
+    const accepted=reportInput();
+    accepted.candidates[0].samples[0].evidence.entry_results[0]=entryResult(
+      entries[0],{outcome},
+    );
+    accepted.candidates[0].samples[0].evidence.exit_status=1;
+    assert.doesNotThrow(() => createConcurrencyReport(accepted));
+
+    const rejected=clone(accepted);
+    rejected.candidates[0].samples[0].evidence.exit_status=7;
+    assert.throws(() => createConcurrencyReport(rejected),/aggregate|exit_status/i);
+  }
+
+  const allPassing=reportInput();
+  assert.doesNotThrow(() => createConcurrencyReport(allPassing));
+  allPassing.candidates[0].samples[0].evidence.exit_status=1;
+  assert.throws(() => createConcurrencyReport(allPassing),/aggregate|exit_status/i);
 });
 
 test("selection returns null when no candidate is stable",() => {

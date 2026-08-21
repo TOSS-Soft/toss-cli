@@ -209,8 +209,10 @@ function normalizeEvidence(value,entries,label) {
   normalized.orphan_process_count=nonnegativeInteger(
     evidence.orphan_process_count,`${label} orphan_process_count`,
   );
-  const allPassed=normalized.entry_results.every(result => result.outcome==="passed");
-  if ((normalized.exit_status===0)!==allPassed) {
+  const firstNonPassing=normalized.entry_results.find(result => result.outcome!=="passed");
+  const expectedExitStatus=firstNonPassing===undefined ? 0 :
+    firstNonPassing.outcome==="failed" ? firstNonPassing.exit_status : 1;
+  if (normalized.exit_status!==expectedExitStatus) {
     throw new TypeError(`${label} aggregate exit_status does not match entry results`);
   }
   if (typeof evidence.isolation_passed!=="boolean") {
