@@ -15,7 +15,7 @@
     {"id":"design.command-semantics","classification":"semantic","owner":"test/design-commands.test.js"},
     {"id":"design.persisted-idempotent-resume","classification":"store-integration","owner":"test/design-store-boundary.test.js"},
     {"id":"feature.command-semantics","classification":"semantic","owner":"test/feature-commands.test.js"},
-    {"id":"feature.persisted-delta","classification":"store-integration","owner":"test/feature-commands.test.js"},
+    {"id":"feature.persisted-delta","classification":"store-integration","owner":"test/feature-store-boundary.test.js"},
     {"id":"package.packed-execution","classification":"package","owner":"scripts/package-artifact-test.js"},
     {"id":"project.command-semantics","classification":"semantic","owner":"test/project-commands.test.js"},
     {"id":"project.persisted-idempotent-resume","classification":"store-integration","owner":"test/project-store-boundary.test.js"},
