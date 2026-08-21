@@ -16,6 +16,7 @@
       "test/performance-baseline.test.js",
       "test/performance-report.test.js",
       "test/pm-analysis.test.js",
+      "test/project-commands.test.js",
       "test/readiness.test.js",
       "test/spec-auditor.test.js",
       "test/test-boundaries.test.js",
@@ -37,6 +38,7 @@
       "test/orchestration-store-hardening.test.js",
       "test/performance-runner.test.js",
       "test/performance-store-focused.test.js",
+      "test/project-store-boundary.test.js",
       "test/state-machine-trust-boundary.test.js",
       "test/state-machine.test.js",
       "test/test-runner.test.js"
@@ -53,7 +55,7 @@
       "test/design-cli-runtime.test.js",
       "test/gate-cli-round1.test.js",
       "test/performance-cli.test.js",
-      "test/project-commands.test.js",
+      "test/project-cli-boundary.test.js",
       "test/readme-design.test.js",
       "test/readme-lifecycle.test.js",
       "test/trace-command.test.js"
