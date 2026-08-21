@@ -77,6 +77,10 @@ test("package exposes opt-in performance commands without weakening full verific
     pkg.scripts["test:validator-benchmark"],
     "node ./scripts/performance/validator-benchmark.mjs",
   );
+  assert.equal(
+    pkg.scripts["test:store-focused-benchmark"],
+    "node ./scripts/performance/store-focused-benchmark.mjs",
+  );
   assert.equal(pkg.scripts.test,"npm run test:full");
   assert.equal(pkg.scripts["test:fast"],"node ./scripts/test-runner.mjs fast");
   assert.equal(pkg.scripts["test:integration"],"node ./scripts/test-runner.mjs integration");

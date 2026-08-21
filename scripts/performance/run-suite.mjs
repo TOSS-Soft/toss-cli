@@ -102,6 +102,7 @@ export async function runSuiteOnce({command,args,cwd,runId,env={}}) {
       fresh_process_count:processes.fresh_process_count,
       peak_process_count:processes.peak_process_count,
       duplicates:processes.duplicates,
+      entry_processes:processes.entries,
       slowest_files:processes.entries.slice(0,10),
       slowest_tests:parseNamedDurations(result.stdout)
         .sort((left,right) => right.duration_ms-left.duration_ms).slice(0,10),
