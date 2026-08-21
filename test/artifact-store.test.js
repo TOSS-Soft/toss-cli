@@ -100,6 +100,18 @@ test("append persists a content-addressed revision and is idempotent",async (t) 
   ]);
 });
 
+test("concurrent same-root appends retain one immutable revision without live lock or temporary",async t => {
+  const {root,store}=await createTestStore(t);
+  const [left,right]=await Promise.all([store.append(draft()),store.append(draft())]);
+  assert.deepEqual(left,right);
+  assert.equal(left.revision,1);
+  assert.deepEqual(await store.list({artifact_id:left.artifact_id}),[left]);
+  const rootEntries=await readdir(artifactRoot(root));
+  assert.equal(rootEntries.includes(".append.lock"),false);
+  const revisionEntries=await readdir(dirname(artifactPath(root,left)));
+  assert.deepEqual(revisionEntries,[`r000001-${left.content_sha256}.json`]);
+});
+
 test("contract-valid colon artifact IDs use a reversible filesystem-safe identity",async (t) => {
   const {root,store}=await createTestStore(t);
   const appended=await store.append(draft({

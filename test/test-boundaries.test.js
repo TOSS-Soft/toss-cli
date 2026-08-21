@@ -220,6 +220,7 @@ test("boundary validation rejects malformed guarantee and delegation records",()
 test("checked-in boundary inventory binds the exact current memory-backed entries",async () => {
   const inventory=JSON.parse(await readFile(inventoryUrl,"utf8"));
   assert.deepEqual(inventory.semantic_delegations.map(row => row.entry),[
+    "test/command-store-fixture.test.js",
     "test/design-commands.test.js",
     "test/feature-commands.test.js",
     "test/gate-authority-provenance-round2.test.js",
@@ -228,7 +229,7 @@ test("checked-in boundary inventory binds the exact current memory-backed entrie
     "test/gate-commands.test.js",
     "test/project-commands.test.js",
   ]);
-  assert.equal(inventory.guarantees.length,20);
+  assert.equal(inventory.guarantees.length,22);
 });
 
 test("boundary CLI validates the checked-in manifest and inventory",async () => {

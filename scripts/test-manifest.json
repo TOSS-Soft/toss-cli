@@ -25,6 +25,7 @@
     "integration": [
       "scripts/profile-assets-test.js",
       "test/artifact-store.test.js",
+      "test/command-store-fixture.test.js",
       "test/design-commands.test.js",
       "test/design-orchestration.test.js",
       "test/feature-commands.test.js",
