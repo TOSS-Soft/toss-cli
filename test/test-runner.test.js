@@ -135,6 +135,42 @@ test("bounded execution and emitted results stay in manifest order",async () => 
   assert.deepEqual(headings.map(value => entries.find(entry => value.includes(entry))),entries);
 });
 
+for (const concurrency of [1,2,3,4]) {
+  test(`full lane keeps exact bound ${concurrency}, manifest order, and failure evidence`,async () => {
+    const entries=[
+      "test/a.test.js","test/b.test.js","test/c.test.js","test/d.test.js",
+    ];
+    const output=[];
+    let active=0;
+    let peak=0;
+    const result=await runTestLane({
+      lane:"full",cwd:process.cwd(),
+      manifest:manifest({fast:entries,concurrency}),eligibleEntries:entries,
+      executeEntry:async entry => {
+        active+=1;
+        peak=Math.max(peak,active);
+        await new Promise(resolve => setImmediate(resolve));
+        active-=1;
+        return entry===entries[2] ? {
+          entry,outcome:"failed",exit_status:9,signal:null,error_code:null,
+          stdout:"failure stdout\n",stderr:"failure stderr\n",duration_ms:2,
+        } : passed(entry);
+      },
+      stdout:{write:value => output.push(value)},stderr:{write() {}},
+    });
+    assert.equal(peak,concurrency);
+    assert.deepEqual(result.results.map(row => row.entry),entries);
+    assert.deepEqual(result.first_failure,{
+      entry:entries[2],outcome:"failed",exit_status:9,signal:null,error_code:null,
+    });
+    assert.deepEqual(
+      output.filter(value => value.startsWith("[test]")).map(value =>
+        entries.find(entry => value.includes(entry))),
+      entries,
+    );
+  });
+}
+
 for (const example of [
   {
     name:"a signal",

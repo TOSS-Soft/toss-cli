@@ -7,7 +7,7 @@ import {
   createLifecycleRuntimeProvider,
   lifecycleRuntimeServices,
 } from "../src/cli-lifecycle.js";
-import {commandStore,memoryCommandStore} from "./support/command-fixture.js";
+import {memoryCommandStore} from "./support/command-fixture.js";
 import {
   approvalsFor,
   artifactReference,
@@ -48,30 +48,6 @@ function withFinalApproval(graph,input) {
 
 function parsed(name,options=[]) {
   return parseCommand(["design",name,...options]);
-}
-
-function instrumentStore(delegate,{failAtDesignAppend=Infinity}={}) {
-  const appended=[];
-  let designAppendCount=0;
-  return {
-    appended,
-    store:{
-      append:async artifact => {
-        if (artifact.document_type!=="design-orchestration-state") {
-          designAppendCount+=1;
-          if (designAppendCount===failAtDesignAppend) {
-            throw new Error("simulated interrupted design append");
-          }
-        }
-        const result=await delegate.append(artifact);
-        appended.push(result.document_type);
-        return result;
-      },
-      get:delegate.get,
-      list:delegate.list,
-      verify:delegate.verify,
-    },
-  };
 }
 
 function rewrittenStateInputStore(delegate,rewrite) {
@@ -200,7 +176,7 @@ async function reachSystemGate(store,graph) {
 
 test("pre-gate prepare stores only immutable commitments and truthful status",async t => {
   assert.equal(typeof runDesignCommand,"function");
-  const store=await commandStore(t);
+  const store=memoryCommandStore();
   const graph=graphForLevel();
   const result=await runDesignCommand(
     parsed("screens",["--from","design.json"]),
@@ -225,7 +201,7 @@ test("pre-gate prepare stores only immutable commitments and truthful status",as
 
 test("missing or stale gate replay fails before any design or state append",async t => {
   assert.equal(typeof runDesignCommand,"function");
-  const store=await commandStore(t);
+  const store=memoryCommandStore();
   const graph=graphForLevel();
   const approved=await reachSystemGate(store,graph);
   const before=await store.list();
@@ -251,89 +227,6 @@ test("missing or stale gate replay fails before any design or state append",asyn
   assert.deepEqual(await store.list(),before);
 });
 
-test("approved replay appends the candidate graph in physical dependency order",async t => {
-  assert.equal(typeof runDesignCommand,"function");
-  const backing=await commandStore(t);
-  const graph=graphForLevel();
-  const approved=await reachSystemGate(backing,graph);
-  approved.artifacts.reverse();
-  const observed=instrumentStore(backing);
-
-  const result=await runDesignCommand(
-    parsed("screens",["--from","design.json"]),
-    services(observed.store,approved),
-  );
-
-  assert.equal(result.state,"FINAL_APPROVAL_PENDING");
-  assert.equal(result.gate,"FINAL_APPROVAL");
-  const physical=observed.appended.filter(type => type!=="design-orchestration-state");
-  assert.equal(physical.includes("design-approval"),false);
-  const index=new Map(physical.map((type,position) => [type,position]));
-  for (const artifact of graph.filter(row => row.document_type!=="design-approval")) {
-    for (const dependency of artifact.inputs) {
-      assert.ok(index.get(dependency.document_type)<index.get(artifact.document_type),
-        `${dependency.document_type} must precede ${artifact.document_type}`);
-    }
-  }
-  assert.deepEqual((await designRows(backing)).map(row => row.document_type).sort(),
-    graph.filter(row => row.document_type!=="design-approval")
-      .map(row => row.document_type).sort());
-});
-
-test("interrupted physical append resumes idempotently and status stays truthful",async t => {
-  assert.equal(typeof runDesignCommand,"function");
-  const backing=await commandStore(t);
-  const graph=graphForLevel();
-  const approved=await reachSystemGate(backing,graph);
-  const interrupted=instrumentStore(backing,{failAtDesignAppend:3});
-
-  await assert.rejects(
-    runDesignCommand(
-      parsed("prepare",["--from","design.json"]),
-      services(interrupted.store,approved),
-    ),
-    /simulated interrupted design append/,
-  );
-  const partial=await designRows(backing);
-  assert.equal(partial.length,2);
-  const interruptedStatus=await runDesignCommand(
-    parsed("status"),
-    {artifactStore:backing,authorityCapability},
-  );
-  assert.equal(interruptedStatus.persisted.length,2);
-  assert.equal(interruptedStatus.payload_commitments.filter(row =>
-    row.status==="PERSISTED").length,2);
-
-  const resumed=await runDesignCommand(
-    parsed("prepare",["--from","design.json"]),
-    services(backing,approved),
-  );
-  assert.equal(resumed.state,"FINAL_APPROVAL_PENDING");
-  assert.deepEqual(resumed.reused_revisions.map(row => row.document_type).sort(),
-    partial.map(row => row.document_type).sort());
-  const afterResume=await designRows(backing);
-  assertStateInputProjection((await backing.list({
-    document_type:"design-orchestration-state",
-  })).at(-1));
-
-  const rerun=await runDesignCommand(
-    parsed("prepare",["--from","design.json"]),
-    services(backing,approved),
-  );
-  assert.deepEqual(await designRows(backing),afterResume);
-  assert.deepEqual(rerun.artifact_revisions,resumed.artifact_revisions);
-
-  const status=await runDesignCommand(
-    parsed("status"),
-    {artifactStore:backing,authorityCapability},
-  );
-  assert.equal(status.state,"FINAL_APPROVAL_PENDING");
-  assert.equal(status.persisted.length,afterResume.length);
-  assert.equal(status.payload_commitments.filter(row => row.status==="PERSISTED").length,
-    afterResume.length);
-  assert.ok(Object.isFrozen(status));
-});
-
 test("the complete design family supports router modes and final approval",async t => {
   assert.equal(typeof runDesignCommand,"function");
   const names=[
@@ -342,7 +235,7 @@ test("the complete design family supports router modes and final approval",async
   ];
   for (const name of names) assert.equal(parsed(name).name,`design.${name}`);
 
-  const store=await commandStore(t);
+  const store=memoryCommandStore();
   const graph=graphForLevel();
   const approved=await reachSystemGate(store,graph);
   const prepared=await runDesignCommand(
@@ -358,15 +251,13 @@ test("the complete design family supports router modes and final approval",async
   assert.equal(final.gate,"COMPLETE");
   assert.ok(final.artifact_revisions.some(row => row.document_type==="design-approval"));
   const completeRows=await store.list();
-  assertStateInputProjection(completeRows.filter(row =>
-    row.document_type==="design-orchestration-state").at(-1));
   await assert.rejects(runDesignCommand(
     parsed("approve",["--from","design.json"]),
     services(store,withFinalApproval(graph,approved)),
   ),error => error?.code==="ILLEGAL_DESIGN_TRANSITION");
   assert.deepEqual(await store.list(),completeRows);
 
-  const interactiveStore=await commandStore(t);
+  const interactiveStore=memoryCommandStore();
   const promptInput=designCommandInput({artifacts:graph});
   const prompted=await runDesignCommand(parsed("init"),{
     artifactStore:interactiveStore,
@@ -379,7 +270,7 @@ test("the complete design family supports router modes and final approval",async
   assert.equal(prompted.state,"DIRECTION_PENDING");
   await assert.rejects(
     runDesignCommand(parsed("init",["--non-interactive"]),{
-      artifactStore:await commandStore(t),authorityCapability,
+      artifactStore:memoryCommandStore(),authorityCapability,
     }),
     error => error?.code==="INPUT_REQUIRED",
   );
@@ -388,7 +279,7 @@ test("the complete design family supports router modes and final approval",async
 
 test("approve is illegal without one persisted pending gate and appends nothing",async t => {
   assert.equal(typeof runDesignCommand,"function");
-  const store=await commandStore(t);
+  const store=memoryCommandStore();
   const graph=graphForLevel();
   const before=await store.list();
   await assert.rejects(
@@ -402,7 +293,7 @@ test("approve is illegal without one persisted pending gate and appends nothing"
 });
 
 test("a raw caller registry cannot authorize a design gate",async t => {
-  const store=await commandStore(t);
+  const store=memoryCommandStore();
   const graph=graphForLevel();
   const rawServices=input => ({
     artifactStore:store,
@@ -449,7 +340,7 @@ test("a raw caller registry cannot authorize a design gate",async t => {
 
 test("N/A feature-free design persists exactly one brief and one state",async t => {
   assert.equal(typeof runDesignCommand,"function");
-  const store=await commandStore(t);
+  const store=memoryCommandStore();
   const graph=graphForLevel("NOT_APPLICABLE");
   const input=designCommandInput({
     artifacts:graph,
@@ -497,7 +388,7 @@ async function reachSystemPending(store,graph) {
 
 test("approval history is an immutable ordered prefix with one expected transition",async t => {
   await t.test("cannot skip direction and system gates in one approval",async () => {
-    const store=await commandStore(t);
+    const store=memoryCommandStore();
     const graph=graphForLevel();
     await reachDirectionGate(store,graph);
     const before=await store.list();
@@ -512,7 +403,7 @@ test("approval history is an immutable ordered prefix with one expected transiti
 
   await t.test("cannot remove or replace an immutable approval",async () => {
     for (const replacement of [null,"DESIGN-VISUAL-DIRECTION-REPLACED"]) {
-      const store=await commandStore(t);
+      const store=memoryCommandStore();
       const graph=graphForLevel();
       const {direction}=await reachSystemPending(store,graph);
       const approvalRecords=replacement===null ? [] : [approvalOfKind(
@@ -529,7 +420,7 @@ test("approval history is an immutable ordered prefix with one expected transiti
   });
 
   await t.test("cannot reorder an immutable approval history",async () => {
-    const store=await commandStore(t);
+    const store=memoryCommandStore();
     const graph=graphForLevel();
     const {direction}=await reachSystemPending(store,graph);
     const system=approvalOfKind("DESIGN_SYSTEM",graph);
@@ -553,7 +444,7 @@ test("approval history is an immutable ordered prefix with one expected transiti
 test("design status rejects fabricated semantic completion, crypto, and no-op history",async t => {
   for (const kind of ["semantic","crypto","idempotence"]) {
     await t.test(kind,async () => {
-      const store=await commandStore(t);
+      const store=memoryCommandStore();
       const graph=graphForLevel();
       await reachDirectionGate(store,graph);
       const prior=(await store.list({document_type:"design-orchestration-state"})).at(-1);
@@ -746,7 +637,7 @@ test("design status rejects missing, extra, duplicate, and reordered state input
 });
 
 test("every design approval gate dispatches as structured blocked exit four",async t => {
-  const store=await commandStore(t);
+  const store=memoryCommandStore();
   const graph=graphForLevel();
   const dispatched=await dispatchCommand(
     parsed("screens",["--from","design.json","--non-interactive"]),

@@ -1,0 +1,37 @@
+{
+  "schema_version": "toss-test-boundaries.v1",
+  "guarantees": [
+    {"id":"artifact.atomic-append","classification":"durability-atomicity","owner":"test/artifact-store.test.js"},
+    {"id":"artifact.concurrent-writer-lock","classification":"durability-atomicity","owner":"test/artifact-store.test.js"},
+    {"id":"artifact.exact-reference-verification","classification":"durability-atomicity","owner":"test/artifact-store.test.js"},
+    {"id":"artifact.immutable-revision-bytes","classification":"durability-atomicity","owner":"test/artifact-store.test.js"},
+    {"id":"artifact.interrupted-temporary-recovery","classification":"durability-atomicity","owner":"test/artifact-store.test.js"},
+    {"id":"artifact.monotonic-parent-lineage","classification":"durability-atomicity","owner":"test/artifact-store.test.js"},
+    {"id":"artifact.path-containment","classification":"durability-atomicity","owner":"test/artifact-store.test.js"},
+    {"id":"artifact.symlink-rejection","classification":"durability-atomicity","owner":"test/artifact-store.test.js"},
+    {"id":"cli.design-runtime-boundary","classification":"real-cli","owner":"test/design-cli-runtime.test.js"},
+    {"id":"cli.gate-process-boundary","classification":"real-cli","owner":"test/gate-cli-round1.test.js"},
+    {"id":"command.gate-semantics","classification":"semantic","owner":"test/gate-commands.test.js"},
+    {"id":"design.command-semantics","classification":"semantic","owner":"test/design-commands.test.js"},
+    {"id":"design.persisted-idempotent-resume","classification":"store-integration","owner":"test/design-store-boundary.test.js"},
+    {"id":"feature.command-semantics","classification":"semantic","owner":"test/feature-commands.test.js"},
+    {"id":"feature.persisted-delta","classification":"store-integration","owner":"test/feature-store-boundary.test.js"},
+    {"id":"package.packed-execution","classification":"package","owner":"scripts/package-artifact-test.js"},
+    {"id":"project.command-semantics","classification":"semantic","owner":"test/project-commands.test.js"},
+    {"id":"project.persisted-idempotent-resume","classification":"store-integration","owner":"test/project-store-boundary.test.js"},
+    {"id":"project.real-cli-persistence","classification":"real-cli","owner":"test/project-cli-boundary.test.js"},
+    {"id":"release.workflow-metadata","classification":"release","owner":"scripts/release-workflow-test.js"},
+    {"id":"store.fixture-root-isolation","classification":"store-integration","owner":"test/command-store-fixture.test.js"},
+    {"id":"workflow.persisted-resume","classification":"store-integration","owner":"test/state-machine.test.js"}
+  ],
+  "semantic_delegations": [
+    {"entry":"test/command-store-fixture.test.js","guarantees":["artifact.atomic-append","artifact.exact-reference-verification","artifact.immutable-revision-bytes","artifact.monotonic-parent-lineage"]},
+    {"entry":"test/design-commands.test.js","guarantees":["artifact.atomic-append","artifact.exact-reference-verification","artifact.immutable-revision-bytes","artifact.monotonic-parent-lineage","design.persisted-idempotent-resume"]},
+    {"entry":"test/feature-commands.test.js","guarantees":["artifact.atomic-append","artifact.exact-reference-verification","artifact.immutable-revision-bytes","artifact.monotonic-parent-lineage","feature.persisted-delta"]},
+    {"entry":"test/gate-authority-provenance-round2.test.js","guarantees":["artifact.atomic-append","artifact.exact-reference-verification","artifact.immutable-revision-bytes","artifact.monotonic-parent-lineage"]},
+    {"entry":"test/gate-cli-round1.test.js","guarantees":["artifact.atomic-append","artifact.exact-reference-verification","artifact.immutable-revision-bytes","artifact.monotonic-parent-lineage"]},
+    {"entry":"test/gate-commands-round1.test.js","guarantees":["artifact.atomic-append","artifact.exact-reference-verification","artifact.immutable-revision-bytes","artifact.monotonic-parent-lineage"]},
+    {"entry":"test/gate-commands.test.js","guarantees":["artifact.atomic-append","artifact.exact-reference-verification","artifact.immutable-revision-bytes","artifact.monotonic-parent-lineage"]},
+    {"entry":"test/project-commands.test.js","guarantees":["artifact.atomic-append","artifact.exact-reference-verification","artifact.immutable-revision-bytes","artifact.monotonic-parent-lineage","project.persisted-idempotent-resume"]}
+  ]
+}

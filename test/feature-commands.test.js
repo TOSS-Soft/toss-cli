@@ -18,7 +18,6 @@ import {
 } from "./support/design-command-fixture.js";
 import {
   commandServices,
-  commandStore,
   countedCommandStore,
   featureCommandInput,
   memoryCommandStore,
@@ -48,8 +47,8 @@ test("feature orchestration exposes one closed command handler",() => {
   assert.equal(typeof runFeatureCommand,"function");
 });
 
-async function readyProject(t,{real=false}={}) {
-  const store=real ? await commandStore(t) : memoryCommandStore();
+async function readyProject(t) {
+  const store=memoryCommandStore();
   const project=projectCommandInput();
   const prepared=await runProjectCommand(
     parsedCommand("project.prepare",{from:"project.json"}),
@@ -721,55 +720,6 @@ test("feature prepare persists an auditable blocked delta and automation exits n
   assert.equal(automation.blocked,true);
   assert.equal(automation.command_exit_code,4);
   assert.deepEqual(automation.findings,interactive.artifact.content.readiness.failures);
-});
-
-test("feature prepare recovers from interruption without ambiguous revision forks",{
-  skip:!commandsAvailable,
-},async t => {
-  const {store}=await readyProject(t);
-  const input=featureCommandInput();
-  await runFeatureCommand(
-    parsedCommand("feature.add",{from:"feature.json"}),
-    featureServices(store,input),
-  );
-  let appends=0;
-  const interrupted={
-    list:store.list,
-    get:store.get,
-    verify:store.verify,
-    append:async artifact => {
-      appends+=1;
-      if (appends===1) throw new Error("feature append interrupted");
-      return store.append(artifact);
-    },
-  };
-  await assert.rejects(
-    runFeatureCommand(
-      parsedCommand("feature.prepare",{from:"feature.json"}),
-      featureServices(interrupted,input),
-    ),
-    /feature append interrupted/,
-  );
-  const resumed=await runFeatureCommand(
-    parsedCommand("feature.prepare",{continue:true}),
-    featureServices(store,input),
-  );
-  assert.equal(resumed.stage,"PREPARED");
-  assert.ok(resumed.reused_revisions.length>0);
-});
-
-test("a prepared feature delta is durable and verifiable in the real artifact store",{
-  skip:!commandsAvailable,
-},async t => {
-  const {store}=await readyProject(t,{real:true});
-  const result=await runFeatureCommand(
-    parsedCommand("feature.prepare",{from:"feature.json"}),
-    featureServices(store,featureCommandInput()),
-  );
-  const verified=await store.verify(artifactReference(result.artifact));
-  assert.equal(verified.document_type,"feature-delta");
-  assert.equal(verified.content.stage,"PREPARED");
-  assert.equal(verified.content.base_project.authority,"reference-only");
 });
 
 test("feature input and service boundaries reject stale source and accessors without calls",{

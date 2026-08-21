@@ -72,6 +72,11 @@ test("one run captures the inherited Node process tree",async () => {
   assert.deepEqual(sample.slowest_tests,[
     {name:"deterministic fixture case",duration_ms:20,status:"pass"},
   ]);
+  assert.deepEqual(sample.entry_processes,sample.slowest_files);
+  assert.deepEqual(sample.entry_processes.map(entry => entry.name).sort(),[
+    "test/fixtures/performance/child.mjs",
+    "test/fixtures/performance/passing-suite.mjs",
+  ]);
 });
 
 test("one run preserves nonzero status and stderr",async () => {

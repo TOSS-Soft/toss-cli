@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import {readFileSync,writeFileSync} from "node:fs";
 import {
   copyFile,
   mkdir,
@@ -15,6 +16,7 @@ import {tmpdir} from "node:os";
 import {basename, dirname, join} from "node:path";
 import test from "node:test";
 
+import {sha256Canonical} from "../src/contracts/acp.js";
 import {createArtifactStore} from "../src/artifacts/store.js";
 
 const parentFixture=JSON.parse(await readFile(
@@ -52,7 +54,7 @@ function reference(artifact) {
   };
 }
 
-async function createTestStore(t) {
+async function createTestStore(t,{operationObserver}={}) {
   const root=await mkdtemp(join(tmpdir(),"toss-artifact-store-"));
   t.after(() => rm(root,{recursive:true,force:true}));
   return {
@@ -61,8 +63,17 @@ async function createTestStore(t) {
       root,
       now:() => new Date("2026-08-17T12:00:00.000Z"),
       randomId:() => "test-temporary-id",
+      operationObserver,
     }),
   };
+}
+
+function artifactDraft(artifactId,{inputs=[]}={}) {
+  return withoutContentHash(draft({
+    artifact_id:artifactId,
+    run_id:`run-${artifactId.toLowerCase()}`,
+    inputs,
+  }));
 }
 
 function artifactPath(root,artifact) {
@@ -98,6 +109,124 @@ test("append persists a content-addressed revision and is idempotent",async (t) 
   assert.deepEqual(await readdir(dirname(artifactPath(root,first))),[
     `r000001-${first.content_sha256}.json`,
   ]);
+});
+
+test("public reads use one operation-local snapshot for deep shared references",async t => {
+  const {root,store}=await createTestStore(t);
+  const shared=await store.append(artifactDraft("ART-SNAPSHOT-SHARED"));
+  const left=await store.append(artifactDraft("ART-SNAPSHOT-LEFT",{
+    inputs:[reference(shared)],
+  }));
+  const right=await store.append(artifactDraft("ART-SNAPSHOT-RIGHT",{
+    inputs:[reference(shared)],
+  }));
+  const top=await store.append(artifactDraft("ART-SNAPSHOT-TOP",{
+    inputs:[reference(left),reference(right)],
+  }));
+  const phases=[];
+  const observed=createArtifactStore({
+    root,
+    operationObserver:phase => phases.push(phase),
+  });
+
+  assert.deepEqual(await observed.verify(reference(top)),top);
+  assert.deepEqual(phases.splice(0),["verify:snapshot"]);
+  assert.deepEqual(await observed.get(reference(top)),top);
+  assert.deepEqual(phases.splice(0),["get:snapshot"]);
+  assert.equal((await observed.list()).length,4);
+  assert.deepEqual(phases,["list:snapshot"]);
+});
+
+test("append snapshots once and securely rereads the renamed final file",async t => {
+  let finalPath;
+  const phases=[];
+  const {root,store}=await createTestStore(t,{
+    operationObserver:phase => {
+      phases.push(phase);
+      if (phase!=="append:post-rename-read") return;
+      const persisted=JSON.parse(readFileSync(finalPath,"utf8"));
+      persisted.run_id="run-observed-from-secure-reread";
+      writeFileSync(finalPath,JSON.stringify(persisted),"utf8");
+    },
+  });
+  const candidate=artifactDraft("ART-SNAPSHOT-APPEND");
+  candidate.content_sha256=sha256Canonical(candidate.content);
+  candidate.revision=1;
+  finalPath=artifactPath(root,candidate);
+
+  const appended=await store.append(candidate);
+
+  assert.equal(appended.run_id,"run-observed-from-secure-reread");
+  assert.deepEqual(phases,["append:snapshot","append:post-rename-read"]);
+});
+
+test("operation snapshots do not cache artifacts across public calls",async t => {
+  const phases=[];
+  const {root,store}=await createTestStore(t,{
+    operationObserver:phase => phases.push(phase),
+  });
+  const appended=await store.append(artifactDraft("ART-SNAPSHOT-FRESHNESS"));
+  phases.length=0;
+  assert.deepEqual(await store.get(reference(appended)),appended);
+  const persisted=JSON.parse(await readFile(artifactPath(root,appended),"utf8"));
+  persisted.content.entities[0].meaning="later corruption";
+  await writeFile(artifactPath(root,appended),JSON.stringify(persisted),"utf8");
+
+  await assert.rejects(store.get(reference(appended)),/content hash mismatch/i);
+  assert.deepEqual(phases,["get:snapshot","get:snapshot"]);
+});
+
+test("targeted reads fail closed for unrelated corrupt and unexpected entries",async t => {
+  const {root,store}=await createTestStore(t);
+  const target=await store.append(artifactDraft("ART-SNAPSHOT-TARGET"));
+  const unrelated=await store.append(artifactDraft("ART-SNAPSHOT-UNRELATED"));
+  const unrelatedPath=artifactPath(root,unrelated);
+  const persisted=JSON.parse(await readFile(unrelatedPath,"utf8"));
+  persisted.content.entities[0].meaning="unrelated corruption";
+  await writeFile(unrelatedPath,JSON.stringify(persisted),"utf8");
+
+  await assert.rejects(store.verify(reference(target)),/content hash mismatch/i);
+  await writeFile(join(dirname(artifactPath(root,target)),"unexpected.txt"),"unknown","utf8");
+  await assert.rejects(
+    store.list({artifact_id:"ART-NOT-PRESENT"}),
+    /unexpected artifact entry/i,
+  );
+});
+
+test("snapshot identity buckets reject duplicate logical revisions",async t => {
+  const {root,store}=await createTestStore(t);
+  const first=await store.append(artifactDraft("ART-SNAPSHOT-DUPLICATE"));
+  const duplicate=clone(first);
+  duplicate.run_id="run-snapshot-duplicate-second-path";
+  duplicate.content={entities:[{
+    id:"REQ-001",
+    kind:"requirement",
+    meaning:"different bytes for the same logical revision",
+  }]};
+  duplicate.content_sha256=sha256Canonical(duplicate.content);
+  await writeFile(artifactPath(root,duplicate),JSON.stringify(duplicate),"utf8");
+
+  await assert.rejects(store.verify(reference(first)),/multiple artifacts share identity/i);
+  await assert.rejects(store.list(),/multiple artifacts share identity/i);
+});
+
+test("operation observer must be a function when supplied",() => {
+  assert.throws(
+    () => createArtifactStore({root:"unused",operationObserver:null}),
+    /operationObserver must be a function/i,
+  );
+});
+
+test("concurrent same-root appends retain one immutable revision without live lock or temporary",async t => {
+  const {root,store}=await createTestStore(t);
+  const [left,right]=await Promise.all([store.append(draft()),store.append(draft())]);
+  assert.deepEqual(left,right);
+  assert.equal(left.revision,1);
+  assert.deepEqual(await store.list({artifact_id:left.artifact_id}),[left]);
+  const rootEntries=await readdir(artifactRoot(root));
+  assert.equal(rootEntries.includes(".append.lock"),false);
+  const revisionEntries=await readdir(dirname(artifactPath(root,left)));
+  assert.deepEqual(revisionEntries,[`r000001-${left.content_sha256}.json`]);
 });
 
 test("contract-valid colon artifact IDs use a reversible filesystem-safe identity",async (t) => {

@@ -107,7 +107,6 @@ test("the validator cold-start owner appears exactly once in fast",async () => {
     .filter(([,entries]) => entries.includes("test/validator-cold-start.test.js"))
     .map(([lane]) => lane);
   assert.deepEqual(owners,["fast"]);
-  assert.equal(manifest.concurrency,1);
 });
 
 const rejectionCases=[

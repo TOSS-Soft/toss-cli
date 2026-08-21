@@ -59,6 +59,9 @@ const benchmarkCli=fileURLToPath(new URL("../scripts/performance/benchmark.mjs",
 const validatorBenchmarkCli=fileURLToPath(
   new URL("../scripts/performance/validator-benchmark.mjs",import.meta.url),
 );
+const storeFocusedBenchmarkCli=fileURLToPath(
+  new URL("../scripts/performance/store-focused-benchmark.mjs",import.meta.url),
+);
 
 test("validator output containment rejects Win32 cross-volume paths",() => {
   const candidate="D:\\evidence\\validator-report.json";
@@ -76,6 +79,14 @@ test("package exposes opt-in performance commands without weakening full verific
   assert.equal(
     pkg.scripts["test:validator-benchmark"],
     "node ./scripts/performance/validator-benchmark.mjs",
+  );
+  assert.equal(
+    pkg.scripts["test:store-focused-benchmark"],
+    "node ./scripts/performance/store-focused-benchmark.mjs",
+  );
+  assert.equal(
+    pkg.scripts["test:concurrency-benchmark"],
+    "node ./scripts/performance/concurrency-benchmark.mjs",
   );
   assert.equal(pkg.scripts.test,"npm run test:full");
   assert.equal(pkg.scripts["test:fast"],"node ./scripts/test-runner.mjs fast");
@@ -224,6 +235,26 @@ test("validator benchmark CLI maps invalid output parents to exit five",async t 
     assert.match(result.stderr,/UNSAFE_VALIDATOR_BENCHMARK_OUTPUT/);
     assert.equal(result.stdout,"");
   }
+});
+
+test("focused benchmark leaves missing package-lock operational failures unexpected",async t => {
+  const root=await mkdtemp(join(tmpdir(),"toss-store-focused-missing-lock-"));
+  t.after(() => rm(root,{recursive:true,force:true}));
+  await mkdir(join(root,".superpowers","evidence"),{recursive:true});
+  await writeFile(join(root,"tracked.txt"),"fixture\n");
+  execFileSync("git",["init","--quiet"],{cwd:root});
+  execFileSync("git",["config","user.email","test@example.invalid"],{cwd:root});
+  execFileSync("git",["config","user.name","Test"],{cwd:root});
+  execFileSync("git",["add","tracked.txt"],{cwd:root});
+  execFileSync("git",["commit","--quiet","-m","fixture"],{cwd:root});
+
+  const result=spawnSync(process.execPath,[storeFocusedBenchmarkCli,
+    "--runs","3","--phase","before","--runner-id","fixture",
+    "--output",".superpowers/evidence/focused.json",
+  ],{cwd:root,encoding:"utf8"});
+  assert.equal(result.status,70,result.stderr);
+  assert.match(result.stderr,/ENOENT.*package-lock\.json/i);
+  assert.doesNotMatch(result.stderr,/INVALID_STORE_FOCUSED_EVIDENCE|UNSAFE_/);
 });
 
 async function benchmarkFixture(t) {

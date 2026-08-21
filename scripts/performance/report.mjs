@@ -301,7 +301,7 @@ function validateSample(value,index) {
   const sample=closedRecord(value,`sample ${index+1}`,[
     "wall_ms","user_cpu_ms","system_cpu_ms","exit_status","fresh_process_count",
     "peak_process_count","duplicates","slowest_files","slowest_tests",
-  ],["stdout","stderr"]);
+  ],["stdout","stderr","entry_processes"]);
   finiteNonnegative(sample.wall_ms,`sample ${index+1} wall_ms`);
   finiteNonnegative(sample.user_cpu_ms,`sample ${index+1} user_cpu_ms`);
   finiteNonnegative(sample.system_cpu_ms,`sample ${index+1} system_cpu_ms`);
@@ -318,9 +318,13 @@ function validateSample(value,index) {
   const duplicates=denseArray(sample.duplicates,`sample ${index+1} duplicates`);
   const slowestFiles=denseArray(sample.slowest_files,`sample ${index+1} slowest_files`);
   const slowestTests=denseArray(sample.slowest_tests,`sample ${index+1} slowest_tests`);
+  const entryProcesses=sample.entry_processes===undefined ? undefined :
+    denseArray(sample.entry_processes,`sample ${index+1} entry_processes`);
   duplicates.forEach((row,rowIndex) => validateDuplicate(row,`sample ${index+1} duplicate ${rowIndex+1}`));
   slowestFiles.forEach((row,rowIndex) => validateDurationRow(row,`sample ${index+1} slow file ${rowIndex+1}`));
   slowestTests.forEach((row,rowIndex) => validateDurationRow(row,`sample ${index+1} slow test ${rowIndex+1}`));
+  entryProcesses?.forEach((row,rowIndex) =>
+    validateDurationRow(row,`sample ${index+1} entry process ${rowIndex+1}`));
   if (sample.stdout!==undefined && typeof sample.stdout!=="string") {
     throw new TypeError(`sample ${index+1} stdout must be a string`);
   }
