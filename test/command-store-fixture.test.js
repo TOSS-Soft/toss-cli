@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import {readFile,stat} from "node:fs/promises";
+import {readFile,rm,stat} from "node:fs/promises";
 import test from "node:test";
 
 import {canonicalJson} from "../src/contracts/acp.js";
@@ -63,19 +63,50 @@ test("command-store fixture export provides isolated roots and idempotent cleanu
   await right.cleanup();
 });
 
-test("command-store fixture cleanup retains an injected failure as primary",async t => {
-  const fixture=await commandFixture.commandStoreFixture(t);
+test("command-store fixture cleanup remains retryable after a removal failure",async t => {
+  const removalFailure=Object.assign(new Error("injected cleanup failure"),{code:"EACCES"});
+  let removals=0;
+  const fixture=await commandFixture.commandStoreFixture(t,{
+    prefix:"toss-command-retry-",
+    remove:async (...args) => {
+      removals+=1;
+      if (removals===1) throw removalFailure;
+      return rm(...args);
+    },
+  });
   await fixture.store.append(commandFixture.projectCommandInput().artifacts.pm_analysis);
-  const primary=new Error("injected operation failure");
-  let observed;
-  try {
-    throw primary;
-  } catch (error) {
-    observed=error;
-  } finally {
-    await fixture.cleanup();
-  }
-  assert.equal(observed,primary);
+  await assert.rejects(fixture.cleanup(),error => error===removalFailure);
+  assert.equal((await stat(fixture.root)).isDirectory(),true);
+  await fixture.cleanup();
+  assert.equal(removals,2);
+  await assert.rejects(stat(fixture.root),error => error?.code==="ENOENT");
+});
+
+test("command-store fixture cleanup preserves a genuine operation error as primary",async t => {
+  const fixture=await commandFixture.commandStoreFixture(t);
+  const invalid=copy(commandFixture.projectCommandInput().artifacts.pm_analysis);
+  invalid.parents=[{
+    artifact_id:"ART-MISSING-CLEANUP-REFERENCE",
+    revision:1,
+    content_sha256:"f".repeat(64),
+  }];
+  delete invalid.content_sha256;
+  let primary;
+  const operation=async () => {
+    try {
+      await fixture.store.append(invalid);
+      assert.fail("expected injected operation to reject");
+    } catch (error) {
+      primary=error;
+      throw error;
+    } finally {
+      await fixture.cleanup();
+    }
+  };
+  await assert.rejects(operation,error => {
+    assert.equal(error,primary);
+    return /missing parent/i.test(error.message);
+  });
   await assert.rejects(stat(fixture.root),error => error?.code==="ENOENT");
 });
 

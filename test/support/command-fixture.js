@@ -7,16 +7,19 @@ import {parseCommand} from "../../src/commands/router.js";
 import {canonicalJson,sha256Canonical} from "../../src/contracts/acp.js";
 import {clone,completeArtifacts,rehash} from "./trace-fixture.js";
 
-export async function commandStoreFixture(t,{prefix="toss-command-"}={}) {
+export async function commandStoreFixture(t,{prefix="toss-command-",remove=rm}={}) {
   if (typeof prefix!=="string" || !/^toss-command-[a-z-]*$/u.test(prefix)) {
     throw new TypeError("command store prefix must be a safe toss-command prefix");
+  }
+  if (typeof remove!=="function") {
+    throw new TypeError("command store remove must be a function");
   }
   const root=await mkdtemp(join(tmpdir(),prefix));
   let cleaned=false;
   const cleanup=async () => {
     if (cleaned) return;
+    await remove(root,{recursive:true,force:true});
     cleaned=true;
-    await rm(root,{recursive:true,force:true});
   };
   t.after(cleanup);
   return Object.freeze({root,store:createArtifactStore({root}),cleanup});
