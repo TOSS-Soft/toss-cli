@@ -385,7 +385,7 @@ test("the checked-in inventory owns every executable entry exactly once",async (
 
 test("the checked-in inventory uses the measured stable concurrency",async () => {
   const manifest=await readCheckedInManifest();
-  assert.equal(manifest.concurrency,3);
+  assert.equal(manifest.concurrency,4);
 });
 
 test("the checked-in inventory rejects a removed real entry",async () => {

@@ -1,6 +1,6 @@
 {
   "schema_version": "toss-test-manifest.v1",
-  "concurrency": 3,
+  "concurrency": 4,
   "lanes": {
     "fast": [
       "test/acp-v1.test.js",
