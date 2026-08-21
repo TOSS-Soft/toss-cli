@@ -155,7 +155,9 @@ test("concurrency report derives stable medians and selects the lower concurrenc
     concurrency:2,
     reason:"LOWEST_STABLE_WALL_MEDIAN",
   });
-  assert.deepEqual(selectStableConcurrency(report.candidates),report.selection);
+  const selected=selectStableConcurrency(reportInput().candidates);
+  assert.deepEqual(selected,report.selection);
+  assert.equal(Object.isFrozen(selected),true);
   assert.deepEqual(JSON.parse(canonicalConcurrencyJson(report)),report);
 });
 
@@ -196,7 +198,83 @@ test("selection returns null when no candidate is stable",() => {
       candidate(concurrency,[10,11,12],{captureFailureAt:1})),
   });
   assert.equal(report.selection,null);
-  assert.equal(selectStableConcurrency(report.candidates),null);
+  assert.equal(selectStableConcurrency(
+    CONCURRENCY_CANDIDATES.map(concurrency =>
+      candidate(concurrency,[10,11,12],{captureFailureAt:1})),
+  ),null);
+});
+
+test("a manifest-entry process duplicate makes only that candidate unstable",() => {
+  const input=reportInput();
+  for (const sample of input.candidates[1].samples) {
+    sample.evidence.duplicates=[{entry_path:entries[0],count:2}];
+  }
+  const report=createConcurrencyReport(input);
+  assert.equal(report.candidates[1].stable,false);
+  assert.equal(report.candidates[1].medians,null);
+  assert.deepEqual(report.selection,{
+    concurrency:3,reason:"LOWEST_STABLE_WALL_MEDIAN",
+  });
+});
+
+test("a non-manifest nested-process duplicate remains diagnostic evidence",() => {
+  const input=reportInput();
+  for (const sample of input.candidates[1].samples) {
+    sample.evidence.duplicates=[{entry_path:"bin/toss.js",count:2}];
+  }
+  const report=createConcurrencyReport(input);
+  assert.equal(report.candidates[1].stable,true);
+  assert.equal(report.candidates[1].medians.wall_ms,81);
+  assert.deepEqual(report.selection,{
+    concurrency:2,reason:"LOWEST_STABLE_WALL_MEDIAN",
+  });
+});
+
+for (const [name,counts] of [
+  ["zero fresh and peak process counts",{fresh_process_count:0,peak_process_count:0}],
+  ["a zero peak process count",{fresh_process_count:8,peak_process_count:0}],
+]) {
+  test(`${name} makes a candidate unstable without discarding its evidence`,() => {
+    const input=reportInput();
+    for (const sample of input.candidates[1].samples) Object.assign(sample.evidence,counts);
+    const report=createConcurrencyReport(input);
+    assert.equal(report.candidates[1].stable,false);
+    assert.equal(report.candidates[1].medians,null);
+    assert.deepEqual(report.candidates[1].samples.map(sample => ({
+      fresh_process_count:sample.evidence.fresh_process_count,
+      peak_process_count:sample.evidence.peak_process_count,
+    })),[counts,counts,counts]);
+    assert.deepEqual(report.selection,{
+      concurrency:3,reason:"LOWEST_STABLE_WALL_MEDIAN",
+    });
+  });
+}
+
+test("raw candidate selection derives stability and medians instead of accepting forged fields",() => {
+  const raw=reportInput().candidates;
+  assert.deepEqual(selectStableConcurrency(raw),{
+    concurrency:2,reason:"LOWEST_STABLE_WALL_MEDIAN",
+  });
+
+  const forged=clone(raw);
+  forged[3].stable=true;
+  forged[3].medians={
+    wall_ms:1,user_cpu_ms:1,system_cpu_ms:1,
+    fresh_process_count:1,peak_process_count:1,
+  };
+  assert.throws(() => selectStableConcurrency(forged),/unknown property|derived/i);
+});
+
+test("raw candidate selection fails closed when forged derivations replace samples",() => {
+  const forged=reportInput().candidates;
+  forged[0]={
+    concurrency:1,samples:null,stable:true,
+    medians:{
+      wall_ms:1,user_cpu_ms:1,system_cpu_ms:1,
+      fresh_process_count:1,peak_process_count:1,
+    },
+  };
+  assert.throws(() => selectStableConcurrency(forged),/unknown property|samples|array/i);
 });
 
 test("full-lane headings parse exact failure evidence in expected order",() => {

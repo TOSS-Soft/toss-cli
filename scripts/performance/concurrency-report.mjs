@@ -10,6 +10,11 @@ const HEADING=/^\[test\] lane=full entry=([^ ]+) outcome=(passed|failed|signaled
 const ENTRY_RESULT_FIELDS=Object.freeze([
   "entry","outcome","exit_status","signal","error_code","duration_ms",
 ]);
+const EVIDENCE_FIELDS=Object.freeze([
+  "wall_ms","user_cpu_ms","system_cpu_ms","exit_status","fresh_process_count",
+  "peak_process_count","duplicates","entry_results","orphan_process_count",
+  "isolation_passed",
+]);
 const MEDIAN_FIELDS=Object.freeze([
   "wall_ms","user_cpu_ms","system_cpu_ms","fresh_process_count","peak_process_count",
 ]);
@@ -180,11 +185,7 @@ function normalizeDuplicate(value,label) {
 }
 
 function normalizeEvidence(value,entries,label) {
-  const evidence=closedRecord(value,label,[
-    "wall_ms","user_cpu_ms","system_cpu_ms","exit_status","fresh_process_count",
-    "peak_process_count","duplicates","entry_results","orphan_process_count",
-    "isolation_passed",
-  ]);
+  const evidence=closedRecord(value,label,EVIDENCE_FIELDS);
   const normalized={};
   for (const field of ["wall_ms","user_cpu_ms","system_cpu_ms"]) {
     normalized[field]=finiteNonnegative(evidence[field],`${label} ${field}`);
@@ -247,9 +248,12 @@ function normalizeSample(value,entries,candidateIndex,sampleIndex) {
   };
 }
 
-function stableSamples(samples) {
+function stableSamples(samples,entries) {
+  const manifestEntries=new Set(entries);
   return samples.every(sample => sample.capture_error===null && sample.evidence!==null &&
     sample.evidence.exit_status===0 && sample.evidence.orphan_process_count===0 &&
+    sample.evidence.fresh_process_count>0 && sample.evidence.peak_process_count>0 &&
+    !sample.evidence.duplicates.some(duplicate => manifestEntries.has(duplicate.entry_path)) &&
     sample.evidence.isolation_passed &&
     sample.evidence.entry_results.every(result => result.outcome==="passed"));
 }
@@ -277,7 +281,7 @@ function normalizeCandidate(value,entries,index,{verifyDerived=false}={}) {
   if (samples.length!==3) throw new TypeError(`${label} requires exactly three samples`);
   const normalizedSamples=samples.map((sample,sampleIndex) =>
     normalizeSample(sample,entries,index+1,sampleIndex+1));
-  const stable=stableSamples(normalizedSamples);
+  const stable=stableSamples(normalizedSamples,entries);
   const medians=stable ? sampleMedians(normalizedSamples) : null;
   if (verifyDerived) {
     if (candidate.stable!==stable) throw new TypeError("invalid concurrency report derived stability");
@@ -305,26 +309,10 @@ function normalizedSelection(value) {
   return {concurrency:selection.concurrency,reason:selection.reason};
 }
 
-export function selectStableConcurrency(value) {
-  const candidates=denseArray(value,"selection candidates");
-  if (candidates.length!==CONCURRENCY_CANDIDATES.length) {
-    throw new TypeError("selection requires candidates 1 through 4");
-  }
+function selectNormalizedConcurrency(candidates) {
   const stable=[];
-  candidates.forEach((valueAtIndex,index) => {
-    const row=closedRecord(valueAtIndex,`selection candidate ${index+1}`,[
-      "concurrency","samples","stable","medians",
-    ]);
-    if (row.concurrency!==CONCURRENCY_CANDIDATES[index]) {
-      throw new TypeError("selection candidates must appear in canonical order");
-    }
-    if (typeof row.stable!=="boolean") throw new TypeError("selection candidate stable must be boolean");
-    if (!row.stable) {
-      if (row.medians!==null) throw new TypeError("unstable selection candidate requires null medians");
-      return;
-    }
-    const medians=normalizeMedians(row.medians,`selection candidate ${index+1} medians`);
-    stable.push({concurrency:row.concurrency,wall_ms:medians.wall_ms});
+  candidates.forEach(row => {
+    if (row.stable) stable.push({concurrency:row.concurrency,wall_ms:row.medians.wall_ms});
   });
   if (stable.length===0) return null;
   stable.sort((left,right) => left.wall_ms-right.wall_ms || left.concurrency-right.concurrency);
@@ -332,6 +320,57 @@ export function selectStableConcurrency(value) {
     concurrency:stable[0].concurrency,
     reason:"LOWEST_STABLE_WALL_MEDIAN",
   });
+}
+
+function inferSelectionEntries(candidates) {
+  for (let candidateIndex=0;candidateIndex<candidates.length;candidateIndex+=1) {
+    const candidate=closedRecord(
+      candidates[candidateIndex],`selection candidate ${candidateIndex+1}`,
+      ["concurrency","samples"],
+    );
+    if (candidate.concurrency!==CONCURRENCY_CANDIDATES[candidateIndex]) {
+      throw new TypeError("selection candidates must appear in canonical order");
+    }
+    const samples=denseArray(candidate.samples,`selection candidate ${candidateIndex+1} samples`);
+    if (samples.length!==3) {
+      throw new TypeError(`selection candidate ${candidateIndex+1} requires exactly three samples`);
+    }
+    for (let sampleIndex=0;sampleIndex<samples.length;sampleIndex+=1) {
+      const sample=closedRecord(
+        samples[sampleIndex],
+        `selection candidate ${candidateIndex+1} sample ${sampleIndex+1}`,
+        ["run","capture_error","evidence"],
+      );
+      if (sample.evidence===null) continue;
+      const evidence=closedRecord(
+        sample.evidence,
+        `selection candidate ${candidateIndex+1} sample ${sampleIndex+1} evidence`,
+        EVIDENCE_FIELDS,
+      );
+      const results=denseArray(
+        evidence.entry_results,
+        `selection candidate ${candidateIndex+1} sample ${sampleIndex+1} entry results`,
+      );
+      return normalizeEntries(results.map((result,resultIndex) =>
+        closedRecord(
+          result,
+          `selection candidate ${candidateIndex+1} sample ${sampleIndex+1} entry result ${resultIndex+1}`,
+          ENTRY_RESULT_FIELDS,
+        ).entry));
+    }
+  }
+  return [];
+}
+
+export function selectStableConcurrency(value) {
+  const candidates=denseArray(value,"selection candidates");
+  if (candidates.length!==CONCURRENCY_CANDIDATES.length) {
+    throw new TypeError("selection requires candidates 1 through 4");
+  }
+  const entries=inferSelectionEntries(candidates);
+  const normalized=candidates.map((candidate,index) =>
+    normalizeCandidate(candidate,entries,index));
+  return selectNormalizedConcurrency(normalized);
 }
 
 function normalizeReportInput({identity,entries,candidates},{verifyDerived=false,selection}={}) {
@@ -345,7 +384,7 @@ function normalizeReportInput({identity,entries,candidates},{verifyDerived=false
   }
   const normalizedCandidates=candidateRows.map((candidate,index) =>
     normalizeCandidate(candidate,normalizedEntries,index,{verifyDerived}));
-  const derivedSelection=selectStableConcurrency(normalizedCandidates);
+  const derivedSelection=selectNormalizedConcurrency(normalizedCandidates);
   if (verifyDerived) {
     const supplied=normalizedSelection(selection);
     if (canonicalJson(supplied)!==canonicalJson(derivedSelection)) {
