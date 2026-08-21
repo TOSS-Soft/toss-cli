@@ -35,6 +35,7 @@
     "test:performance-budget": "node ./scripts/performance/budget.mjs",
     "test:validator-benchmark": "node ./scripts/performance/validator-benchmark.mjs",
     "test:store-focused-benchmark": "node ./scripts/performance/store-focused-benchmark.mjs",
+    "test:concurrency-benchmark": "node ./scripts/performance/concurrency-benchmark.mjs",
     "prepack": "npm test",
     "release:version": "node ./scripts/release-version.mjs"
   },
