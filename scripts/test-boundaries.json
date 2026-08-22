@@ -20,6 +20,7 @@
     {"id":"project.command-semantics","classification":"semantic","owner":"test/project-commands.test.js"},
     {"id":"project.persisted-idempotent-resume","classification":"store-integration","owner":"test/project-store-boundary.test.js"},
     {"id":"project.real-cli-persistence","classification":"real-cli","owner":"test/project-cli-boundary.test.js"},
+    {"id":"release.coverage-audit-v2.1.1","classification":"release","owner":"test/coverage-audit.test.js"},
     {"id":"release.workflow-metadata","classification":"release","owner":"scripts/release-workflow-test.js"},
     {"id":"store.fixture-root-isolation","classification":"store-integration","owner":"test/command-store-fixture.test.js"},
     {"id":"workflow.persisted-resume","classification":"store-integration","owner":"test/state-machine.test.js"}

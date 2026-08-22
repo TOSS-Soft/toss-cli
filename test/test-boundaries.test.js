@@ -229,7 +229,11 @@ test("checked-in boundary inventory binds the exact current memory-backed entrie
     "test/gate-commands.test.js",
     "test/project-commands.test.js",
   ]);
-  assert.equal(inventory.guarantees.length,22);
+  assert.equal(inventory.guarantees.length,23);
+  assert.deepEqual(inventory.guarantees.filter(row => row.id.startsWith("release.")).map(row => row.id),[
+    "release.coverage-audit-v2.1.1",
+    "release.workflow-metadata",
+  ]);
 });
 
 test("boundary CLI validates the checked-in manifest and inventory",async () => {
