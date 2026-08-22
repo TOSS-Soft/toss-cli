@@ -182,11 +182,25 @@ fi
 if [[ "$1" == "api" ]]; then
   test "$2" = "repos/TOSS-Soft/toss-cli/releases/tags/v2.1.1"
   [[ " $* " == *" --jq "* ]]
-  if [[ -f "$GH_FAKE_EVIDENCE_UPLOADED" ]]; then
-    printf '{"tagName":"v2.1.1","url":"https://github.com/TOSS-Soft/toss-cli/releases/tag/v2.1.1","isDraft":%s,"isPrerelease":false,"assets":[{"name":"toss-software-cli-2.1.1.tgz","digest":"sha256:%s"},{"name":"release-evidence.json","digest":"sha256:%s"}]}\\n' "$GH_FAKE_DRAFT" "$GH_FAKE_TARBALL_DIGEST" "$(printf 'e%.0s' {1..64})"
-  else
-    printf '{"tagName":"v2.1.1","url":"https://github.com/TOSS-Soft/toss-cli/releases/tag/v2.1.1","isDraft":%s,"isPrerelease":false,"assets":[{"name":"toss-software-cli-2.1.1.tgz","digest":"sha256:%s"}]}\\n' "$GH_FAKE_DRAFT" "$GH_FAKE_TARBALL_DIGEST"
+  if [[ "$*" == *'.assets[].name'* ]]; then
+    cut -f1 "$GH_FAKE_ASSETS"
+    exit 0
   fi
+  node --input-type=module - "$GH_FAKE_ASSETS" "$GH_FAKE_DRAFT" <<'NODE'
+import { readFileSync } from 'node:fs';
+const rows = readFileSync(process.argv[2], 'utf8').trim();
+const assets = rows === '' ? [] : rows.split('\\n').map((row) => {
+  const [name, digest] = row.split('\\t');
+  return { name, digest: 'sha256:' + digest };
+});
+process.stdout.write(JSON.stringify({
+  tagName: 'v2.1.1',
+  url: 'https://github.com/TOSS-Soft/toss-cli/releases/tag/v2.1.1',
+  isDraft: process.argv[3] === 'true',
+  isPrerelease: false,
+  assets
+}) + '\\n');
+NODE
   exit 0
 fi
 if [[ "$1 $2" == "release create" ]]; then
@@ -199,6 +213,8 @@ if [[ "$1 $2" == "release create" ]]; then
     fi
   done
   : > "$GH_FAKE_RELEASED"
+  cp "$GH_FAKE_NOTES_PATH" "$GH_FAKE_NOTES"
+  printf '%s\\t%s\\n' "$(basename "$4")" "$GH_FAKE_TARBALL_DIGEST" > "$GH_FAKE_ASSETS"
   exit 0
 fi
 if [[ "$1 $2" == "release edit" ]]; then
@@ -208,13 +224,24 @@ if [[ "$1 $2" == "release edit" ]]; then
       test "\${!next}" = "$GH_FAKE_NOTES_PATH"
     fi
   done
+  cp "$GH_FAKE_NOTES_PATH" "$GH_FAKE_NOTES"
   exit 0
 fi
 if [[ "$1 $2" == "release upload" ]]; then
   test -f "$4"
-  if [[ "$(basename "$4")" == "release-evidence.json" ]]; then
-    : > "$GH_FAKE_EVIDENCE_UPLOADED"
-  fi
+  asset_name="$(basename "$4")"
+  asset_digest="$GH_FAKE_TARBALL_DIGEST"
+  if [[ "$asset_name" == "release-evidence.json" ]]; then asset_digest="$(printf 'e%.0s' {1..64})"; fi
+  awk -F '\\t' -v name="$asset_name" '$1 != name' "$GH_FAKE_ASSETS" > "$GH_FAKE_ASSETS.tmp"
+  printf '%s\\t%s\\n' "$asset_name" "$asset_digest" >> "$GH_FAKE_ASSETS.tmp"
+  mv "$GH_FAKE_ASSETS.tmp" "$GH_FAKE_ASSETS"
+  exit 0
+fi
+if [[ "$1 $2" == "release delete-asset" ]]; then
+  test "$3" = "v2.1.1"
+  test "$5" = "--yes"
+  awk -F '\\t' -v name="$4" '$1 != name' "$GH_FAKE_ASSETS" > "$GH_FAKE_ASSETS.tmp"
+  mv "$GH_FAKE_ASSETS.tmp" "$GH_FAKE_ASSETS"
   exit 0
 fi
 exit 1
@@ -254,11 +281,28 @@ exit 1
 
   function runReleaseScenario(name, {
     digest = 'a4d6f8371fc5231d9a46c749e301d7f3716ed50faafa1b86e61756db1f064aee',
-    draft = false
+    draft = false,
+    metadataCommit,
+    existingAssets = []
   } = {}) {
     const scenario = createReleaseShellFixture(name);
     const ghLog = join(scenario.cwd, 'gh.log');
     const npmLog = join(scenario.cwd, 'npm.log');
+    const ghAssets = join(scenario.cwd, 'gh-assets.tsv');
+    const ghNotes = join(scenario.cwd, 'gh-notes.md');
+    const releasedMarker = join(scenario.cwd, 'released');
+    if (metadataCommit !== undefined) {
+      const metadataPath = join(scenario.cwd, 'dist', 'release-metadata.json');
+      const metadata = JSON.parse(readFileSync(metadataPath, 'utf8'));
+      writeFileSync(metadataPath, canonicalJson({ ...metadata, commit: metadataCommit }));
+    }
+    writeFileSync(ghAssets, existingAssets.map(({ name: assetName, sha256 }) =>
+      `${assetName}\t${sha256}\n`
+    ).join(''));
+    if (existingAssets.length > 0) {
+      writeFileSync(releasedMarker, 'existing release\n');
+      writeFileSync(ghNotes, '# Stale release notes\n');
+    }
     const result = spawnSync('bash', ['-c', releaseStep.run], {
       cwd: scenario.cwd,
       encoding: 'utf8',
@@ -278,8 +322,9 @@ exit 1
           ? 'TOSS-Soft/toss-cli'
           : '',
         GH_FAKE_LOG: ghLog,
-        GH_FAKE_RELEASED: join(scenario.cwd, 'released'),
-        GH_FAKE_EVIDENCE_UPLOADED: join(scenario.cwd, 'evidence-uploaded'),
+        GH_FAKE_RELEASED: releasedMarker,
+        GH_FAKE_ASSETS: ghAssets,
+        GH_FAKE_NOTES: ghNotes,
         GH_FAKE_NOTES_PATH: 'docs/releases/v2.1.1.md',
         GH_FAKE_TARBALL_DIGEST: digest,
         GH_FAKE_DRAFT: String(draft),
@@ -288,7 +333,7 @@ exit 1
       }
     });
     assert.doesNotMatch(`${result.stdout}${result.stderr}`, /fixture-(?:gh|packages)-token-do-not-print/);
-    return {...scenario, result, ghLog, npmLog};
+    return {...scenario, result, ghLog, npmLog, ghAssets, ghNotes};
   }
 
   const successfulRelease = runReleaseScenario('release-shell');
@@ -318,11 +363,51 @@ exit 1
   assert.match(ghCalls, /release create v2\.1\.1 .*toss-software-cli-2\.1\.1\.tgz/);
   assert.match(ghCalls, /--notes-file docs\/releases\/v2\.1\.1\.md/);
   assert.match(ghCalls, /release upload v2\.1\.1 .*release-evidence\.json --clobber/);
-  assert.equal((ghCalls.match(/api repos\/TOSS-Soft\/toss-cli\/releases\/tags\/v2\.1\.1/g) ?? []).length, 2);
+  assert.equal((ghCalls.match(/api repos\/TOSS-Soft\/toss-cli\/releases\/tags\/v2\.1\.1/g) ?? []).length, 3);
   assert.deepEqual(readFileSync(successfulRelease.npmLog, 'utf8').trim().split('\n'), [
     'view @toss-software/cli@2.1.1 version --registry=https://registry.npmjs.org',
     'view @toss-soft/cli@2.1.1 version --registry=https://npm.pkg.github.com'
   ]);
+
+  const divergentMetadata = runReleaseScenario('release-metadata-commit-mismatch', {
+    metadataCommit: 'f'.repeat(40)
+  });
+  const rerunRelease = runReleaseScenario('release-existing-rerun', {
+    existingAssets: [
+      { name: 'toss-software-cli-2.1.1.tgz', sha256: '0'.repeat(64) },
+      { name: 'release-evidence.json', sha256: '1'.repeat(64) },
+      { name: 'stale-extra.zip', sha256: '2'.repeat(64) }
+    ]
+  });
+  assert.deepEqual(
+    { divergentMetadata: divergentMetadata.result.status, existingRerun: rerunRelease.result.status },
+    { divergentMetadata: 1, existingRerun: 0 },
+    'metadata divergence must fail while the canonicalized existing-release rerun succeeds'
+  );
+  assert.match(divergentMetadata.result.stderr, /metadata.*commit.*match/i);
+  assert.equal(existsSync(divergentMetadata.ghLog), false, 'metadata divergence must stop before gh');
+  assert.equal(existsSync(divergentMetadata.npmLog), false, 'metadata divergence must stop before npm');
+  assert.equal(rerunRelease.result.status, 0, `${rerunRelease.result.stderr}\n${rerunRelease.result.stdout}`);
+  const rerunCalls = readFileSync(rerunRelease.ghLog, 'utf8');
+  assert.match(rerunCalls, /release edit v2\.1\.1 .*--notes-file docs\/releases\/v2\.1\.1\.md/);
+  assert.match(rerunCalls, /release upload v2\.1\.1 .*toss-software-cli-2\.1\.1\.tgz --clobber/);
+  assert.match(rerunCalls, /release delete-asset v2\.1\.1 release-evidence\.json --yes/);
+  assert.match(rerunCalls, /release delete-asset v2\.1\.1 stale-extra\.zip --yes/);
+  assert.match(rerunCalls, /release upload v2\.1\.1 .*release-evidence\.json --clobber/);
+  assert.equal(readFileSync(rerunRelease.ghNotes, 'utf8'), '# Exact release notes\n');
+  const rerunAssetRows = readFileSync(rerunRelease.ghAssets, 'utf8').trim().split('\n')
+    .map((row) => row.split('\t'));
+  assert.deepEqual(
+    rerunAssetRows.map(([assetName]) => assetName).sort(),
+    ['release-evidence.json', 'toss-software-cli-2.1.1.tgz']
+  );
+  const rerunEvidence = JSON.parse(readFileSync(join(rerunRelease.cwd, 'release-evidence.json'), 'utf8'));
+  assert.deepEqual(rerunEvidence.release.assets, ['toss-software-cli-2.1.1.tgz']);
+  assert.equal(rerunEvidence.tarball.sha256, publishedEvidence.tarball.sha256);
+  assert.equal(
+    rerunAssetRows.find(([assetName]) => assetName === 'toss-software-cli-2.1.1.tgz')?.[1],
+    publishedEvidence.tarball.sha256
+  );
 
   const digestMismatch = runReleaseScenario('release-digest-mismatch', { digest: 'd'.repeat(64) });
   assert.notEqual(digestMismatch.result.status, 0);

@@ -198,7 +198,23 @@ jobs:
           test "$NOTES_PATH" = "docs/releases/v$VERSION.md"
           test -f "$NOTES_PATH"
           test ! -L "$NOTES_PATH"
-          test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT"
+          CHECKED_OUT_COMMIT="$(git rev-parse HEAD)"
+          test "$CHECKED_OUT_COMMIT" = "$RELEASE_COMMIT"
+          METADATA_COMMIT="$(node --input-type=module - "$METADATA" <<'NODE'
+          import { readFileSync } from 'node:fs';
+
+          const metadata = JSON.parse(readFileSync(process.argv[2], 'utf8'));
+          if (metadata === null || typeof metadata !== 'object' || Array.isArray(metadata) ||
+              typeof metadata.commit !== 'string' || !/^[0-9a-f]{40}$/.test(metadata.commit)) {
+            throw new Error('Downloaded release metadata has an invalid commit');
+          }
+          process.stdout.write(metadata.commit);
+          NODE
+          )"
+          if [[ "$METADATA_COMMIT" != "$RELEASE_COMMIT" || "$METADATA_COMMIT" != "$CHECKED_OUT_COMMIT" ]]; then
+            echo "Downloaded release metadata commit does not match the verified release commit" >&2
+            exit 1
+          fi
 
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release edit "$GITHUB_REF_NAME" \
@@ -215,6 +231,16 @@ jobs:
               --latest \
               --title "$GITHUB_REF_NAME"
           fi
+
+          TARBALL_NAME="$(basename "$TARBALL")"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" \
+            --jq '.assets[].name' > release-assets.txt
+          while IFS= read -r ASSET_NAME; do
+            if [[ -n "$ASSET_NAME" && "$ASSET_NAME" != "$TARBALL_NAME" ]]; then
+              gh release delete-asset "$GITHUB_REF_NAME" "$ASSET_NAME" --yes
+            fi
+          done < release-assets.txt
+          rm release-assets.txt
 
           NPM_VERSION="$(npm view "@toss-software/cli@$VERSION" version --registry=https://registry.npmjs.org)"
           test "$NPM_VERSION" = "$VERSION"
