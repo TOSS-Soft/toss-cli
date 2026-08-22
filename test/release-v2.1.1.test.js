@@ -12,11 +12,8 @@ import {
 } from "../scripts/test-manifest.mjs";
 
 const root=dirname(dirname(fileURLToPath(import.meta.url)));
-const releaseNotesPath=join(root,"docs","releases","v2.1.0.md");
-const scopedIssues=[
-  ...Array.from({length:12},(_,index) => index+12),
-  ...Array.from({length:8},(_,index) => index+25),
-];
+const releaseNotesPath=join(root,"docs","releases","v2.1.1.md");
+const scopedIssues=[84,85,86,87,88];
 
 function readJson(relativePath) {
   return JSON.parse(readFileSync(join(root,relativePath),"utf8"));
@@ -26,18 +23,18 @@ function readReleaseNotes() {
   assert.equal(
     existsSync(releaseNotesPath),
     true,
-    "docs/releases/v2.1.0.md must exist for the release candidate",
+    "docs/releases/v2.1.1.md must exist for the release candidate",
   );
   return readFileSync(releaseNotesPath,"utf8");
 }
 
-test("release metadata targets v2.1.0 in the manifest and both lockfile roots",() => {
+test("release metadata targets v2.1.1 in the manifest and both lockfile roots",() => {
   const pkg=readJson("package.json");
   const lock=readJson("package-lock.json");
 
-  assert.equal(pkg.version,"2.1.0");
-  assert.equal(lock.version,"2.1.0");
-  assert.equal(lock.packages[""].version,"2.1.0");
+  assert.equal(pkg.version,"2.1.1");
+  assert.equal(lock.version,"2.1.1");
+  assert.equal(lock.packages[""].version,"2.1.1");
 });
 
 test("release inventory retains the independent e2e smoke contract once in full",async () => {
@@ -52,14 +49,30 @@ test("release inventory retains the independent e2e smoke contract once in full"
   );
 });
 
-test("release notes expose the v2.1.0 heading and required categories",() => {
+test("release notes expose the v2.1.1 heading and required categories",() => {
   const notes=readReleaseNotes();
-  assert.match(notes,/^# TOSS CLI v2\.1\.0$/m);
+  assert.match(notes,/^# TOSS CLI v2\.1\.1$/m);
   for (const category of [
-    "Contracts","Pipeline","CLI","Design","Safety","Compatibility","Verification",
+    "Test lanes",
+    "Contributor workflow",
+    "Internal cold start",
+    "Durability and concurrency",
+    "Compatibility",
+    "Verification",
+    "Closed issues",
   ]) {
-    assert.match(notes,new RegExp(`^## ${category}$`,"m"),`missing ${category} category`);
+    assert.match(notes,new RegExp(`^## ${category}$`,`m`),`missing ${category} category`);
   }
+});
+
+test("release notes defer numeric release-candidate benchmark claims until Task 6",() => {
+  const notes=readReleaseNotes();
+  assert.doesNotMatch(notes,/\b\d+(?:\.\d+)?\s*(?:ms|milliseconds|%)\b/i);
+});
+
+test("release notes avoid unsupported public-runtime claims",() => {
+  const notes=readReleaseNotes();
+  assert.doesNotMatch(notes,/CLI is \d+% faster/i);
 });
 
 test("release notes inventory every completed scoped issue exactly once",() => {

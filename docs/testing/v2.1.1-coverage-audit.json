@@ -41,7 +41,7 @@
     {"legacy_entry":"test/readiness.test.js","final_owner":"test/readiness.test.js","final_lane":"fast","disposition":"unchanged","retained_evidence":[]},
     {"legacy_entry":"test/readme-design.test.js","final_owner":"test/readme-design.test.js","final_lane":"e2e","disposition":"unchanged","retained_evidence":[]},
     {"legacy_entry":"test/readme-lifecycle.test.js","final_owner":"test/readme-lifecycle.test.js","final_lane":"e2e","disposition":"unchanged","retained_evidence":[]},
-    {"legacy_entry":"test/release-v2.1.0.test.js","final_owner":"test/release-v2.1.0.test.js","final_lane":"release","disposition":"unchanged","retained_evidence":[]},
+    {"legacy_entry":"test/release-v2.1.0.test.js","final_owner":"test/release-v2.1.1.test.js","final_lane":"release","disposition":"replaced","retained_evidence":["release.workflow-metadata"]},
     {"legacy_entry":"test/spec-auditor.test.js","final_owner":"test/spec-auditor.test.js","final_lane":"fast","disposition":"unchanged","retained_evidence":[]},
     {"legacy_entry":"test/state-machine-trust-boundary.test.js","final_owner":"test/state-machine-trust-boundary.test.js","final_lane":"integration","disposition":"unchanged","retained_evidence":[]},
     {"legacy_entry":"test/state-machine.test.js","final_owner":"test/state-machine.test.js","final_lane":"integration","disposition":"unchanged","retained_evidence":[]},

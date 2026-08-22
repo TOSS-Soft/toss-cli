@@ -388,7 +388,7 @@ test("the coverage audit contract remains release-owned",async () => {
   assert.deepEqual(manifest.lanes.release,[
     "scripts/release-workflow-test.js",
     "test/coverage-audit.test.js",
-    "test/release-v2.1.0.test.js",
+    "test/release-v2.1.1.test.js",
     "test/test-lanes.test.js",
   ]);
 });

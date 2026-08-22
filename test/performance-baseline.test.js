@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
+import {execFileSync} from "node:child_process";
 import {createHash} from "node:crypto";
 import {readFileSync} from "node:fs";
+import {dirname} from "node:path";
 import test from "node:test";
+import {fileURLToPath} from "node:url";
 
+const root=dirname(fileURLToPath(new URL("..",import.meta.url)));
 const baselineSource=readFileSync(
   new URL("../docs/performance/v2.1.1-baseline.json",import.meta.url),"utf8",
 );
@@ -11,7 +15,20 @@ const protocol=readFileSync(
   new URL("../docs/testing/performance-baseline.md",import.meta.url),"utf8",
 );
 const lock=readFileSync(new URL("../package-lock.json",import.meta.url));
+const historicalLockSource=execFileSync(
+  "git",["show",`${baseline.identity.commit}:package-lock.json`],
+  {cwd:root,encoding:"utf8"},
+);
+const historicalLock=JSON.parse(historicalLockSource);
+const currentLock=JSON.parse(lock);
 const BASELINE_SHA256="f84798183d695a7ddbcef775a9b502d3d4c393259d94ff53993303a44ed699a9";
+
+function normalizedReleaseVersionLock(value) {
+  const normalized=structuredClone(value);
+  normalized.version="<release-version>";
+  normalized.packages[""].version="<release-version>";
+  return normalized;
+}
 
 function median(samples,field) {
   return samples.map(sample => sample[field]).sort((left,right) => left-right)[1];
@@ -27,7 +44,14 @@ function assertBaselineIntegrity(candidate,source=baselineSource) {
   assert.equal(candidate.identity.node_version,"v26.6.0");
   assert.equal(candidate.identity.platform,"darwin");
   assert.equal(candidate.identity.arch,"arm64");
-  assert.equal(candidate.identity.lock_sha256,createHash("sha256").update(lock).digest("hex"));
+  assert.equal(
+    candidate.identity.lock_sha256,
+    createHash("sha256").update(historicalLockSource).digest("hex"),
+  );
+  assert.deepEqual(
+    normalizedReleaseVersionLock(historicalLock),
+    normalizedReleaseVersionLock(currentLock),
+  );
   assert.equal(candidate.samples.length,3);
   assert.ok(candidate.samples.every(sample => sample.exit_status===0));
   assert.equal(candidate.historical.full_wall_ms,134960);
@@ -52,6 +76,24 @@ function assertBaselineIntegrity(candidate,source=baselineSource) {
 
 test("v2.1.1 baseline is exact and cannot relax its budgets",() => {
   assertBaselineIntegrity(baseline);
+});
+
+test("historical performance lock permits only the release-root version update",() => {
+  assert.equal(
+    createHash("sha256").update(historicalLockSource).digest("hex"),
+    baseline.identity.lock_sha256,
+  );
+  assert.deepEqual(
+    normalizedReleaseVersionLock(historicalLock),
+    normalizedReleaseVersionLock(currentLock),
+  );
+
+  const dependencyDrift=structuredClone(currentLock);
+  dependencyDrift.packages["node_modules/ajv"].integrity="sha512-drift";
+  assert.notDeepEqual(
+    normalizedReleaseVersionLock(historicalLock),
+    normalizedReleaseVersionLock(dependencyDrift),
+  );
 });
 
 test("integrity rejects a correlated full-budget relaxation",() => {
