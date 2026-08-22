@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
-import { readReleaseMetadata } from './release-metadata.mjs';
+import { readReleaseMetadata, writeReleaseMetadataJson } from './release-metadata.mjs';
 import { prepareGitHubPackage } from './prepare-github-package.mjs';
 
 function canonicalFixturePath(value) {
@@ -258,6 +258,37 @@ exit 1
   assert.match(unignoredResult.stderr, /ignored/i);
   assert.deepEqual(readdirSync(evidenceDirectory), []);
   writeFileSync(join(fixture, '.gitignore'), '/.superpowers/\n');
+
+  const primaryOutputFailure = new Error('primary release metadata write failure');
+  const cleanupFailure = new Error('release metadata temporary cleanup failure');
+  let combinedFailure;
+  try {
+    writeReleaseMetadataJson(fixture, jsonOutputRelative, metadata, {
+      writeTemporary: () => { throw primaryOutputFailure; },
+      removeTemporary: () => { throw cleanupFailure; }
+    });
+  } catch (error) {
+    combinedFailure = error;
+  }
+  assert.equal(
+    combinedFailure,
+    primaryOutputFailure,
+    'temporary cleanup must not replace the primary output failure'
+  );
+  assert.equal(combinedFailure.message, 'primary release metadata write failure');
+  assert.equal(combinedFailure.cleanupError, cleanupFailure);
+  assert.deepEqual(readdirSync(evidenceDirectory), []);
+
+  const cleanupOnlyFailure = new Error('standalone release metadata cleanup failure');
+  assert.throws(
+    () => writeReleaseMetadataJson(fixture, jsonOutputRelative, metadata, {
+      writeTemporary: () => {},
+      publishTemporary: () => {},
+      removeTemporary: () => { throw cleanupOnlyFailure; }
+    }),
+    error => error === cleanupOnlyFailure
+  );
+
   const jsonResult = spawnSync(
     process.execPath,
     [releaseMetadataScript, 'v2.0.0', 'main', '--json-output', jsonOutputRelative],

@@ -177,17 +177,44 @@ function safeJsonOutputDestination(cwd, outputPath) {
   return { destination, parent };
 }
 
-function writeJsonOutput(cwd, outputPath, metadata) {
+export function writeReleaseMetadataJson(cwd, outputPath, metadata, {
+  writeTemporary = writeFileSync,
+  publishTemporary = linkSync,
+  removeTemporary = rmSync
+} = {}) {
   const { destination, parent } = safeJsonOutputDestination(cwd, outputPath);
   const temporary = join(
     parent,
     `.release-metadata.json.${process.pid}.${randomBytes(16).toString('hex')}.tmp`
   );
+  let primaryFailure;
+  let failed = false;
   try {
-    writeFileSync(temporary, canonicalJson(metadata), { encoding: 'utf8', flag: 'wx', mode: 0o600 });
-    linkSync(temporary, destination);
+    writeTemporary(temporary, canonicalJson(metadata), { encoding: 'utf8', flag: 'wx', mode: 0o600 });
+    publishTemporary(temporary, destination);
+  } catch (error) {
+    failed = true;
+    primaryFailure = error;
+    throw error;
   } finally {
-    rmSync(temporary, { force: true });
+    try {
+      removeTemporary(temporary, { force: true });
+    } catch (cleanupError) {
+      if (!failed) throw cleanupError;
+      try {
+        if (((typeof primaryFailure === 'object' && primaryFailure !== null) ||
+            typeof primaryFailure === 'function') && Object.isExtensible(primaryFailure) &&
+            !Object.prototype.hasOwnProperty.call(primaryFailure, 'cleanupError')) {
+          Object.defineProperty(primaryFailure, 'cleanupError', {
+            value: cleanupError,
+            enumerable: false,
+            configurable: true
+          });
+        }
+      } catch {
+        // Cleanup diagnostics must never replace the primary output failure.
+      }
+    }
   }
 }
 
@@ -213,7 +240,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
       ''
     ].join('\n'));
   }
-  if (options.jsonOutput) writeJsonOutput(process.cwd(), options.jsonOutput, metadata);
+  if (options.jsonOutput) writeReleaseMetadataJson(process.cwd(), options.jsonOutput, metadata);
   if (!process.env.GITHUB_OUTPUT && !options.jsonOutput) {
     throw new Error('GITHUB_OUTPUT or --json-output is required');
   }
