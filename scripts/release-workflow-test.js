@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
-  chmodSync, copyFileSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync
+  chmodSync, copyFileSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync,
+  readdirSync, rmSync, symlinkSync, unlinkSync, writeFileSync
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import YAML from 'yaml';
 import { readReleaseMetadata } from './release-metadata.mjs';
 import { prepareGitHubPackage } from './prepare-github-package.mjs';
@@ -12,6 +14,16 @@ import { prepareGitHubPackage } from './prepare-github-package.mjs';
 function canonicalFixturePath(value) {
   return realpathSync(value);
 }
+
+function canonicalJson(value) {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  return `{${Object.keys(value).sort().map((key) =>
+    `${JSON.stringify(key)}:${canonicalJson(value[key])}`
+  ).join(',')}}`;
+}
+
+const releaseMetadataScript = fileURLToPath(new URL('./release-metadata.mjs', import.meta.url));
 
 const workflow = YAML.parse(readFileSync(new URL('../.github/workflows/publish.yml', import.meta.url), 'utf8'));
 const jobs = workflow.jobs ?? {};
@@ -192,19 +204,133 @@ exit 1
   runGit('config', 'user.name', 'Release Test');
   runGit('config', 'user.email', 'release-test@example.invalid');
   writeFileSync(join(fixture, 'package.json'), '{"name":"@toss-software/cli","version":"2.0.0"}\n');
-  runGit('add', 'package.json');
+  mkdirSync(join(fixture, 'docs', 'releases'), { recursive: true });
+  writeFileSync(join(fixture, 'docs', 'releases', 'v2.0.0.md'), '# Fixture release\n');
+  runGit('add', 'package.json', 'docs/releases/v2.0.0.md');
   runGit('commit', '-m', 'release fixture');
-  runGit('tag', 'v2.0.0');
-  assert.deepEqual(readReleaseMetadata({ cwd: fixture, tag: 'v2.0.0', mainRef: 'main' }), {
-    version: '2.0.0', artifactName: 'npm-package-2.0.0'
+  const releaseCommit = runGit('rev-parse', 'HEAD').toString().trim();
+  const tagEvidence = {
+    schema_version: 'toss-release-tag.v1',
+    commit: releaseCommit,
+    fast: { report_sha256: 'b'.repeat(64), median_ms: 5762.305292, limit_ms: 15000 },
+    full: { report_sha256: 'c'.repeat(64), median_ms: 16566.500291, limit_ms: 90103 }
+  };
+  runGit('tag', '-a', 'v2.0.0', '-m', canonicalJson(tagEvidence));
+  const metadata = readReleaseMetadata({ cwd: fixture, tag: 'v2.0.0', mainRef: 'main' });
+  assert.deepEqual(metadata, {
+    version: '2.0.0',
+    artifactName: 'npm-package-2.0.0',
+    notesPath: 'docs/releases/v2.0.0.md',
+    commit: releaseCommit,
+    benchmarks: { fast: tagEvidence.fast, full: tagEvidence.full }
   });
+  assert.equal(Object.isFrozen(metadata), true);
+  assert.equal(Object.isFrozen(metadata.benchmarks.fast), true);
+
+  const githubOutput = join(fixture, 'github-output.txt');
+  execFileSync(process.execPath, [releaseMetadataScript, 'v2.0.0', 'main'], {
+    cwd: fixture,
+    env: { ...process.env, GITHUB_OUTPUT: githubOutput },
+    stdio: 'pipe'
+  });
+  assert.equal(readFileSync(githubOutput, 'utf8'), [
+    'version=2.0.0',
+    'artifact_name=npm-package-2.0.0',
+    'notes_path=docs/releases/v2.0.0.md',
+    `release_commit=${releaseCommit}`,
+    `fast_report_sha256=${'b'.repeat(64)}`,
+    `full_report_sha256=${'c'.repeat(64)}`,
+    ''
+  ].join('\n'));
+
+  const evidenceDirectory = join(
+    fixture, '.superpowers', 'sdd', '2026-08-22-v2.1.1-issue-88-release'
+  );
+  const jsonOutputRelative = '.superpowers/sdd/2026-08-22-v2.1.1-issue-88-release/release-metadata.json';
+  const jsonOutput = join(fixture, jsonOutputRelative);
+  mkdirSync(evidenceDirectory, { recursive: true });
+  const unignoredResult = spawnSync(
+    process.execPath,
+    [releaseMetadataScript, 'v2.0.0', 'main', '--json-output', jsonOutputRelative],
+    { cwd: fixture, encoding: 'utf8', env: { ...process.env, GITHUB_OUTPUT: '' } }
+  );
+  assert.notEqual(unignoredResult.status, 0);
+  assert.match(unignoredResult.stderr, /ignored/i);
+  assert.deepEqual(readdirSync(evidenceDirectory), []);
+  writeFileSync(join(fixture, '.gitignore'), '/.superpowers/\n');
+  const jsonResult = spawnSync(
+    process.execPath,
+    [releaseMetadataScript, 'v2.0.0', 'main', '--json-output', jsonOutputRelative],
+    { cwd: fixture, encoding: 'utf8', env: { ...process.env, GITHUB_OUTPUT: '' } }
+  );
+  assert.equal(jsonResult.status, 0, jsonResult.stderr);
+  assert.equal(readFileSync(jsonOutput, 'utf8'), canonicalJson(metadata));
+  assert.deepEqual(JSON.parse(readFileSync(jsonOutput, 'utf8')), metadata);
+  assert.deepEqual(
+    readdirSync(evidenceDirectory),
+    ['release-metadata.json'],
+    'successful atomic output must not leave a temporary file'
+  );
+
+  const existingResult = spawnSync(
+    process.execPath,
+    [releaseMetadataScript, 'v2.0.0', 'main', '--json-output', jsonOutputRelative],
+    { cwd: fixture, encoding: 'utf8', env: { ...process.env, GITHUB_OUTPUT: '' } }
+  );
+  assert.notEqual(existingResult.status, 0);
+  assert.match(existingResult.stderr, /already exists/i);
+  assert.deepEqual(readdirSync(evidenceDirectory), ['release-metadata.json']);
+
+  unlinkSync(jsonOutput);
+  const outsideTarget = join(fixture, 'outside-release-metadata.json');
+  writeFileSync(outsideTarget, 'do not replace\n');
+  symlinkSync(outsideTarget, jsonOutput);
+  const symlinkResult = spawnSync(
+    process.execPath,
+    [releaseMetadataScript, 'v2.0.0', 'main', '--json-output', jsonOutputRelative],
+    { cwd: fixture, encoding: 'utf8', env: { ...process.env, GITHUB_OUTPUT: '' } }
+  );
+  assert.notEqual(symlinkResult.status, 0);
+  assert.match(symlinkResult.stderr, /symbolic link|symlink/i);
+  assert.equal(readFileSync(outsideTarget, 'utf8'), 'do not replace\n');
+  unlinkSync(jsonOutput);
+
+  writeFileSync(jsonOutput, canonicalJson(metadata));
+  runGit('add', '-f', jsonOutputRelative);
+  unlinkSync(jsonOutput);
+  const trackedResult = spawnSync(
+    process.execPath,
+    [releaseMetadataScript, 'v2.0.0', 'main', '--json-output', jsonOutputRelative],
+    { cwd: fixture, encoding: 'utf8', env: { ...process.env, GITHUB_OUTPUT: '' } }
+  );
+  assert.notEqual(trackedResult.status, 0);
+  assert.match(trackedResult.stderr, /tracked/i);
+  assert.deepEqual(readdirSync(evidenceDirectory), []);
+
+  const unsafeResult = spawnSync(
+    process.execPath,
+    [releaseMetadataScript, 'v2.0.0', 'main', '--json-output', '../release-metadata.json'],
+    { cwd: fixture, encoding: 'utf8', env: { ...process.env, GITHUB_OUTPUT: '' } }
+  );
+  assert.notEqual(unsafeResult.status, 0);
+  assert.match(unsafeResult.stderr, /safe|output|destination/i);
+  assert.equal(existsSync(join(fixture, '..', 'release-metadata.json')), false);
+
   assert.throws(() => readReleaseMetadata({ cwd: fixture, tag: 'release-2.0.0', mainRef: 'main' }), /semantic version/);
   writeFileSync(join(fixture, 'package.json'), '{"name":"@toss-software/cli","version":"2.0.1"}\n');
   assert.throws(() => readReleaseMetadata({ cwd: fixture, tag: 'v2.0.0', mainRef: 'main' }), /does not match/);
   runGit('checkout', '-b', 'feature-release');
   runGit('add', 'package.json');
   runGit('commit', '-m', 'off-main release fixture');
-  runGit('tag', 'v2.0.1');
+  mkdirSync(join(fixture, 'docs', 'releases'), { recursive: true });
+  writeFileSync(join(fixture, 'docs', 'releases', 'v2.0.1.md'), '# Off-main fixture release\n');
+  runGit('add', 'docs/releases/v2.0.1.md');
+  runGit('commit', '-m', 'off-main release notes fixture');
+  const offMainCommit = runGit('rev-parse', 'HEAD').toString().trim();
+  runGit('tag', '-a', 'v2.0.1', '-m', canonicalJson({
+    ...tagEvidence,
+    commit: offMainCommit
+  }));
   assert.throws(() => readReleaseMetadata({ cwd: fixture, tag: 'v2.0.1', mainRef: 'main' }), /not contained in main/);
 
   const source = join(fixture, 'source-package');
