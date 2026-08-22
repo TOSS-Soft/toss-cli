@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import {createHash} from "node:crypto";
 import test from "node:test";
 
 import * as performanceReport from "../scripts/performance/report.mjs";
@@ -34,6 +35,20 @@ const identity={
   lock_sha256:"a".repeat(64),runner_id:"toss-reference-macos-node26",
 };
 const command={executable:"npm",arguments:["test"]};
+
+function lockSource(version,{integrity="sha512-same"}={}) {
+  return `${JSON.stringify({
+    name:"fixture",version,lockfileVersion:3,requires:true,
+    packages:{
+      "":{name:"fixture",version,dependencies:{dependency:"1.0.0"}},
+      "node_modules/dependency":{version:"1.0.0",integrity},
+    },
+  })}\n`;
+}
+
+function lockDigest(source) {
+  return createHash("sha256").update(source).digest("hex");
+}
 
 const sample=wall_ms => ({
   wall_ms,user_cpu_ms:200000,system_cpu_ms:300000,exit_status:0,
@@ -203,6 +218,73 @@ test("fast budget derives its truthful command from the locked full-origin basel
     ok:true,code:"PERFORMANCE_BUDGET_OK",limit_ms:15000,actual_ms:14999,
     message:"fast wall time 14999ms is within budget 15000ms.",
   });
+});
+
+test("budget comparison proves an exact release-only lock transition from paired raw sources",() => {
+  const baselineLockSource=lockSource("2.1.0");
+  const candidateLockSource=lockSource("2.1.1");
+  const baseline=baselineDocument({
+    exactIdentity:{...identity,lock_sha256:lockDigest(baselineLockSource)},
+  });
+  const candidate=reportDocument({
+    lane:"fast",walls:[1000,1000,1000],
+    exactCommand:{executable:"npm",arguments:["run","test:fast"]},
+    exactIdentity:{...identity,lock_sha256:lockDigest(candidateLockSource)},
+  });
+
+  assert.equal(comparePerformanceBudget(baseline,candidate,"fast",{
+    baselineLockSource,candidateLockSource,
+  }).code,"PERFORMANCE_BUDGET_OK");
+  assert.equal(
+    comparePerformanceBudget(baseline,candidate,"fast").code,
+    "INCOMPATIBLE_PERFORMANCE_ENVIRONMENT",
+    "missing paired evidence must preserve strict raw lock identity",
+  );
+});
+
+test("release-only lock proof rejects incomplete, malformed, unbound, and dependency-drift evidence",() => {
+  const baselineLockSource=lockSource("2.1.0");
+  const candidateLockSource=lockSource("2.1.1");
+  const baseline=baselineDocument({
+    exactIdentity:{...identity,lock_sha256:lockDigest(baselineLockSource)},
+  });
+  const candidateFor=source => reportDocument({
+    lane:"fast",walls:[1000,1000,1000],
+    exactCommand:{executable:"npm",arguments:["run","test:fast"]},
+    exactIdentity:{...identity,lock_sha256:lockDigest(source)},
+  });
+
+  assert.throws(
+    () => comparePerformanceBudget(baseline,candidateFor(candidateLockSource),"fast",{
+      baselineLockSource,
+    }),
+    /both baselineLockSource and candidateLockSource/,
+  );
+  assert.throws(
+    () => comparePerformanceBudget(baseline,candidateFor(candidateLockSource),"fast",{
+      baselineLockSource:"{",candidateLockSource,
+    }),
+    /baseline lock source.*JSON/i,
+  );
+  assert.throws(
+    () => comparePerformanceBudget(baseline,candidateFor(candidateLockSource),"fast",{
+      baselineLockSource,candidateLockSource:'{"version":"2.1.1","packages":[]}',
+    }),
+    /candidate lockfile.*packages/i,
+  );
+  assert.throws(
+    () => comparePerformanceBudget(baseline,candidateFor(candidateLockSource),"fast",{
+      baselineLockSource,candidateLockSource:`${candidateLockSource} `,
+    }),
+    /candidate lock source SHA-256/i,
+  );
+  const driftedCandidateLockSource=lockSource("2.1.1",{integrity:"sha512-drift"});
+  assert.throws(
+    () => comparePerformanceBudget(baseline,candidateFor(driftedCandidateLockSource),"fast",{
+      baselineLockSource,candidateLockSource:driftedCandidateLockSource,
+    }),
+    /beyond release version fields/i,
+  );
 });
 
 test("fast budget comparison fails closed for lane, command, identity, and evidence drift",() => {
