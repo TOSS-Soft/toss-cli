@@ -213,19 +213,28 @@ export function validateCoverageAudit(value,{legacyEntries,manifest,boundaries}=
     if (disposition!=="unchanged" && evidence.length===0) {
       throw new TypeError(`coverage audit ${disposition} entries require retained evidence`);
     }
-    if (disposition==="unchanged") {
+    const legacyLane=owners.get(legacyEntry);
+    if (legacyLane) {
+      if (disposition!=="unchanged") {
+        throw new TypeError(`surviving legacy entry must remain unchanged: ${legacyEntry}`);
+      }
       if (finalOwner!==legacyEntry) {
         throw new TypeError(`coverage audit unchanged entry must retain its executable owner: ${legacyEntry}`);
       }
       if (evidence.length!==0) {
         throw new TypeError(`coverage audit unchanged entry must not retain preservation evidence: ${legacyEntry}`);
       }
-    } else if (finalOwner===legacyEntry || evidence.includes(finalOwner)) {
-      throw new TypeError(`coverage audit entry cannot retain its own executable assertion: ${finalOwner}`);
-    }
-    for (const item of evidence) {
-      if (guaranteeIds.has(item) && item===legacyEntry) {
-        throw new TypeError(`coverage audit entry cannot retain its own assertion: ${legacyEntry}`);
+    } else {
+      if (disposition==="unchanged") {
+        throw new TypeError(`coverage audit unchanged entry must retain a surviving executable owner: ${legacyEntry}`);
+      }
+      for (const item of evidence) {
+        if (item===legacyEntry || item===finalOwner) {
+          throw new TypeError(`coverage audit entry cannot retain its own executable assertion: ${item}`);
+        }
+        if (!owners.has(item) && !guaranteeIds.has(item)) {
+          throw new TypeError(`unknown retained evidence target: ${item}`);
+        }
       }
     }
     normalized.push(Object.freeze({

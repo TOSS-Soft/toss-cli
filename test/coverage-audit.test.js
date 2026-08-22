@@ -211,10 +211,58 @@ test("coverage audit keeps unchanged owners and changed evidence independent",()
 
   const ownEvidence=fixture();
   ownEvidence.entries[0].disposition="replaced";
+  ownEvidence.entries[0].legacy_entry="scripts/legacy-test.js";
   ownEvidence.entries[0].final_owner="test/example.test.js";
   ownEvidence.entries[0].final_lane="fast";
   ownEvidence.entries[0].retained_evidence=["test/example.test.js"];
   assert.throws(() => validate(ownEvidence),/own executable assertion/i);
+});
+
+test("coverage audit requires unchanged when the legacy executable remains manifest-owned",() => {
+  const value=fixture();
+  value.entries[0]={
+    legacy_entry:"scripts/a-test.js",
+    final_owner:"test/example.test.js",
+    final_lane:"fast",
+    disposition:"moved",
+    retained_evidence:["release.example-preserved"],
+  };
+  assert.throws(
+    () => validate(value),
+    /surviving legacy entry must remain unchanged.*scripts\/a-test\.js/i,
+  );
+});
+
+test("coverage audit permits only real manifest targets or boundary guarantees as changed evidence",() => {
+  const changed={
+    schema_version:"toss-coverage-audit.v1",
+    source:{
+      tag:"v2.1.0",
+      commit:"4472175eac91275cafab2993f68722febdb9eb59",
+    },
+    entries:[{
+      legacy_entry:"scripts/legacy-test.js",
+      final_owner:"test/example.test.js",
+      final_lane:"fast",
+      disposition:"replaced",
+      retained_evidence:["fabricated preservation claim"],
+    }],
+  };
+  const inputs={
+    legacyEntries:["scripts/legacy-test.js"],
+    manifest:manifestFixture(),
+    boundaries:boundariesFixture(),
+  };
+  assert.throws(
+    () => validateCoverageAudit(changed,inputs),
+    /unknown retained evidence target.*fabricated preservation claim/i,
+  );
+
+  changed.entries[0].retained_evidence=["release.example-preserved"];
+  assert.equal(validateCoverageAudit(changed,inputs).entries[0].disposition,"replaced");
+
+  changed.entries[0].retained_evidence=["scripts/a-test.js"];
+  assert.equal(validateCoverageAudit(changed,inputs).entries[0].disposition,"replaced");
 });
 
 test("legacy discovery locks the annotated v2.1.0 tree without changing HEAD",async () => {
