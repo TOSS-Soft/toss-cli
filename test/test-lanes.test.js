@@ -73,6 +73,20 @@ test("PR and publish workflows preserve the canonical full and package gates",as
   assert.equal(stepRun(ci,"test","Run smoke tests"),"npm test");
   assert.equal(stepRun(ci,"test","Validate npm package"),"npm pack --dry-run");
   assert.equal(stepRun(publish,"validate","Test"),"npm test");
+  assert.equal(publish.jobs.publish_npm.permissions["id-token"],"write");
+  assert.equal(publish.jobs.publish_github_packages.permissions.packages,"write");
+  assert.equal(publish.jobs.release.permissions.contents,"write");
+  assert.equal(publish.jobs.release.permissions.packages,"read");
+  const releaseCheckout=publish.jobs.release.steps.find(step => step.uses==="actions/checkout@v7");
+  assert.ok(releaseCheckout,"release job must check out the tagged source");
+  assert.equal(releaseCheckout.with.ref,"${{ github.ref }}");
+  assert.equal(releaseCheckout.with["fetch-depth"],0);
+  const upload=publish.jobs.validate.steps.find(step => step.uses==="actions/upload-artifact@v7");
+  assert.match(upload.with.path,/release-metadata\.json/u);
+  const releaseRun=stepRun(publish,"release","Create and verify GitHub Release evidence");
+  assert.match(releaseRun,/--notes-file "\$NOTES_PATH"/u);
+  assert.match(releaseRun,/release-evidence\.mjs/u);
+  assert.match(releaseRun,/release-evidence\.json/u);
 });
 
 test("each focused package lane resolves to its only owner list",async () => {

@@ -383,11 +383,12 @@ test("the checked-in inventory owns every executable entry exactly once",async (
   assert.equal(selected.some(entry => entry.startsWith("test/support/") || entry.startsWith("test/fixtures/")),false);
 });
 
-test("the coverage audit contract remains release-owned",async () => {
+test("the release contracts remain release-owned in ASCII order",async () => {
   const manifest=JSON.parse(await readFile(manifestUrl,"utf8"));
   assert.deepEqual(manifest.lanes.release,[
     "scripts/release-workflow-test.js",
     "test/coverage-audit.test.js",
+    "test/release-evidence.test.js",
     "test/release-v2.1.1.test.js",
     "test/test-lanes.test.js",
   ]);

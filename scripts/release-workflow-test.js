@@ -36,6 +36,7 @@ assert.equal(jobs.validate.permissions?.contents, 'read');
 assert.equal(jobs.publish_npm.permissions?.['id-token'], 'write');
 assert.equal(jobs.publish_github_packages.permissions?.packages, 'write');
 assert.equal(jobs.release.permissions?.contents, 'write');
+assert.equal(jobs.release.permissions?.packages, 'read');
 assert.deepEqual(jobs.publish_npm.needs, ['validate']);
 assert.deepEqual(jobs.publish_github_packages.needs, ['validate']);
 assert.deepEqual(jobs.release.needs, ['validate', 'publish_npm', 'publish_github_packages']);
@@ -44,8 +45,24 @@ assert.ok(jobs.validate.steps.some((step) => step.uses === 'actions/upload-artif
 assert.ok(jobs.publish_npm.steps.some((step) => step.uses === 'actions/download-artifact@v8'));
 assert.ok(jobs.publish_github_packages.steps.some((step) => step.uses === 'actions/download-artifact@v8'));
 assert.ok(jobs.release.steps.some((step) => step.uses === 'actions/download-artifact@v8'));
+const releaseCheckout = jobs.release.steps.find((step) => step.uses === 'actions/checkout@v7');
+assert.equal(releaseCheckout?.with?.ref, '${{ github.ref }}');
+assert.equal(releaseCheckout?.with?.['fetch-depth'], 0);
 assert.match(JSON.stringify(jobs.validate), /release-metadata\.mjs/);
 assert.match(JSON.stringify(jobs.publish_github_packages), /prepare-github-package\.mjs/);
+const artifactUpload = jobs.validate.steps.find((step) => step.uses === 'actions/upload-artifact@v7');
+assert.match(artifactUpload?.with?.path ?? '', /release-metadata\.json/);
+const releaseStep = jobs.release.steps.find(
+  (step) => step.name === 'Create and verify GitHub Release evidence'
+);
+assert.ok(releaseStep, 'release job must create and verify machine-readable evidence');
+assert.match(releaseStep.run, /--notes-file "\$NOTES_PATH"/);
+assert.match(releaseStep.run, /npm view "@toss-software\/cli@\$VERSION" version/);
+assert.match(releaseStep.run, /npm view "@toss-soft\/cli@\$VERSION" version/);
+assert.match(releaseStep.run, /release-evidence\.mjs/);
+assert.match(releaseStep.run, /release-evidence\.json/);
+assert.match(releaseStep.run, /gh api "repos\/\$GITHUB_REPOSITORY\/releases\/tags\/\$GITHUB_REF_NAME"/);
+assert.doesNotMatch(releaseStep.run, /generate-notes/);
 
 const fixture = mkdtempSync(join(tmpdir(), 'toss-release-test-'));
 try {
@@ -61,6 +78,11 @@ try {
   writeFileSync(fakeNpm, `#!/usr/bin/env bash
 set -euo pipefail
 if [[ "$1" == "view" ]]; then
+  if [[ -n "\${NPM_FAKE_VIEW_LOG:-}" ]]; then
+    printf '%s\n' "$*" >> "$NPM_FAKE_VIEW_LOG"
+    printf '%s\n' "$NPM_FAKE_VERSION"
+    exit 0
+  fi
   if [[ -f "$NPM_FAKE_PUBLISHED" ]]; then printf '%s\\n' "$VERSION"; fi
   exit 0
 fi
@@ -148,56 +170,169 @@ exit 1
     'GitHub Packages publish must receive an absolute tarball path'
   );
 
-  const releaseFixture = join(fixture, 'release-shell');
-  const releaseArgument = join(releaseFixture, 'release-argument.txt');
-  const releaseMarker = join(releaseFixture, 'released');
-  mkdirSync(join(releaseFixture, 'dist'), { recursive: true });
-  writeFileSync(join(releaseFixture, 'dist', 'fixture.tgz'), 'fixture');
   const fakeGh = join(fakeBin, 'gh');
   writeFileSync(fakeGh, `#!/usr/bin/env bash
 set -euo pipefail
-if [[ -z "\${GH_REPO:-}" ]]; then
-  git rev-parse --show-toplevel >/dev/null
-fi
 test "\${GH_REPO:-}" = "TOSS-Soft/toss-cli"
+printf '%s\\n' "$*" >> "$GH_FAKE_LOG"
 if [[ "$1 $2" == "release view" ]]; then
-  if [[ " $* " == *" --json "* ]]; then
-    printf '%s\\n' '{"tagName":"v2.0.0","isDraft":false,"isPrerelease":false,"url":"https://example.invalid/v2.0.0","assets":[{"name":"fixture.tgz"}]}'
-    exit 0
+  test -f "$GH_FAKE_RELEASED"
+  exit 0
+fi
+if [[ "$1" == "api" ]]; then
+  test "$2" = "repos/TOSS-Soft/toss-cli/releases/tags/v2.1.1"
+  [[ " $* " == *" --jq "* ]]
+  if [[ -f "$GH_FAKE_EVIDENCE_UPLOADED" ]]; then
+    printf '{"tagName":"v2.1.1","url":"https://github.com/TOSS-Soft/toss-cli/releases/tag/v2.1.1","isDraft":%s,"isPrerelease":false,"assets":[{"name":"toss-software-cli-2.1.1.tgz","digest":"sha256:%s"},{"name":"release-evidence.json","digest":"sha256:%s"}]}\\n' "$GH_FAKE_DRAFT" "$GH_FAKE_TARBALL_DIGEST" "$(printf 'e%.0s' {1..64})"
+  else
+    printf '{"tagName":"v2.1.1","url":"https://github.com/TOSS-Soft/toss-cli/releases/tag/v2.1.1","isDraft":%s,"isPrerelease":false,"assets":[{"name":"toss-software-cli-2.1.1.tgz","digest":"sha256:%s"}]}\\n' "$GH_FAKE_DRAFT" "$GH_FAKE_TARBALL_DIGEST"
   fi
-  test -f "$RELEASE_FAKE_PUBLISHED"
   exit 0
 fi
 if [[ "$1 $2" == "release create" ]]; then
+  test "$3" = "v2.1.1"
   test -f "$4"
-  printf '%s\\n' "$4" > "$RELEASE_FAKE_ARGUMENT"
-  : > "$RELEASE_FAKE_PUBLISHED"
+  for ((index = 1; index <= $#; index++)); do
+    if [[ "\${!index}" == "--notes-file" ]]; then
+      next=$((index + 1))
+      test "\${!next}" = "$GH_FAKE_NOTES_PATH"
+    fi
+  done
+  : > "$GH_FAKE_RELEASED"
+  exit 0
+fi
+if [[ "$1 $2" == "release edit" ]]; then
+  for ((index = 1; index <= $#; index++)); do
+    if [[ "\${!index}" == "--notes-file" ]]; then
+      next=$((index + 1))
+      test "\${!next}" = "$GH_FAKE_NOTES_PATH"
+    fi
+  done
+  exit 0
+fi
+if [[ "$1 $2" == "release upload" ]]; then
+  test -f "$4"
+  if [[ "$(basename "$4")" == "release-evidence.json" ]]; then
+    : > "$GH_FAKE_EVIDENCE_UPLOADED"
+  fi
   exit 0
 fi
 exit 1
 `);
   chmodSync(fakeGh, 0o755);
-  const releaseStep = jobs.release.steps.find((step) => step.name === 'Create or update GitHub Release');
-  execFileSync('bash', ['-c', releaseStep.run], {
-    cwd: releaseFixture,
-    env: {
-      ...process.env,
-      PATH: `${fakeBin}:${process.env.PATH}`,
-      GITHUB_REF_NAME: 'v2.0.0',
-      GH_TOKEN: 'fixture-token',
-      GH_REPO: releaseStep.env?.GH_REPO === '${{ github.repository }}'
-        ? 'TOSS-Soft/toss-cli'
-        : '',
-      RELEASE_FAKE_ARGUMENT: releaseArgument,
-      RELEASE_FAKE_PUBLISHED: releaseMarker
-    },
-    stdio: 'pipe'
-  });
+
+  function createReleaseShellFixture(name) {
+    const cwd = join(fixture, name);
+    for (const directory of [
+      'contracts', 'dist', 'docs/releases', 'scripts', 'src/contracts'
+    ]) {
+      mkdirSync(join(cwd, directory), { recursive: true });
+    }
+    copyFileSync(new URL('./release-evidence.mjs', import.meta.url), join(cwd, 'scripts', 'release-evidence.mjs'));
+    copyFileSync(new URL('../src/contracts/acp.js', import.meta.url), join(cwd, 'src', 'contracts', 'acp.js'));
+    copyFileSync(new URL('../contracts/registry.json', import.meta.url), join(cwd, 'contracts', 'registry.json'));
+    writeFileSync(join(cwd, 'docs', 'releases', 'v2.1.1.md'), '# Exact release notes\n');
+    execFileSync('git', ['init', '-b', 'main'], { cwd, stdio: 'pipe' });
+    execFileSync('git', ['config', 'user.name', 'Release Workflow Test'], { cwd, stdio: 'pipe' });
+    execFileSync('git', ['config', 'user.email', 'workflow@example.invalid'], { cwd, stdio: 'pipe' });
+    execFileSync('git', ['add', 'contracts', 'docs', 'scripts', 'src'], { cwd, stdio: 'pipe' });
+    execFileSync('git', ['commit', '-m', 'release workflow fixture'], { cwd, stdio: 'pipe' });
+    const commit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' }).trim();
+    writeFileSync(join(cwd, 'dist', 'toss-software-cli-2.1.1.tgz'), 'workflow tarball\n');
+    writeFileSync(join(cwd, 'dist', 'release-metadata.json'), canonicalJson({
+      version: '2.1.1',
+      artifactName: 'npm-package-2.1.1',
+      notesPath: 'docs/releases/v2.1.1.md',
+      commit,
+      benchmarks: {
+        fast: { report_sha256: 'b'.repeat(64), median_ms: 5762.305292, limit_ms: 15000 },
+        full: { report_sha256: 'c'.repeat(64), median_ms: 16566.500291, limit_ms: 90103 }
+      }
+    }));
+    return { cwd, commit };
+  }
+
+  function runReleaseScenario(name, {
+    digest = 'a4d6f8371fc5231d9a46c749e301d7f3716ed50faafa1b86e61756db1f064aee',
+    draft = false
+  } = {}) {
+    const scenario = createReleaseShellFixture(name);
+    const ghLog = join(scenario.cwd, 'gh.log');
+    const npmLog = join(scenario.cwd, 'npm.log');
+    const result = spawnSync('bash', ['-c', releaseStep.run], {
+      cwd: scenario.cwd,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${fakeBin}:${process.env.PATH}`,
+        GITHUB_REF: 'refs/tags/v2.1.1',
+        GITHUB_REF_NAME: 'v2.1.1',
+        GITHUB_REPOSITORY: 'TOSS-Soft/toss-cli',
+        GITHUB_RUN_ID: '123',
+        VERSION: '2.1.1',
+        NOTES_PATH: 'docs/releases/v2.1.1.md',
+        RELEASE_COMMIT: scenario.commit,
+        GH_TOKEN: 'fixture-gh-token-do-not-print',
+        NODE_AUTH_TOKEN: 'fixture-packages-token-do-not-print',
+        GH_REPO: releaseStep.env?.GH_REPO === '${{ github.repository }}'
+          ? 'TOSS-Soft/toss-cli'
+          : '',
+        GH_FAKE_LOG: ghLog,
+        GH_FAKE_RELEASED: join(scenario.cwd, 'released'),
+        GH_FAKE_EVIDENCE_UPLOADED: join(scenario.cwd, 'evidence-uploaded'),
+        GH_FAKE_NOTES_PATH: 'docs/releases/v2.1.1.md',
+        GH_FAKE_TARBALL_DIGEST: digest,
+        GH_FAKE_DRAFT: String(draft),
+        NPM_FAKE_VIEW_LOG: npmLog,
+        NPM_FAKE_VERSION: '2.1.1'
+      }
+    });
+    assert.doesNotMatch(`${result.stdout}${result.stderr}`, /fixture-(?:gh|packages)-token-do-not-print/);
+    return {...scenario, result, ghLog, npmLog};
+  }
+
+  const successfulRelease = runReleaseScenario('release-shell');
   assert.equal(
-    readFileSync(releaseArgument, 'utf8').trim(),
-    join(canonicalFixtureRoot, 'release-shell', 'dist', 'fixture.tgz'),
-    'GitHub Release must be created outside a git checkout using explicit repository context'
+    successfulRelease.result.status,
+    0,
+    `${successfulRelease.result.stderr}\n${successfulRelease.result.stdout}`
   );
+  const publishedEvidence = JSON.parse(readFileSync(
+    join(successfulRelease.cwd, 'release-evidence.json'), 'utf8'
+  ));
+  assert.deepEqual(publishedEvidence.workflow, {
+    repository: 'TOSS-Soft/toss-cli',
+    run_id: '123',
+    run_url: 'https://github.com/TOSS-Soft/toss-cli/actions/runs/123'
+  });
+  assert.deepEqual(publishedEvidence.packages, {
+    npm: '@toss-software/cli@2.1.1',
+    github: '@toss-soft/cli@2.1.1'
+  });
+  assert.deepEqual(publishedEvidence.release.assets, ['toss-software-cli-2.1.1.tgz']);
+  assert.equal(
+    publishedEvidence.tarball.sha256,
+    'a4d6f8371fc5231d9a46c749e301d7f3716ed50faafa1b86e61756db1f064aee'
+  );
+  const ghCalls = readFileSync(successfulRelease.ghLog, 'utf8');
+  assert.match(ghCalls, /release create v2\.1\.1 .*toss-software-cli-2\.1\.1\.tgz/);
+  assert.match(ghCalls, /--notes-file docs\/releases\/v2\.1\.1\.md/);
+  assert.match(ghCalls, /release upload v2\.1\.1 .*release-evidence\.json --clobber/);
+  assert.equal((ghCalls.match(/api repos\/TOSS-Soft\/toss-cli\/releases\/tags\/v2\.1\.1/g) ?? []).length, 2);
+  assert.deepEqual(readFileSync(successfulRelease.npmLog, 'utf8').trim().split('\n'), [
+    'view @toss-software/cli@2.1.1 version --registry=https://registry.npmjs.org',
+    'view @toss-soft/cli@2.1.1 version --registry=https://npm.pkg.github.com'
+  ]);
+
+  const digestMismatch = runReleaseScenario('release-digest-mismatch', { digest: 'd'.repeat(64) });
+  assert.notEqual(digestMismatch.result.status, 0);
+  assert.match(digestMismatch.result.stderr, /digest.*match|match.*digest/i);
+  assert.equal(existsSync(join(digestMismatch.cwd, 'release-evidence.json')), false);
+
+  const draftRelease = runReleaseScenario('release-draft', { draft: true });
+  assert.notEqual(draftRelease.result.status, 0);
+  assert.match(draftRelease.result.stderr, /draft/i);
+  assert.equal(existsSync(join(draftRelease.cwd, 'release-evidence.json')), false);
 
   const runGit = (...args) => execFileSync('git', args, { cwd: fixture, stdio: 'pipe' });
   runGit('init', '-b', 'main');
