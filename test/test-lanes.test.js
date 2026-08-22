@@ -63,6 +63,13 @@ test("PR and publish workflows preserve the canonical full and package gates",as
     ci.jobs.test["timeout-minutes"],30,
     "PR CI must leave room for npm test plus the prepack full gate",
   );
+  assert.deepEqual(ci.jobs.test.strategy.matrix.node,[20,24]);
+  assert.equal(ci.jobs.test.strategy["fail-fast"],false);
+  const setupNode=ci.jobs.test.steps.find(step => step.uses === "actions/setup-node@v7");
+  assert.ok(setupNode,"CI must configure Node with setup-node");
+  assert.equal(setupNode.with["node-version"],"${{ matrix.node }}");
+  assert.ok(ci.jobs.test.steps.some(step => step.run === "npm test"));
+  assert.ok(ci.jobs.test.steps.some(step => step.run === "npm pack --dry-run"));
   assert.equal(stepRun(ci,"test","Run smoke tests"),"npm test");
   assert.equal(stepRun(ci,"test","Validate npm package"),"npm pack --dry-run");
   assert.equal(stepRun(publish,"validate","Test"),"npm test");

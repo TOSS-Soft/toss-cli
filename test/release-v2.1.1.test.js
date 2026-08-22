@@ -33,6 +33,7 @@ test("release metadata targets v2.1.1 in the manifest and both lockfile roots",(
   const lock=readJson("package-lock.json");
 
   assert.equal(pkg.version,"2.1.1");
+  assert.equal(pkg.engines.node,">=20");
   assert.equal(lock.version,"2.1.1");
   assert.equal(lock.packages[""].version,"2.1.1");
 });
