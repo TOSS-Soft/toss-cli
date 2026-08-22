@@ -1,23 +1,17 @@
 import assert from "node:assert/strict";
-import {execFileSync} from "node:child_process";
 import {createHash} from "node:crypto";
 import {readFileSync} from "node:fs";
-import {dirname} from "node:path";
+import {join} from "node:path";
 import test from "node:test";
 import {fileURLToPath} from "node:url";
 
-const root=dirname(fileURLToPath(new URL("..",import.meta.url)));
-const baselineSource=readFileSync(
-  new URL("../docs/performance/v2.1.1-baseline.json",import.meta.url),"utf8",
-);
+const root=fileURLToPath(new URL("../",import.meta.url));
+const baselineSource=readFileSync(join(root,"docs/performance/v2.1.1-baseline.json"),"utf8");
 const baseline=JSON.parse(baselineSource);
-const protocol=readFileSync(
-  new URL("../docs/testing/performance-baseline.md",import.meta.url),"utf8",
-);
-const lock=readFileSync(new URL("../package-lock.json",import.meta.url));
-const historicalLockSource=execFileSync(
-  "git",["show",`${baseline.identity.commit}:package-lock.json`],
-  {cwd:root,encoding:"utf8"},
+const protocol=readFileSync(join(root,"docs/testing/performance-baseline.md"),"utf8");
+const lock=readFileSync(join(root,"package-lock.json"));
+const historicalLockSource=readFileSync(
+  join(root,"test/fixtures/performance/v2.1.1-baseline-package-lock.json"),"utf8",
 );
 const historicalLock=JSON.parse(historicalLockSource);
 const currentLock=JSON.parse(lock);
