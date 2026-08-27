@@ -216,14 +216,59 @@ jobs:
             exit 1
           fi
 
+          TARBALL_NAME="$(basename "$TARBALL")"
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" \
+              --jq '[.assets[]|{name:.name,digest:.digest}]' > existing-release-assets.json
+            EXISTING_TARBALL_MODE="$(node --input-type=module - \
+              "$TARBALL" "$TARBALL_NAME" existing-release-assets.json <<'NODE'
+          import { createHash } from 'node:crypto';
+          import {
+            closeSync, constants, fstatSync, openSync, readFileSync
+          } from 'node:fs';
+
+          const [tarballPath, tarballName, assetsPath] = process.argv.slice(2);
+          const assets = JSON.parse(readFileSync(assetsPath, 'utf8'));
+          if (!Array.isArray(assets)) {
+            throw new Error('Existing GitHub Release assets must be an array');
+          }
+          const canonical = assets.filter((asset) => asset?.name === tarballName);
+          if (canonical.length === 0) {
+            process.stdout.write('upload');
+            process.exit(0);
+          }
+          if (canonical.length !== 1) {
+            throw new Error('Existing GitHub Release has an ambiguous canonical tarball');
+          }
+          if (typeof canonical[0].digest !== 'string' ||
+              !/^sha256:[0-9a-f]{64}$/.test(canonical[0].digest)) {
+            throw new Error('Existing GitHub Release tarball digest is unavailable or malformed');
+          }
+          const descriptor = openSync(tarballPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+          let localDigest;
+          try {
+            if (!fstatSync(descriptor).isFile()) {
+              throw new Error('Local release tarball must be a regular file');
+            }
+            localDigest = `sha256:${createHash('sha256').update(readFileSync(descriptor)).digest('hex')}`;
+          } finally {
+            closeSync(descriptor);
+          }
+          if (canonical[0].digest !== localDigest) {
+            throw new Error('Existing GitHub Release tarball digest does not match the local tarball');
+          }
+          process.stdout.write('retain');
+          NODE
+            )"
             gh release edit "$GITHUB_REF_NAME" \
               --title "$GITHUB_REF_NAME" \
               --notes-file "$NOTES_PATH" \
               --draft=false \
               --prerelease=false \
               --latest
-            gh release upload "$GITHUB_REF_NAME" "$TARBALL" --clobber
+            if [[ "$EXISTING_TARBALL_MODE" = "upload" ]]; then
+              gh release upload "$GITHUB_REF_NAME" "$TARBALL"
+            fi
           else
             gh release create "$GITHUB_REF_NAME" "$TARBALL" \
               --verify-tag \
@@ -232,7 +277,6 @@ jobs:
               --title "$GITHUB_REF_NAME"
           fi
 
-          TARBALL_NAME="$(basename "$TARBALL")"
           gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" \
             --jq '.assets[].name' > release-assets.txt
           while IFS= read -r ASSET_NAME; do

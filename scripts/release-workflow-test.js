@@ -24,6 +24,7 @@ function canonicalJson(value) {
 }
 
 const releaseMetadataScript = fileURLToPath(new URL('./release-metadata.mjs', import.meta.url));
+const WORKFLOW_TARBALL_SHA256 = 'a4d6f8371fc5231d9a46c749e301d7f3716ed50faafa1b86e61756db1f064aee';
 
 const workflow = YAML.parse(readFileSync(new URL('../.github/workflows/publish.yml', import.meta.url), 'utf8'));
 const jobs = workflow.jobs ?? {};
@@ -186,13 +187,21 @@ if [[ "$1" == "api" ]]; then
     cut -f1 "$GH_FAKE_ASSETS"
     exit 0
   fi
-  node --input-type=module - "$GH_FAKE_ASSETS" "$GH_FAKE_DRAFT" <<'NODE'
+  asset_only=false
+  for argument in "$@"; do
+    if [[ "$argument" == '[.assets[]|{name:.name,digest:.digest}]' ]]; then asset_only=true; fi
+  done
+  node --input-type=module - "$GH_FAKE_ASSETS" "$GH_FAKE_DRAFT" "$asset_only" <<'NODE'
 import { readFileSync } from 'node:fs';
 const rows = readFileSync(process.argv[2], 'utf8').trim();
 const assets = rows === '' ? [] : rows.split('\\n').map((row) => {
   const [name, digest] = row.split('\\t');
-  return { name, digest: 'sha256:' + digest };
+  return { name, digest };
 });
+if (process.argv[4] === 'true') {
+  process.stdout.write(JSON.stringify(assets) + '\\n');
+  process.exit(0);
+}
 process.stdout.write(JSON.stringify({
   tagName: 'v2.1.1',
   url: 'https://github.com/TOSS-Soft/toss-cli/releases/tag/v2.1.1',
@@ -214,7 +223,7 @@ if [[ "$1 $2" == "release create" ]]; then
   done
   : > "$GH_FAKE_RELEASED"
   cp "$GH_FAKE_NOTES_PATH" "$GH_FAKE_NOTES"
-  printf '%s\\t%s\\n' "$(basename "$4")" "$GH_FAKE_TARBALL_DIGEST" > "$GH_FAKE_ASSETS"
+  printf '%s\\tsha256:%s\\n' "$(basename "$4")" "$GH_FAKE_TARBALL_DIGEST" > "$GH_FAKE_ASSETS"
   exit 0
 fi
 if [[ "$1 $2" == "release edit" ]]; then
@@ -230,8 +239,8 @@ fi
 if [[ "$1 $2" == "release upload" ]]; then
   test -f "$4"
   asset_name="$(basename "$4")"
-  asset_digest="$GH_FAKE_TARBALL_DIGEST"
-  if [[ "$asset_name" == "release-evidence.json" ]]; then asset_digest="$(printf 'e%.0s' {1..64})"; fi
+  asset_digest="sha256:$GH_FAKE_TARBALL_DIGEST"
+  if [[ "$asset_name" == "release-evidence.json" ]]; then asset_digest="sha256:$(printf 'e%.0s' {1..64})"; fi
   awk -F '\\t' -v name="$asset_name" '$1 != name' "$GH_FAKE_ASSETS" > "$GH_FAKE_ASSETS.tmp"
   printf '%s\\t%s\\n' "$asset_name" "$asset_digest" >> "$GH_FAKE_ASSETS.tmp"
   mv "$GH_FAKE_ASSETS.tmp" "$GH_FAKE_ASSETS"
@@ -280,10 +289,11 @@ exit 1
   }
 
   function runReleaseScenario(name, {
-    digest = 'a4d6f8371fc5231d9a46c749e301d7f3716ed50faafa1b86e61756db1f064aee',
+    digest = WORKFLOW_TARBALL_SHA256,
     draft = false,
     metadataCommit,
-    existingAssets = []
+    existingAssets = [],
+    existingRelease = existingAssets.length > 0
   } = {}) {
     const scenario = createReleaseShellFixture(name);
     const ghLog = join(scenario.cwd, 'gh.log');
@@ -296,10 +306,10 @@ exit 1
       const metadata = JSON.parse(readFileSync(metadataPath, 'utf8'));
       writeFileSync(metadataPath, canonicalJson({ ...metadata, commit: metadataCommit }));
     }
-    writeFileSync(ghAssets, existingAssets.map(({ name: assetName, sha256 }) =>
-      `${assetName}\t${sha256}\n`
+    writeFileSync(ghAssets, existingAssets.map(({ name: assetName, digest: assetDigest, sha256 }) =>
+      `${assetName}\t${assetDigest !== undefined ? assetDigest : `sha256:${sha256}`}\n`
     ).join(''));
-    if (existingAssets.length > 0) {
+    if (existingRelease) {
       writeFileSync(releasedMarker, 'existing release\n');
       writeFileSync(ghNotes, '# Stale release notes\n');
     }
@@ -357,7 +367,7 @@ exit 1
   assert.deepEqual(publishedEvidence.release.assets, ['toss-software-cli-2.1.1.tgz']);
   assert.equal(
     publishedEvidence.tarball.sha256,
-    'a4d6f8371fc5231d9a46c749e301d7f3716ed50faafa1b86e61756db1f064aee'
+    WORKFLOW_TARBALL_SHA256
   );
   const ghCalls = readFileSync(successfulRelease.ghLog, 'utf8');
   assert.match(ghCalls, /release create v2\.1\.1 .*toss-software-cli-2\.1\.1\.tgz/);
@@ -372,25 +382,71 @@ exit 1
   const divergentMetadata = runReleaseScenario('release-metadata-commit-mismatch', {
     metadataCommit: 'f'.repeat(40)
   });
-  const rerunRelease = runReleaseScenario('release-existing-rerun', {
+  const divergentTarball = runReleaseScenario('release-existing-divergent-tarball', {
     existingAssets: [
       { name: 'toss-software-cli-2.1.1.tgz', sha256: '0'.repeat(64) },
       { name: 'release-evidence.json', sha256: '1'.repeat(64) },
       { name: 'stale-extra.zip', sha256: '2'.repeat(64) }
     ]
   });
+  const malformedTarball = runReleaseScenario('release-existing-malformed-tarball', {
+    existingAssets: [
+      { name: 'toss-software-cli-2.1.1.tgz', digest: '' },
+      { name: 'release-evidence.json', sha256: '1'.repeat(64) }
+    ]
+  });
+  const ambiguousTarball = runReleaseScenario('release-existing-ambiguous-tarball', {
+    existingAssets: [
+      { name: 'toss-software-cli-2.1.1.tgz', sha256: WORKFLOW_TARBALL_SHA256 },
+      { name: 'toss-software-cli-2.1.1.tgz', sha256: WORKFLOW_TARBALL_SHA256 }
+    ]
+  });
+  const rerunRelease = runReleaseScenario('release-existing-identical-tarball', {
+    existingAssets: [
+      { name: 'toss-software-cli-2.1.1.tgz', sha256: WORKFLOW_TARBALL_SHA256 },
+      { name: 'release-evidence.json', sha256: '1'.repeat(64) },
+      { name: 'stale-extra.zip', sha256: '2'.repeat(64) }
+    ]
+  });
+  const missingTarball = runReleaseScenario('release-existing-missing-tarball', {
+    existingRelease: true,
+    existingAssets: [
+      { name: 'release-evidence.json', sha256: '1'.repeat(64) },
+      { name: 'stale-extra.zip', sha256: '2'.repeat(64) }
+    ]
+  });
   assert.deepEqual(
-    { divergentMetadata: divergentMetadata.result.status, existingRerun: rerunRelease.result.status },
-    { divergentMetadata: 1, existingRerun: 0 },
-    'metadata divergence must fail while the canonicalized existing-release rerun succeeds'
+    {
+      divergentMetadata: divergentMetadata.result.status,
+      divergentTarball: divergentTarball.result.status,
+      malformedTarball: malformedTarball.result.status,
+      ambiguousTarball: ambiguousTarball.result.status,
+      identicalTarball: rerunRelease.result.status,
+      missingTarball: missingTarball.result.status
+    },
+    {
+      divergentMetadata: 1,
+      divergentTarball: 1,
+      malformedTarball: 1,
+      ambiguousTarball: 1,
+      identicalTarball: 0,
+      missingTarball: 0
+    },
+    `identical stderr:\n${rerunRelease.result.stderr}\nmissing stderr:\n${missingTarball.result.stderr}`
   );
   assert.match(divergentMetadata.result.stderr, /metadata.*commit.*match/i);
   assert.equal(existsSync(divergentMetadata.ghLog), false, 'metadata divergence must stop before gh');
   assert.equal(existsSync(divergentMetadata.npmLog), false, 'metadata divergence must stop before npm');
+  for (const failed of [divergentTarball, malformedTarball, ambiguousTarball]) {
+    assert.match(failed.result.stderr, /tarball.*digest|digest.*tarball|ambiguous/i);
+    const calls = readFileSync(failed.ghLog, 'utf8');
+    assert.doesNotMatch(calls, /release (?:create|edit|upload|delete-asset)/);
+    assert.equal(existsSync(failed.npmLog), false, 'invalid existing tarball must stop before npm');
+  }
   assert.equal(rerunRelease.result.status, 0, `${rerunRelease.result.stderr}\n${rerunRelease.result.stdout}`);
   const rerunCalls = readFileSync(rerunRelease.ghLog, 'utf8');
   assert.match(rerunCalls, /release edit v2\.1\.1 .*--notes-file docs\/releases\/v2\.1\.1\.md/);
-  assert.match(rerunCalls, /release upload v2\.1\.1 .*toss-software-cli-2\.1\.1\.tgz --clobber/);
+  assert.doesNotMatch(rerunCalls, /release upload v2\.1\.1 .*toss-software-cli-2\.1\.1\.tgz/);
   assert.match(rerunCalls, /release delete-asset v2\.1\.1 release-evidence\.json --yes/);
   assert.match(rerunCalls, /release delete-asset v2\.1\.1 stale-extra\.zip --yes/);
   assert.match(rerunCalls, /release upload v2\.1\.1 .*release-evidence\.json --clobber/);
@@ -406,7 +462,20 @@ exit 1
   assert.equal(rerunEvidence.tarball.sha256, publishedEvidence.tarball.sha256);
   assert.equal(
     rerunAssetRows.find(([assetName]) => assetName === 'toss-software-cli-2.1.1.tgz')?.[1],
-    publishedEvidence.tarball.sha256
+    `sha256:${publishedEvidence.tarball.sha256}`
+  );
+
+  assert.equal(missingTarball.result.status, 0, `${missingTarball.result.stderr}\n${missingTarball.result.stdout}`);
+  const missingCalls = readFileSync(missingTarball.ghLog, 'utf8');
+  assert.match(missingCalls, /release edit v2\.1\.1 .*--notes-file docs\/releases\/v2\.1\.1\.md/);
+  assert.match(missingCalls, /release upload v2\.1\.1 .*toss-software-cli-2\.1\.1\.tgz$/m);
+  assert.doesNotMatch(missingCalls, /release upload v2\.1\.1 .*toss-software-cli-2\.1\.1\.tgz --clobber/);
+  assert.match(missingCalls, /release delete-asset v2\.1\.1 release-evidence\.json --yes/);
+  assert.match(missingCalls, /release delete-asset v2\.1\.1 stale-extra\.zip --yes/);
+  assert.deepEqual(
+    readFileSync(missingTarball.ghAssets, 'utf8').trim().split('\n')
+      .map((row) => row.split('\t')[0]).sort(),
+    ['release-evidence.json', 'toss-software-cli-2.1.1.tgz']
   );
 
   const digestMismatch = runReleaseScenario('release-digest-mismatch', { digest: 'd'.repeat(64) });
