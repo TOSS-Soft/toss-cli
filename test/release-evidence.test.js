@@ -393,6 +393,37 @@ test("evidence output tracking treats pathspec magic as a literal repository-rel
   assert.equal(readFileSync(join(cwd,"magica","release-evidence.json"),"utf8"),"tracked sibling\n");
 });
 
+test("evidence output rejects the exact tracked destination from a repository subdirectory",t => {
+  const cwd=createRepository(t);
+  const nested=join(cwd,"nested");
+  const destination=join(nested,"release-evidence.json");
+  mkdirSync(nested);
+  writeFileSync(destination,"tracked evidence\n");
+  execFileSync("git",["add","nested/release-evidence.json"],{cwd,stdio:"pipe"});
+  unlinkSync(destination);
+
+  assert.throws(
+    () => writeReleaseEvidenceJson(nested,"release-evidence.json",evidenceFixture()),
+    /tracked/i,
+  );
+  assert.equal(readdirSync(nested).includes("release-evidence.json"),false);
+  assert.deepEqual(readdirSync(nested).filter(entry => entry.includes(".tmp")),[]);
+});
+
+test("evidence output permits a safe untracked destination from a repository subdirectory",t => {
+  const cwd=createRepository(t);
+  const nested=join(cwd,"untracked");
+  mkdirSync(nested);
+
+  writeReleaseEvidenceJson(nested,"release-evidence.json",evidenceFixture());
+
+  assert.equal(
+    readFileSync(join(nested,"release-evidence.json"),"utf8"),
+    canonicalJson(evidenceFixture()),
+  );
+  assert.deepEqual(readdirSync(nested).filter(entry => entry.includes(".tmp")),[]);
+});
+
 test("evidence output fails closed on Git tracking errors without writer residue",t => {
   const failures=[
     {name:"spawn",result:{status:null,signal:null,error:new Error("injected Git spawn failure")}},
@@ -406,9 +437,49 @@ test("evidence output fails closed on Git tracking errors without writer residue
 
     assert.throws(
       () => writeReleaseEvidenceJson(cwd,`git-${name}/release-evidence.json`,evidenceFixture(),{
-        runGit:() => result,
+        runGit:(_command,arguments_) => arguments_[0]==="rev-parse"
+          ? {status:0,signal:null,stdout:`${cwd}\n`}
+          : result,
       }),
       /Git.*track|track.*Git|determine.*tracked/i,
+    );
+    assert.equal(readdirSync(parent).includes("release-evidence.json"),false);
+    assert.deepEqual(readdirSync(parent).filter(entry => entry.includes(".tmp")),[]);
+  }
+});
+
+test("evidence output fails closed on invalid Git top-level discovery without residue",t => {
+  const failures=[
+    {
+      name:"fatal",
+      topLevel:{status:128,signal:null,stdout:""},
+    },
+    {
+      name:"outside",
+      topLevel:{
+        status:0,
+        signal:null,
+        stdout:`${mkdtempSync(join(tmpdir(),"toss-git-root-outside-"))}\n`,
+      },
+    },
+  ];
+  t.after(() => {
+    for (const {topLevel} of failures) {
+      if (topLevel.stdout) rmSync(topLevel.stdout.trim(),{recursive:true,force:true});
+    }
+  });
+  for (const {name,topLevel} of failures) {
+    const cwd=createRepository(t);
+    const parent=join(cwd,`top-${name}`);
+    mkdirSync(parent);
+
+    assert.throws(
+      () => writeReleaseEvidenceJson(cwd,`top-${name}/release-evidence.json`,evidenceFixture(),{
+        runGit:(_command,arguments_) => arguments_[0]==="rev-parse"
+          ? topLevel
+          : {status:1,signal:null},
+      }),
+      /Git.*top|repository.*root|outside/i,
     );
     assert.equal(readdirSync(parent).includes("release-evidence.json"),false);
     assert.deepEqual(readdirSync(parent).filter(entry => entry.includes(".tmp")),[]);

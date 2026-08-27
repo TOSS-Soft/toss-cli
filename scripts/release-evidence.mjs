@@ -4,7 +4,7 @@ import {
   closeSync,constants,fstatSync,linkSync,lstatSync,openSync,readFileSync,realpathSync,
   rmSync,writeFileSync,
 } from 'node:fs';
-import {basename,dirname,join,resolve} from 'node:path';
+import {basename,dirname,isAbsolute,join,relative,resolve,sep} from 'node:path';
 import {fileURLToPath} from 'node:url';
 
 import {canonicalJson} from '../src/contracts/acp.js';
@@ -389,10 +389,33 @@ function safeOutputDestination(cwd,outputPath,runGit) {
   if (parentReal!==parent) {
     throw new TypeError("Release evidence output parent must be an existing safe directory");
   }
+  const topLevel=runGit("git",["rev-parse","--show-toplevel"],{
+    cwd:root,encoding:"utf8",
+  });
+  if (topLevel.error || topLevel.signal || topLevel.status!==0 ||
+      typeof topLevel.stdout!=="string") {
+    throw new Error("Unable to determine Git repository top level",{cause:topLevel.error});
+  }
+  const topLevelPath=topLevel.stdout.replace(/\r?\n$/u,"");
+  if (!topLevelPath || /[\r\n\0]/u.test(topLevelPath)) {
+    throw new Error("Unable to determine Git repository top level");
+  }
+  let repositoryRoot;
+  try {
+    repositoryRoot=realpathSync(topLevelPath);
+  } catch (error) {
+    throw new Error("Unable to determine Git repository top level",{cause:error});
+  }
+  const repositoryRelative=relative(repositoryRoot,destination);
+  if (!repositoryRelative || isAbsolute(repositoryRelative) || repositoryRelative===".." ||
+      repositoryRelative.startsWith(`..${sep}`)) {
+    throw new Error("Release evidence output must remain inside the Git repository root");
+  }
+  const gitOutputPath=repositoryRelative.split(sep).join("/");
   const tracked=runGit("git",[
-    "ls-files","--error-unmatch","--",`:(top,literal)${outputPath}`,
+    "ls-files","--error-unmatch","--",`:(top,literal)${gitOutputPath}`,
   ],{
-    cwd:root,stdio:"ignore",
+    cwd:repositoryRoot,stdio:"ignore",
   });
   if (tracked.error || tracked.signal || (tracked.status!==0 && tracked.status!==1)) {
     throw new Error("Unable to determine whether release evidence output is tracked by Git",{
