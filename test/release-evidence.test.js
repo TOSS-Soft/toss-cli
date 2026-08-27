@@ -377,6 +377,44 @@ test("evidence output rejects unsafe, existing, symlinked, and tracked destinati
   assert.equal(isAbsolute("release-evidence.json"),false);
 });
 
+test("evidence output tracking treats pathspec magic as a literal repository-relative path",t => {
+  const cwd=createRepository(t);
+  mkdirSync(join(cwd,"magic?"));
+  mkdirSync(join(cwd,"magica"));
+  writeFileSync(join(cwd,"magica","release-evidence.json"),"tracked sibling\n");
+  execFileSync("git",["add","magica/release-evidence.json"],{cwd,stdio:"pipe"});
+
+  writeReleaseEvidenceJson(cwd,"magic?/release-evidence.json",evidenceFixture());
+
+  assert.equal(
+    readFileSync(join(cwd,"magic?","release-evidence.json"),"utf8"),
+    canonicalJson(evidenceFixture()),
+  );
+  assert.equal(readFileSync(join(cwd,"magica","release-evidence.json"),"utf8"),"tracked sibling\n");
+});
+
+test("evidence output fails closed on Git tracking errors without writer residue",t => {
+  const failures=[
+    {name:"spawn",result:{status:null,signal:null,error:new Error("injected Git spawn failure")}},
+    {name:"fatal",result:{status:128,signal:null}},
+    {name:"signal",result:{status:null,signal:"SIGTERM"}},
+  ];
+  for (const {name,result} of failures) {
+    const cwd=createRepository(t);
+    const parent=join(cwd,`git-${name}`);
+    mkdirSync(parent);
+
+    assert.throws(
+      () => writeReleaseEvidenceJson(cwd,`git-${name}/release-evidence.json`,evidenceFixture(),{
+        runGit:() => result,
+      }),
+      /Git.*track|track.*Git|determine.*tracked/i,
+    );
+    assert.equal(readdirSync(parent).includes("release-evidence.json"),false);
+    assert.deepEqual(readdirSync(parent).filter(entry => entry.includes(".tmp")),[]);
+  }
+});
+
 test("publication races never clobber the winner and remove the temporary",t => {
   const cwd=createRepository(t);
   const destination=join(cwd,"release-evidence.json");

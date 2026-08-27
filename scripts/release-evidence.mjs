@@ -343,7 +343,7 @@ export function createReleaseEvidence(input) {
   });
 }
 
-function safeOutputDestination(cwd,outputPath) {
+function safeOutputDestination(cwd,outputPath,runGit) {
   if (typeof outputPath!=="string" || outputPath.includes("\0") || outputPath.includes("\\") ||
       outputPath.startsWith("/") || /^[A-Za-z]:/u.test(outputPath)) {
     throw new TypeError("Release evidence output must be a safe relative path");
@@ -389,9 +389,16 @@ function safeOutputDestination(cwd,outputPath) {
   if (parentReal!==parent) {
     throw new TypeError("Release evidence output parent must be an existing safe directory");
   }
-  const tracked=spawnSync("git",["ls-files","--error-unmatch","--",outputPath],{
+  const tracked=runGit("git",[
+    "ls-files","--error-unmatch","--",`:(top,literal)${outputPath}`,
+  ],{
     cwd:root,stdio:"ignore",
   });
+  if (tracked.error || tracked.signal || (tracked.status!==0 && tracked.status!==1)) {
+    throw new Error("Unable to determine whether release evidence output is tracked by Git",{
+      cause:tracked.error,
+    });
+  }
   if (tracked.status===0) throw new TypeError("Release evidence output must be untracked");
   return {destination,parent};
 }
@@ -414,9 +421,10 @@ export function writeReleaseEvidenceJson(cwd,outputPath,evidence,{
   writeTemporary=writeFileSync,
   publishTemporary=linkSync,
   removeTemporary=rmSync,
+  runGit=spawnSync,
 }={}) {
   const normalized=validateReleaseEvidence(evidence);
-  const {destination,parent}=safeOutputDestination(cwd,outputPath);
+  const {destination,parent}=safeOutputDestination(cwd,outputPath,runGit);
   const temporary=join(
     parent,`.release-evidence.json.${process.pid}.${randomBytes(16).toString("hex")}.tmp`,
   );
