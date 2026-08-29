@@ -58,17 +58,22 @@ function runPackedCli(packageRoot,args,cwd) {
 }
 
 try {
-  const npmRequire=createRequire(path.join(resolveNpmRoot(),"package.json"));
-  const npmPack=npmRequire("libnpmpack");
+  const npmRoot=resolveNpmRoot();
+  const npmRequire=createRequire(path.join(npmRoot,"package.json"));
   const npmTar=npmRequire("tar");
-  const tarball=await npmPack(root,{ignoreScripts:true});
-  const artifact=path.join(tmp,"toss-cli-2.0.0.tgz");
-  fs.writeFileSync(artifact,tarball);
-  const packedFiles=[];
-  await npmTar.t({
-    file:artifact,
-    onReadEntry:entry => packedFiles.push(entry.path),
-  });
+  const npmCli=process.env.npm_execpath ?? path.join(npmRoot,"bin","npm-cli.js");
+  const packResult=run(process.execPath,[
+    npmCli,"pack","--ignore-scripts","--dry-run=false","--json","--pack-destination",tmp,
+  ]);
+  assertSuccess(packResult,"npm pack");
+  const packEntries=JSON.parse(packResult.stdout);
+  assert.equal(packEntries.length,1,"npm pack returned an unexpected artifact count");
+  const filename=packEntries[0]?.filename;
+  assert.equal(typeof filename,"string","npm pack returned an invalid artifact name");
+  assert.equal(filename,path.basename(filename),"npm pack returned an unsafe artifact name");
+  const artifact=path.join(tmp,filename);
+  const packedFiles=packEntries[0]?.files;
+  assert.ok(Array.isArray(packedFiles),"npm pack returned an invalid file inventory");
 
   const extractRoot=path.join(tmp,"extracted");
   fs.mkdirSync(extractRoot);
@@ -93,7 +98,7 @@ try {
   );
 
   assert.ok(
-    packedFiles.includes("package/templates/gitignore.template"),
+    packedFiles.some(file => file?.path==="templates/gitignore.template"),
     "packed artifact omits the generated-project gitignore template",
   );
 
