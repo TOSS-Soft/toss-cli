@@ -59,22 +59,29 @@ test("PR and publish workflows preserve the canonical full and package gates",as
     readYaml(".github/workflows/publish.yml"),
   ]);
   assert.ok(ci.on.pull_request,"CI must run for pull requests");
+  const compatibility=ci.jobs.compatibility;
+  assert.ok(compatibility,"CI must run the compatibility matrix");
   assert.equal(
-    ci.jobs.test["timeout-minutes"],30,
+    compatibility["timeout-minutes"],30,
     "PR CI must leave room for npm test plus the prepack full gate",
   );
-  assert.deepEqual(ci.jobs.test.strategy.matrix.node,[20,24]);
-  assert.equal(ci.jobs.test.strategy["fail-fast"],false);
-  const ciCheckout=ci.jobs.test.steps.find(step => step.uses === "actions/checkout@v7");
+  assert.deepEqual(compatibility.strategy.matrix.node,[20,24]);
+  assert.equal(compatibility.strategy["fail-fast"],false);
+  const ciCheckout=compatibility.steps.find(step => step.uses === "actions/checkout@v7");
   assert.ok(ciCheckout,"CI must check out the source and locked legacy tag");
   assert.equal(ciCheckout.with?.["fetch-depth"],0);
-  const setupNode=ci.jobs.test.steps.find(step => step.uses === "actions/setup-node@v7");
+  const setupNode=compatibility.steps.find(step => step.uses === "actions/setup-node@v7");
   assert.ok(setupNode,"CI must configure Node with setup-node");
   assert.equal(setupNode.with["node-version"],"${{ matrix.node }}");
-  assert.ok(ci.jobs.test.steps.some(step => step.run === "npm test"));
-  assert.ok(ci.jobs.test.steps.some(step => step.run === "npm pack --dry-run"));
-  assert.equal(stepRun(ci,"test","Run smoke tests"),"npm test");
-  assert.equal(stepRun(ci,"test","Validate npm package"),"npm pack --dry-run");
+  assert.equal(stepRun(ci,"compatibility","Run smoke tests"),"npm test");
+  assert.equal(stepRun(ci,"compatibility","Validate npm package"),"npm pack --dry-run");
+  assert.equal(ci.jobs.test.name,"test");
+  assert.equal(ci.jobs.test.needs,"compatibility");
+  assert.equal(ci.jobs.test.if,"${{ always() }}");
+  const requiredGate=ci.jobs.test.steps.find(step => step.name==="Require compatibility matrix");
+  assert.ok(requiredGate,"CI must expose the required aggregate test status");
+  assert.equal(requiredGate.env.COMPATIBILITY_RESULT,"${{ needs.compatibility.result }}");
+  assert.equal(requiredGate.run,'test "$COMPATIBILITY_RESULT" = "success"');
   assert.equal(stepRun(publish,"validate","Test"),"npm test");
   assert.equal(publish.jobs.publish_npm.permissions["id-token"],"write");
   assert.equal(publish.jobs.publish_github_packages.permissions.packages,"write");

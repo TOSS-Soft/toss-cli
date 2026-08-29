@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 jobs:
-  test:
+  compatibility:
     name: test
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -38,3 +38,14 @@ jobs:
 
       - name: Validate npm package
         run: npm pack --dry-run
+
+  test:
+    name: test
+    needs: compatibility
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require compatibility matrix
+        env:
+          COMPATIBILITY_RESULT: ${{ needs.compatibility.result }}
+        run: test "$COMPATIBILITY_RESULT" = "success"
