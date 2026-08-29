@@ -16,9 +16,38 @@ function preloadOptions(existing="") {
   return existing.trim()==="" ? own : `${existing} ${own}`;
 }
 
+function nonemptyString(value,label) {
+  if (typeof value!=="string" || value.length===0) {
+    throw new TypeError(`${label} must be a nonempty string`);
+  }
+  return value;
+}
+
+function commandArguments(args) {
+  if (!Array.isArray(args) || args.some(value => typeof value!=="string")) {
+    throw new TypeError("performance arguments must be a string array");
+  }
+  return [...args];
+}
+
+export function performanceInvocationForPlatform(command,args,{
+  platform=process.platform,
+  comSpec=process.env.ComSpec ?? process.env.COMSPEC ?? "cmd.exe",
+}={}) {
+  nonemptyString(command,"performance command");
+  const normalizedArgs=commandArguments(args);
+  nonemptyString(platform,"performance platform");
+  if (platform!=="win32" || command!=="npm.cmd") {
+    return {command,args:normalizedArgs};
+  }
+  const interpreter=nonemptyString(comSpec,"performance command interpreter");
+  return {command:interpreter,args:["/d","/c",command,...normalizedArgs]};
+}
+
 function execute(command,args,{cwd,env}) {
   return new Promise((resolveExecution,rejectExecution) => {
-    const child=spawn(command,args,{cwd,env,stdio:["ignore","pipe","pipe"],shell:false});
+    const invocation=performanceInvocationForPlatform(command,args);
+    const child=spawn(invocation.command,invocation.args,{cwd,env,stdio:["ignore","pipe","pipe"],shell:false});
     let stdout="";
     let stderr="";
     child.stdout.setEncoding("utf8");

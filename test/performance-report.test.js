@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import * as performanceReport from "../scripts/performance/report.mjs";
 import {median,parseNamedDurations} from "../scripts/performance/report.mjs";
 import {
   canonicalPerformanceJson,
@@ -146,6 +147,23 @@ test("report records one exact closed executable and argument vector",() => {
   }),/unknown property/);
 });
 
+test("report construction accepts only measurable lanes before serialization",() => {
+  assert.throws(() => createPerformanceReport({
+    command,lane:"bogus",identity,samples:[sample(1000),sample(1100),sample(1200)],
+  }),/lane must be fast or full/);
+});
+
+test("performance commands map each measurable lane to its canonical package script",() => {
+  assert.deepEqual(performanceReport.performanceCommandForLane("full",{executable:"npm"}),{
+    executable:"npm",arguments:["test"],
+  });
+  assert.deepEqual(performanceReport.performanceCommandForLane("fast",{executable:"npm.cmd"}),{
+    executable:"npm.cmd",arguments:["run","test:fast"],
+  });
+  assert.throws(() => performanceReport.performanceCommandForLane("bogus",{executable:"npm"}),/fast or full/);
+  assert.throws(() => performanceReport.performanceCommandForLane("fast",{executable:""}),/nonempty string/);
+});
+
 test("full budget has stable passing and failing results",() => {
   const baseline=baselineDocument();
   const candidate=reportDocument({walls:[95000,95000,95000]});
@@ -162,6 +180,50 @@ test("budget comparison accepts a complete historical baseline",() => {
   const baseline=baselineDocument();
   const candidate=reportDocument({walls:[94000,93000,92000]});
   assert.equal(comparePerformanceBudget(baseline,candidate,"full").code,"PERFORMANCE_BUDGET_OK");
+});
+
+test("fast budget derives its truthful command from the locked full-origin baseline",() => {
+  const baseline=baselineDocument();
+  const candidate=reportDocument({
+    lane:"fast",walls:[14999,14999,14999],
+    exactCommand:{executable:"npm",arguments:["run","test:fast"]},
+  });
+  assert.deepEqual(comparePerformanceBudget(baseline,candidate,"fast"),{
+    ok:true,code:"PERFORMANCE_BUDGET_OK",limit_ms:15000,actual_ms:14999,
+    message:"fast wall time 14999ms is within budget 15000ms.",
+  });
+});
+
+test("fast budget comparison fails closed for lane, command, identity, and evidence drift",() => {
+  const baseline=baselineDocument();
+  const fastCommand={executable:"npm",arguments:["run","test:fast"]};
+  assert.throws(
+    () => comparePerformanceBudget(baseline,reportDocument({walls:[1000,1000,1000]}),"fast"),
+    /candidate lane/,
+  );
+  assert.throws(
+    () => comparePerformanceBudget(baseline,reportDocument({
+      lane:"fast",walls:[1000,1000,1000],exactCommand:command,
+    }),"fast"),
+    /candidate command/,
+  );
+  assert.deepEqual(comparePerformanceBudget(baseline,reportDocument({
+    lane:"fast",walls:[1000,1000,1000],exactCommand:fastCommand,
+    exactIdentity:{...identity,lock_sha256:"b".repeat(64)},
+  }),"fast").code,"INCOMPATIBLE_PERFORMANCE_ENVIRONMENT");
+  const failed=reportDocument({lane:"fast",walls:[1000,1000,1000],exactCommand:fastCommand});
+  failed.samples[1].exit_status=7;
+  assert.throws(() => comparePerformanceBudget(baseline,failed,"fast"),/successful/);
+  const incomplete=reportDocument({lane:"fast",walls:[1000,1000,1000],exactCommand:fastCommand});
+  delete incomplete.medians;
+  assert.throws(() => comparePerformanceBudget(baseline,incomplete,"fast"),/requires medians/);
+});
+
+test("full budget requires a complete full-origin baseline and exact full command",() => {
+  const alternate={executable:"node",arguments:["--test"]};
+  const baseline=baselineDocument({exactCommand:alternate});
+  const candidate=reportDocument({walls:[90000,90000,90000],exactCommand:alternate});
+  assert.throws(() => comparePerformanceBudget(baseline,candidate,"full"),/baseline command/);
 });
 
 test("budget comparison rejects a candidate report from another lane",() => {

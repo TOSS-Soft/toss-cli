@@ -673,6 +673,8 @@ existing project automatically. Back up populated records and follow the
 - git for normal repository initialization
 - `gh` only when creating GitHub resources
 
+Contributors: see the [test lane and release workflow guide](docs/testing/test-lanes.md).
+
 ## Publish
 
 For a public scoped package:
