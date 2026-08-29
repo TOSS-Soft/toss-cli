@@ -190,19 +190,19 @@ test("release notes lock exact final release-candidate benchmark evidence",() =>
   const notes=readReleaseNotes();
   const evidence=[
     "Reference environment: executable capture commit",
-    "`e795f668c6b6c72ce075f2d4f88f01674826e4ac`, runner",
+    "`e89707f6b3692084fe4a03b4aab001155a924d3b`, runner",
     "`toss-reference-macos-node26`, Node.js `v26.6.0`, `darwin/arm64`, and",
     "package-lock SHA-256",
     "`17ef2bb1650a05a11b2f474ac84b62290e2e34dc83b3f09451403e1474522be6`.",
     "",
-    "- Fast wall samples: `5624.956875 ms`, `5668.877459 ms`, and",
-    "  `5678.6004170000015 ms`; median `5668.877459 ms`; locked limit `15000 ms`;",
+    "- Fast wall samples: `5610.090249999999 ms`, `5607.41825 ms`, and",
+    "  `5651.624708000001 ms`; median `5610.090249999999 ms`; locked limit `15000 ms`;",
     "  report SHA-256",
-    "  `303189acb5ed01c7b6c2dac6ca5fdd5c142128a091e90ee529551a528b10bb86`.",
-    "- Full wall samples: `18903.968791000003 ms`, `18621.899124999996 ms`, and",
-    "  `18711.729291999996 ms`; median `18711.729291999996 ms`; locked limit",
+    "  `ef036c93acc0d1902726f0cf4d46f25c25b8461ee0e306b8842016daffe3c991`.",
+    "- Full wall samples: `19166.485417 ms`, `18536.010334 ms`, and",
+    "  `18416.30225 ms`; median `18536.010334 ms`; locked limit",
     "  `90103 ms`; report SHA-256",
-    "  `b9ba3c7f45ec811d8c205d1547166a4b5396fb0c416cd633eb24a21fce102590`.",
+    "  `83f43420de7d8160b7f57dd5d877a331ef6aea3c9369352aeec5345d1d43d4b8`.",
     "- Package tarball: `toss-software-cli-2.1.1.tgz`; SHA-256",
     "  `c33bfed169d239b3f893d92ecc54cd9006daee0567d5ef44e3ecc70aac5eb5b7`.",
   ].join("\n");
@@ -212,8 +212,8 @@ test("release notes lock exact final release-candidate benchmark evidence",() =>
     .map(match => match[1]);
   assert.deepEqual(hashes,[
     "17ef2bb1650a05a11b2f474ac84b62290e2e34dc83b3f09451403e1474522be6",
-    "303189acb5ed01c7b6c2dac6ca5fdd5c142128a091e90ee529551a528b10bb86",
-    "b9ba3c7f45ec811d8c205d1547166a4b5396fb0c416cd633eb24a21fce102590",
+    "ef036c93acc0d1902726f0cf4d46f25c25b8461ee0e306b8842016daffe3c991",
+    "83f43420de7d8160b7f57dd5d877a331ef6aea3c9369352aeec5345d1d43d4b8",
     "c33bfed169d239b3f893d92ecc54cd9006daee0567d5ef44e3ecc70aac5eb5b7",
   ]);
 });
