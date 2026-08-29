@@ -1,0 +1,183 @@
+import fs from "node:fs";
+
+import Ajv2020 from "ajv/dist/2020.js";
+
+import {canonicalJson} from "../../src/contracts/acp.js";
+
+const schemaDefinitions=[
+  ["artifact-envelope.v1","../../contracts/common/artifact-envelope.schema.json"],
+  ["entity.v1","../../contracts/common/entity.schema.json"],
+  ["provenance.v1","../../contracts/common/provenance.schema.json"],
+  ["reference.v1","../../contracts/common/reference.schema.json"],
+  ["question.v1","../../contracts/common/question.schema.json"],
+  ["pm-analysis.v1","../../contracts/agents/pm-analysis.v1.schema.json"],
+  ["architecture-constraint.v1","../../contracts/agents/architecture-constraint.v1.schema.json"],
+  ["architecture.v1","../../contracts/agents/architecture.v1.schema.json"],
+  ["adr.v1","../../contracts/agents/adr.v1.schema.json"],
+  ["issue-plan.v1","../../contracts/agents/issue-plan.v1.schema.json"],
+  ["finding.v1","../../contracts/agents/finding.v1.schema.json"],
+  ["spec-audit.v1","../../contracts/agents/spec-audit.v1.schema.json"],
+  ["decision-package.v1","../../contracts/pipeline/decision-package.v1.schema.json"],
+  ["trace-graph.v1","../../contracts/pipeline/trace-graph.v1.schema.json"],
+  ["trace-result.v1","../../contracts/pipeline/trace-result.v1.schema.json"],
+  ["command-result.v1","../../contracts/pipeline/command-result.v1.schema.json"],
+  ["transition-event.v1","../../contracts/pipeline/transition-event.v1.schema.json"],
+  ["project-input.v1","../../contracts/pipeline/project-input.v1.schema.json"],
+  ["feature-delta.v1","../../contracts/pipeline/feature-delta.v1.schema.json"],
+  ["design-orchestration-state.v1","../../contracts/pipeline/design-orchestration-state.v1.schema.json"],
+  ["pdor-result.v1","../../contracts/pipeline/pdor-result.v1.schema.json"],
+  ["github-publication-result.v1","../../contracts/pipeline/github-publication-result.v1.schema.json"],
+  ["decision-answer.v1","../../contracts/pipeline/decision-answer.v1.schema.json"],
+  ["adr-approval.v1","../../contracts/pipeline/adr-approval.v1.schema.json"],
+  ["design-brief.v1","../../contracts/design/design-brief.v1.schema.json"],
+  ["ux-analysis.v1","../../contracts/design/ux-analysis.v1.schema.json"],
+  ["user-flow.v1","../../contracts/design/user-flow.v1.schema.json"],
+  ["information-architecture.v1","../../contracts/design/information-architecture.v1.schema.json"],
+  ["wireframe-plan.v1","../../contracts/design/wireframe-plan.v1.schema.json"],
+  ["visual-direction.v1","../../contracts/design/visual-direction.v1.schema.json"],
+  ["design-system.v1","../../contracts/design/design-system.v1.schema.json"],
+  ["screen-spec.v1","../../contracts/design/screen-spec.v1.schema.json"],
+  ["prototype-manifest.v1","../../contracts/design/prototype-manifest.v1.schema.json"],
+  ["usability-evidence.v1","../../contracts/design/usability-evidence.v1.schema.json"],
+  ["design-audit.v1","../../contracts/design/design-audit.v1.schema.json"],
+  ["design-approval.v1","../../contracts/design/design-approval.v1.schema.json"],
+  ["ui-design-dor-result.v1","../../contracts/design/ui-design-dor-result.v1.schema.json"],
+];
+
+const validatorModuleUrl=new URL("../../src/contracts/validator.js",import.meta.url);
+
+function loadSchema(path) {
+  return JSON.parse(fs.readFileSync(new URL(path,validatorModuleUrl),"utf8"));
+}
+
+function copyErrors(errors) {
+  return (errors ?? []).map(error => ({...error}));
+}
+
+function canonicalJsonError(error) {
+  return [{
+    instancePath:"",
+    schemaPath:"#",
+    keyword:"canonical-json",
+    params:{},
+    message:error instanceof Error ? error.message : "Value is not canonical JSON",
+  }];
+}
+
+function isLeapYear(year) {
+  return year%4===0 && (year%100!==0 || year%400===0);
+}
+
+function daysInMonth(year,month) {
+  if (month===2) return isLeapYear(year) ? 29 : 28;
+  return [4,6,9,11].includes(month) ? 30 : 31;
+}
+
+const RFC3339_DATE_TIME=/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-](\d{2}):(\d{2}))$/;
+
+function isRfc3339DateTime(value) {
+  if (typeof value!=="string") return false;
+  const match=RFC3339_DATE_TIME.exec(value);
+  if (!match) return false;
+  const [
+    ,yearText,monthText,dayText,hourText,minuteText,secondText,
+    offsetHourText,offsetMinuteText,
+  ]=match;
+  const year=Number(yearText);
+  const month=Number(monthText);
+  const day=Number(dayText);
+  const hour=Number(hourText);
+  const minute=Number(minuteText);
+  const second=Number(secondText);
+  if (month<1 || month>12 || day<1 || day>daysInMonth(year,month) ||
+      hour>23 || minute>59 || second>59) {
+    return false;
+  }
+  if (offsetHourText!==undefined &&
+      (Number(offsetHourText)>23 || Number(offsetMinuteText)>59)) {
+    return false;
+  }
+  return true;
+}
+
+function canonicalDocument(value) {
+  try {
+    return {value:JSON.parse(canonicalJson(value))};
+  } catch (error) {
+    return {errors:canonicalJsonError(error)};
+  }
+}
+
+function eventFor(phase,state,row) {
+  const event={phase,state};
+  if (row?.schemaId!==undefined) event.schema_id=row.schemaId;
+  if (row?.uri!==undefined) event.schema_uri=row.uri;
+  return Object.freeze(event);
+}
+
+function observed(phase,observe,row,operation) {
+  let result;
+  let failure;
+  let failed=false;
+  try {
+    observe(eventFor(phase,"start",row));
+    result=operation();
+  } catch (error) {
+    failed=true;
+    failure=error;
+  }
+  try {
+    observe(eventFor(phase,"end",row));
+  } catch (error) {
+    if (!failed) throw error;
+  }
+  if (failed) throw failure;
+  return result;
+}
+
+export function createEagerContractValidator({observe=() => {}}={}) {
+  const ajv=observed("ajv_creation",observe,undefined,() => {
+    const instance=new Ajv2020({
+      allErrors:true,
+      strict:true,
+      validateFormats:true,
+    });
+    instance.addFormat("rfc3339-date-time",{
+      type:"string",
+      validate:isRfc3339DateTime,
+    });
+    return instance;
+  });
+  const validators=new Map();
+  const firstValidated=new Set();
+
+  for (const [schemaId,path] of schemaDefinitions) {
+    const schema=observed("schema_io",observe,{schemaId},() => loadSchema(path));
+    const row={schemaId,uri:schema.$id};
+    observed("schema_registration",observe,row,() => ajv.addSchema(schema));
+    validators.set(schemaId,schema.$id);
+  }
+
+  function validateDocument(value,schemaId) {
+    const schemaUri=validators.get(schemaId) ?? schemaId;
+    const row={schemaId,uri:schemaUri};
+    const validate=observed("compilation",observe,row,() => ajv.getSchema(schemaUri));
+    if (!validate) {
+      throw new Error(`Unknown contract schema: ${String(schemaId)}`);
+    }
+    const validateValue=() => {
+      const document=canonicalDocument(value);
+      if (document.errors) return {valid:false,errors:document.errors};
+      const valid=validate(document.value);
+      return {valid,errors:valid ? [] : copyErrors(validate.errors)};
+    };
+    if (!firstValidated.has(schemaUri)) {
+      const result=observed("first_validation",observe,row,validateValue);
+      firstValidated.add(schemaUri);
+      return result;
+    }
+    return validateValue();
+  }
+
+  return Object.freeze({validateDocument});
+}
