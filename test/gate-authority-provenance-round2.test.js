@@ -41,11 +41,26 @@ async function authorityStore(seed, mutate, { includeFollowing = false } = {}) {
   const authorityIndex = seed.rows.findIndex((row) => row.document_type === seed.documentType);
   assert.notEqual(authorityIndex, -1, `${seed.documentType} seed must contain authority evidence`);
 
-  for (const row of seed.rows.slice(0, authorityIndex)) {
+  const authority = seed.rows[authorityIndex];
+  const prerequisites = [];
+  const visited = new Set();
+  const appendPrerequisites = (row) => {
+    const key = canonicalJson(reference(row));
+    if (visited.has(key)) return;
+    visited.add(key);
+    for (const required of [...row.parents, ...row.inputs]) {
+      const dependency = seed.rows.find((candidate) => sameReference(reference(candidate), required));
+      if (dependency) appendPrerequisites(dependency);
+    }
+    prerequisites.push(row);
+  };
+  appendPrerequisites(authority);
+
+  for (const row of prerequisites.slice(0, -1)) {
     await store.append(row);
   }
 
-  const original = seed.rows[authorityIndex];
+  const original = authority;
   const tampered = clone(original);
   await mutate(tampered, seed);
   tampered.content_sha256 = sha256Canonical(tampered.content);

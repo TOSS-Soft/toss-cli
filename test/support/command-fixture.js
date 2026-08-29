@@ -3,14 +3,31 @@ import {tmpdir} from "node:os";
 import {join} from "node:path";
 
 import {createArtifactStore} from "../../src/artifacts/store.js";
+import {ArtifactValidationError} from "../../src/artifacts/errors.js";
 import {parseCommand} from "../../src/commands/router.js";
-import {canonicalJson} from "../../src/contracts/acp.js";
+import {canonicalJson,sha256Canonical} from "../../src/contracts/acp.js";
 import {clone,completeArtifacts,rehash} from "./trace-fixture.js";
 
+export async function commandStoreFixture(t,{prefix="toss-command-",remove=rm}={}) {
+  if (typeof prefix!=="string" || !/^toss-command-[a-z-]*$/u.test(prefix)) {
+    throw new TypeError("command store prefix must be a safe toss-command prefix");
+  }
+  if (typeof remove!=="function") {
+    throw new TypeError("command store remove must be a function");
+  }
+  const root=await mkdtemp(join(tmpdir(),prefix));
+  let cleaned=false;
+  const cleanup=async () => {
+    if (cleaned) return;
+    await remove(root,{recursive:true,force:true});
+    cleaned=true;
+  };
+  t.after(cleanup);
+  return Object.freeze({root,store:createArtifactStore({root}),cleanup});
+}
+
 export async function commandStore(t) {
-  const root=await mkdtemp(join(tmpdir(),"toss-command-"));
-  t.after(() => rm(root,{recursive:true,force:true}));
-  return createArtifactStore({root});
+  return (await commandStoreFixture(t)).store;
 }
 
 export function memoryCommandStore() {
@@ -23,47 +40,101 @@ export function memoryCommandStore() {
     content_sha256:value.content_sha256,
   });
   const find=reference => records.find(record =>
-    record.document_type===reference.document_type &&
+    (reference.document_type===undefined || record.document_type===reference.document_type) &&
     record.artifact_id===reference.artifact_id &&
     record.revision===reference.revision &&
     record.content_sha256===reference.content_sha256);
-  async function verify(reference) {
+  const ordered=records => [...records].sort((left,right) =>
+    left.document_type.localeCompare(right.document_type) ||
+    left.artifact_id.localeCompare(right.artifact_id) ||
+    left.revision-right.revision,
+  );
+  const exactReference=(reference,record) =>
+    reference.artifact_id===record.artifact_id &&
+    reference.revision===record.revision &&
+    reference.content_sha256===record.content_sha256 &&
+    (reference.document_type===undefined || reference.document_type===record.document_type);
+  async function verify(reference,visited=new Set()) {
     const record=find(reference);
     if (!record) throw new Error("Artifact reference was not found");
+    const key=`${record.document_type}\u0000${record.artifact_id}\u0000${record.revision}`;
+    if (visited.has(key)) throw new Error("Cyclic artifact reference");
+    visited.add(key);
+    try {
+      if (record.revision===1 && record.parents.length!==0) {
+        throw new Error("Revision 1 must have empty parents");
+      }
+      if (record.revision>1) {
+        const predecessor=records.find(candidate =>
+          candidate.document_type===record.document_type &&
+          candidate.artifact_id===record.artifact_id &&
+          candidate.revision===record.revision-1);
+        if (!predecessor || record.parents.length!==1 ||
+            !exactReference(record.parents[0],predecessor)) {
+          throw new Error("Invalid artifact parent lineage");
+        }
+      }
+      for (const source of [...record.parents,...record.inputs]) await verify(source,visited);
+    } finally {
+      visited.delete(key);
+    }
     return copy(record);
   }
   async function get(reference) {
     return verify(reference);
   }
   async function list(filter={}) {
-    return records.filter(record => Object.entries(filter).every(
+    return ordered(records.filter(record => Object.entries(filter).every(
       ([key,value]) => record[key]===value,
-    )).map(copy);
+    ))).map(copy);
   }
   async function append(draft) {
-    for (const reference of [...draft.parents,...draft.inputs]) await verify(reference);
-    const same=records.find(record =>
-      record.document_type===draft.document_type &&
-      record.artifact_id===draft.artifact_id &&
-      record.revision===draft.revision);
+    const artifact=copy(draft);
+    artifact.content_sha256=sha256Canonical(artifact.content);
+    const conflictingIdentity=records.find(record =>
+      record.artifact_id===artifact.artifact_id &&
+      record.document_type!==artifact.document_type);
+    if (conflictingIdentity) {
+      throw new ArtifactValidationError(
+        `artifact_id ${artifact.artifact_id} is already bound to document type ${conflictingIdentity.document_type}`,
+      );
+    }
+    for (const reference of [...artifact.parents,...artifact.inputs]) await verify(reference);
+    const identity=ordered(records.filter(record =>
+      record.document_type===artifact.document_type &&
+      record.artifact_id===artifact.artifact_id));
+    const requestedRevision=artifact.revision;
+    const same=requestedRevision===undefined ? undefined : identity.find(record =>
+      record.revision===requestedRevision);
     if (same) {
-      if (canonicalJson(same)!==canonicalJson(draft)) {
+      if (same.content_sha256!==artifact.content_sha256 ||
+          canonicalJson(same)!==canonicalJson({...artifact,revision:same.revision})) {
         throw new Error("Refusing to overwrite immutable artifact revision");
       }
       return copy(same);
     }
-    const identity=records.filter(record =>
-      record.document_type===draft.document_type &&
-      record.artifact_id===draft.artifact_id);
-    if (draft.revision!==identity.length+1) throw new Error("Non-monotonic revision");
-    if (draft.parents.length>0 && canonicalJson(draft.parents)!==
-        canonicalJson([referenceOf(identity.at(-1))])) {
+    if (requestedRevision===undefined) {
+      const equivalent=identity.find(record => record.content_sha256===artifact.content_sha256 &&
+        canonicalJson(record)===canonicalJson({...artifact,revision:record.revision}));
+      if (equivalent) return copy(equivalent);
+    }
+    const predecessor=identity.at(-1);
+    const nextRevision=(predecessor?.revision ?? 0)+1;
+    if (requestedRevision!==undefined && requestedRevision!==nextRevision) {
+      throw new Error("Non-monotonic revision");
+    }
+    artifact.revision=requestedRevision ?? nextRevision;
+    if (!predecessor && artifact.parents.length!==0) {
       throw new Error("Invalid artifact parent lineage");
     }
-    records.push(copy(draft));
-    return copy(draft);
+    if (predecessor && (artifact.parents.length!==1 ||
+        !exactReference(artifact.parents[0],referenceOf(predecessor)))) {
+      throw new Error("Invalid artifact parent lineage");
+    }
+    records.push(copy(artifact));
+    return copy(artifact);
   }
-  return {append,get,list,verify};
+  return Object.freeze({append,get,list,verify});
 }
 
 export function countedCommandStore(delegate) {

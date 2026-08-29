@@ -38,6 +38,13 @@ const LOCK_RETRY_LIMIT=200;
 const LOCK_RETRY_DELAY_MS=5;
 const LOCK_INITIALIZING_GRACE_MS=1000;
 const NO_FOLLOW=constants.O_NOFOLLOW ?? 0;
+const OPERATION_PHASES=Object.freeze([
+  "append:post-rename-read",
+  "append:snapshot",
+  "get:snapshot",
+  "list:snapshot",
+  "verify:snapshot",
+]);
 
 const registry=JSON.parse(readFileSync(
   new URL("../../contracts/registry.json",import.meta.url),
@@ -637,15 +644,30 @@ async function migrateLegacyArtifactDirectory(rootInfo,documentType,artifactId) 
   await syncContainingDirectory(rootInfo,parent);
 }
 
-export function createArtifactStore({root,now=() => new Date(),randomId=randomUUID}={}) {
+export function createArtifactStore({
+  root,
+  now=() => new Date(),
+  randomId=randomUUID,
+  operationObserver,
+}={}) {
   if (typeof root!=="string" || root.length===0) {
     throw new TypeError("createArtifactStore requires a root path");
   }
   if (typeof now!=="function" || typeof randomId!=="function") {
     throw new TypeError("createArtifactStore now and randomId must be functions");
   }
+  if (operationObserver!==undefined && typeof operationObserver!=="function") {
+    throw new TypeError("createArtifactStore operationObserver must be a function");
+  }
 
   let lockSequence=0;
+
+  function observeOperation(phase) {
+    if (!OPERATION_PHASES.includes(phase)) {
+      throw new ArtifactStoreError(`Unknown artifact-store operation phase: ${phase}`);
+    }
+    if (operationObserver) operationObserver(phase);
+  }
 
   function nextLockOwner() {
     const token=String(randomId());
@@ -720,17 +742,46 @@ export function createArtifactStore({root,now=() => new Date(),randomId=randomUU
     return value;
   }
 
-  async function findArtifactByIdentity(rootInfo,reference) {
-    const matches=[];
-    for (const path of (await scanArtifactTree(rootInfo)).finalPaths) {
-      const artifact=await readArtifact(rootInfo,path);
-      if (artifact.artifact_id===reference.artifact_id &&
-          artifact.revision===reference.revision &&
-          (reference.document_type===undefined ||
-            artifact.document_type===reference.document_type)) {
-        matches.push({artifact,path});
+  function snapshotIdentityKey(artifactId,revision) {
+    return `${artifactId}\u0000${revision}`;
+  }
+
+  function addSnapshotRow(snapshot,row) {
+    snapshot.rows.push(row);
+    const key=snapshotIdentityKey(row.artifact.artifact_id,row.artifact.revision);
+    const bucket=snapshot.identityBuckets.get(key);
+    if (bucket) bucket.push(row);
+    else snapshot.identityBuckets.set(key,[row]);
+  }
+
+  function assertUniqueSnapshotIdentities(snapshot) {
+    for (const bucket of snapshot.identityBuckets.values()) {
+      if (bucket.length>1) {
+        throw new ArtifactIntegrityError(
+          `Multiple artifacts share identity ${describeReference(bucket[0].artifact)}`,
+        );
       }
     }
+  }
+
+  async function artifactSnapshot(rootInfo,phase) {
+    observeOperation(phase);
+    const snapshot={rows:[],identityBuckets:new Map()};
+    for (const path of (await scanArtifactTree(rootInfo)).finalPaths) {
+      addSnapshotRow(snapshot,{artifact:await readArtifact(rootInfo,path),path});
+    }
+    assertUniqueSnapshotIdentities(snapshot);
+    return snapshot;
+  }
+
+  function findArtifactByIdentity(snapshot,reference) {
+    const matches=(snapshot.identityBuckets.get(snapshotIdentityKey(
+      reference.artifact_id,
+      reference.revision,
+    )) ?? []).filter(row =>
+      reference.document_type===undefined ||
+      row.artifact.document_type===reference.document_type,
+    );
     if (matches.length===0) {
       throw new ArtifactNotFoundError(`Artifact not found: ${describeReference(reference)}`);
     }
@@ -742,9 +793,9 @@ export function createArtifactStore({root,now=() => new Date(),randomId=randomUU
     return matches[0];
   }
 
-  async function findArtifact(rootInfo,reference) {
+  function findArtifact(snapshot,reference) {
     const normalized=normalizeReference(reference);
-    const match=await findArtifactByIdentity(rootInfo,normalized);
+    const match=findArtifactByIdentity(snapshot,normalized);
     if (match.artifact.content_sha256!==normalized.content_sha256) {
       throw new ArtifactIntegrityError(
         `Content hash mismatch for ${describeReference(normalized)}`,
@@ -753,7 +804,7 @@ export function createArtifactStore({root,now=() => new Date(),randomId=randomUU
     return match;
   }
 
-  async function assertPersistedLineage(rootInfo,artifact) {
+  async function assertPersistedLineage(snapshot,artifact) {
     if (artifact.revision===1) {
       if (artifact.parents.length!==0) {
         throw new ArtifactIntegrityError("Revision 1 must have empty parents");
@@ -762,7 +813,7 @@ export function createArtifactStore({root,now=() => new Date(),randomId=randomUU
     }
     let predecessor;
     try {
-      predecessor=await findArtifactByIdentity(rootInfo,{
+      predecessor=findArtifactByIdentity(snapshot,{
         artifact_id:artifact.artifact_id,
         revision:artifact.revision-1,
         document_type:artifact.document_type,
@@ -784,19 +835,19 @@ export function createArtifactStore({root,now=() => new Date(),randomId=randomUU
     }
   }
 
-  async function verifyArtifact(rootInfo,artifact,visited) {
+  async function verifyArtifact(snapshot,artifact,visited) {
     const key=`${artifact.document_type}\u0000${artifact.artifact_id}\u0000${artifact.revision}`;
     if (visited.has(key)) {
       throw new ArtifactIntegrityError(`Cyclic artifact reference at ${key}`);
     }
     visited.add(key);
     try {
-      await assertPersistedLineage(rootInfo,artifact);
+      await assertPersistedLineage(snapshot,artifact);
       for (const [kind,references] of [["parent",artifact.parents],["input",artifact.inputs]]) {
         for (const reference of references) {
           try {
-            const target=await findArtifact(rootInfo,reference);
-            await verifyArtifact(rootInfo,target.artifact,visited);
+            const target=findArtifact(snapshot,reference);
+            await verifyArtifact(snapshot,target.artifact,visited);
           } catch (error) {
             if (error instanceof ArtifactNotFoundError) {
               throw new ArtifactReferenceError(
@@ -813,32 +864,35 @@ export function createArtifactStore({root,now=() => new Date(),randomId=randomUU
     }
   }
 
-  async function verify(reference) {
+  async function readOperation(reference,phase) {
     const rootInfo=await prepareRoot(root);
-    const match=await findArtifact(rootInfo,reference);
-    await verifyArtifact(rootInfo,match.artifact,new Set());
+    const snapshot=await artifactSnapshot(rootInfo,phase);
+    const match=findArtifact(snapshot,reference);
+    await verifyArtifact(snapshot,match.artifact,new Set());
     return match.artifact;
   }
 
-  async function get(reference) {
-    return verify(reference);
+  async function verify(reference) {
+    return readOperation(reference,"verify:snapshot");
   }
 
-  async function artifactsForIdentity(rootInfo,documentType,artifactId) {
+  async function get(reference) {
+    return readOperation(reference,"get:snapshot");
+  }
+
+  async function artifactsForIdentity(snapshot,documentType,artifactId) {
     const artifacts=[];
-    for (const path of (await scanArtifactTree(rootInfo)).finalPaths) {
-      const artifact=await readArtifact(rootInfo,path);
+    for (const {artifact} of snapshot.rows) {
       if (artifact.document_type===documentType && artifact.artifact_id===artifactId) {
-        await verifyArtifact(rootInfo,artifact,new Set());
+        await verifyArtifact(snapshot,artifact,new Set());
         artifacts.push(artifact);
       }
     }
     return artifacts.sort((left,right) => left.revision-right.revision);
   }
 
-  async function assertArtifactIdDocumentType(rootInfo,documentType,artifactId) {
-    for (const path of (await scanArtifactTree(rootInfo)).finalPaths) {
-      const artifact=await readArtifact(rootInfo,path);
+  function assertArtifactIdDocumentType(snapshot,documentType,artifactId) {
+    for (const {artifact} of snapshot.rows) {
       if (artifact.artifact_id===artifactId && artifact.document_type!==documentType) {
         throw new ArtifactValidationError(
           `artifact_id ${artifactId} is already bound to document type ${artifact.document_type}`,
@@ -847,11 +901,12 @@ export function createArtifactStore({root,now=() => new Date(),randomId=randomUU
     }
   }
 
-  async function verifyDraftReferences(artifact) {
+  async function verifyDraftReferences(snapshot,artifact) {
     for (const [kind,references] of [["parent",artifact.parents],["input",artifact.inputs]]) {
       for (const reference of references) {
         try {
-          await verify(reference);
+          const target=findArtifact(snapshot,reference);
+          await verifyArtifact(snapshot,target.artifact,new Set());
         } catch (error) {
           if (error instanceof ArtifactNotFoundError) {
             throw new ArtifactReferenceError(
@@ -1072,19 +1127,20 @@ export function createArtifactStore({root,now=() => new Date(),randomId=randomUU
         artifact.document_type,
         artifactDirectoryName(artifact.artifact_id),
       ]);
-      await assertArtifactIdDocumentType(
-        rootInfo,
+      const snapshot=await artifactSnapshot(rootInfo,"append:snapshot");
+      assertArtifactIdDocumentType(
+        snapshot,
         artifact.document_type,
         artifact.artifact_id,
       );
       const existing=await artifactsForIdentity(
-        rootInfo,
+        snapshot,
         artifact.document_type,
         artifact.artifact_id,
       );
 
       // References are intentionally verified before any content-hash reuse.
-      await verifyDraftReferences(artifact);
+      await verifyDraftReferences(snapshot,artifact);
 
       const atRequestedRevision=requestedRevision===undefined ? undefined :
         existing.find(candidate => candidate.revision===requestedRevision);
@@ -1129,12 +1185,18 @@ export function createArtifactStore({root,now=() => new Date(),randomId=randomUU
         artifactFileName(artifact.revision,artifact.content_sha256),
       );
       await writeAtomically(rootInfo,path,artifact,lock);
-      return verify({
+      observeOperation("append:post-rename-read");
+      const persisted=await readArtifact(rootInfo,path);
+      addSnapshotRow(snapshot,{artifact:persisted,path});
+      assertUniqueSnapshotIdentities(snapshot);
+      const match=findArtifact(snapshot,{
         artifact_id:artifact.artifact_id,
         revision:artifact.revision,
         content_sha256:artifact.content_sha256,
         document_type:artifact.document_type,
       });
+      await verifyArtifact(snapshot,match.artifact,new Set());
+      return match.artifact;
     });
   }
 
@@ -1143,10 +1205,12 @@ export function createArtifactStore({root,now=() => new Date(),randomId=randomUU
       throw new ArtifactValidationError("list filter must be an object");
     }
     const rootInfo=await prepareRoot(root);
+    const snapshot=await artifactSnapshot(rootInfo,"list:snapshot");
+    for (const {artifact} of snapshot.rows) {
+      await verifyArtifact(snapshot,artifact,new Set());
+    }
     const artifacts=[];
-    for (const path of (await scanArtifactTree(rootInfo)).finalPaths) {
-      const artifact=await readArtifact(rootInfo,path);
-      await verifyArtifact(rootInfo,artifact,new Set());
+    for (const {artifact} of snapshot.rows) {
       const matches=Object.entries(filter).every(([field,value]) =>
         artifact[field]===value,
       );

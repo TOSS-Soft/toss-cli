@@ -383,6 +383,11 @@ test("the checked-in inventory owns every executable entry exactly once",async (
   assert.equal(selected.some(entry => entry.startsWith("test/support/") || entry.startsWith("test/fixtures/")),false);
 });
 
+test("the checked-in inventory uses the measured stable concurrency",async () => {
+  const manifest=await readCheckedInManifest();
+  assert.equal(manifest.concurrency,4);
+});
+
 test("the checked-in inventory rejects a removed real entry",async () => {
   const manifest=await readCheckedInManifest();
   manifest.lanes.fast.shift();

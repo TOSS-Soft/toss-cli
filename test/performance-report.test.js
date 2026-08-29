@@ -135,6 +135,17 @@ test("report requires three compatible successful samples",() => {
   }),/exactly three/);
 });
 
+test("report construction ignores complete process-entry diagnostics",() => {
+  const diagnosticSample=wall_ms => ({
+    ...sample(wall_ms),
+    entry_processes:[{name:"test/a.test.js",duration_ms:wall_ms,status:"pass"}],
+  });
+  const report=createPerformanceReport({
+    command,lane:"full",identity,samples:[1000,1100,1200].map(diagnosticSample),
+  });
+  assert.equal("entry_processes" in report.samples[0],false);
+});
+
 test("report records one exact closed executable and argument vector",() => {
   const report=createPerformanceReport({
     command,lane:"full",identity,

@@ -81,6 +81,9 @@ test("full is the complete unique ownership union without support entries",async
     normalizedManifest(),discoverEligibleTestEntries(root),
   ]);
   const full=selectTestEntries(manifest,"full");
+  assert.equal(Number.isInteger(manifest.concurrency),true);
+  assert.ok(manifest.concurrency>=1 && manifest.concurrency<=4);
+  assert.equal(manifest.concurrency,4);
   assert.deepEqual(full,OWNERSHIP_LANES.flatMap(lane => manifest.lanes[lane]));
   assert.equal(full.length,eligibleEntries.length);
   assert.equal(new Set(full).size,eligibleEntries.length);
