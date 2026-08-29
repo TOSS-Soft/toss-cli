@@ -16,7 +16,7 @@ export function parseBudgetOptions(argv) {
       options.json=true;
       continue;
     }
-    if (!["--baseline","--report","--lane"].includes(option)) {
+    if (!["--baseline","--report","--lane","--baseline-lock","--candidate-lock"].includes(option)) {
       throw new TypeError(`unknown option ${String(option)}`);
     }
     if (seen.has(option)) throw new TypeError(`duplicate option ${option}`);
@@ -26,6 +26,8 @@ export function parseBudgetOptions(argv) {
     index+=1;
     if (option==="--baseline") options.baseline=value;
     if (option==="--report") options.report=value;
+    if (option==="--baseline-lock") options.baselineLock=value;
+    if (option==="--candidate-lock") options.candidateLock=value;
     if (option==="--lane") {
       if (value!=="fast" && value!=="full") throw new TypeError("budget lane must be fast or full");
       options.lane=value;
@@ -35,6 +37,9 @@ export function parseBudgetOptions(argv) {
     throw new TypeError("budget requires --baseline and --report");
   }
   if (options.lane===undefined) throw new TypeError("budget requires --lane");
+  if ((options.baselineLock===undefined)!==(options.candidateLock===undefined)) {
+    throw new TypeError("budget requires both --baseline-lock and --candidate-lock");
+  }
   return Object.freeze(options);
 }
 
@@ -57,14 +62,36 @@ async function readJson(path) {
 
 class PerformanceEvidenceError extends Error {}
 
+async function readLockEvidence(options) {
+  if (options.baselineLock===undefined) return undefined;
+  let baselineLockSource;
+  let candidateLockSource;
+  try {
+    [baselineLockSource,candidateLockSource]=await Promise.all([
+      readFile(options.baselineLock,"utf8"),readFile(options.candidateLock,"utf8"),
+    ]);
+  } catch (error) {
+    if (error?.code==="ENOENT" || error?.code==="EACCES" || error?.code==="EISDIR") {
+      throw new PerformanceEvidenceError("unable to read performance lock evidence");
+    }
+    throw error;
+  }
+  return {baselineLockSource,candidateLockSource};
+}
+
 function writeResult(result,json) {
   process.stdout.write(json ? canonicalJson(result) : `${result.message}\n`);
 }
 
 export async function runBudgetCheck(argv) {
   const options=parseBudgetOptions(argv);
-  const [baseline,report]=await Promise.all([readJson(options.baseline),readJson(options.report)]);
-  return {result:comparePerformanceBudget(baseline,report,options.lane),json:options.json};
+  const [baseline,report,lockEvidence]=await Promise.all([
+    readJson(options.baseline),readJson(options.report),readLockEvidence(options),
+  ]);
+  return {
+    result:comparePerformanceBudget(baseline,report,options.lane,lockEvidence),
+    json:options.json,
+  };
 }
 
 async function main(argv) {
@@ -77,8 +104,10 @@ async function main(argv) {
     return;
   }
   try {
-    const [baseline,report]=await Promise.all([readJson(options.baseline),readJson(options.report)]);
-    const result=comparePerformanceBudget(baseline,report,options.lane);
+    const [baseline,report,lockEvidence]=await Promise.all([
+      readJson(options.baseline),readJson(options.report),readLockEvidence(options),
+    ]);
+    const result=comparePerformanceBudget(baseline,report,options.lane,lockEvidence);
     const {json}=options;
     writeResult(result,json);
     process.exitCode=result.ok ? 0 : 5;

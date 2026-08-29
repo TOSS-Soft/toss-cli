@@ -16,6 +16,8 @@ jobs:
     outputs:
       version: ${{ steps.metadata.outputs.version }}
       artifact_name: ${{ steps.metadata.outputs.artifact_name }}
+      notes_path: ${{ steps.metadata.outputs.notes_path }}
+      release_commit: ${{ steps.metadata.outputs.release_commit }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -32,7 +34,12 @@ jobs:
         run: |
           set -euo pipefail
           git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
-          node ./scripts/release-metadata.mjs "$GITHUB_REF_NAME" refs/remotes/origin/main
+          mkdir -p .superpowers/sdd/2026-08-22-v2.1.1-issue-88-release
+          node ./scripts/release-metadata.mjs \
+            "$GITHUB_REF_NAME" \
+            refs/remotes/origin/main \
+            --json-output \
+            .superpowers/sdd/2026-08-22-v2.1.1-issue-88-release/release-metadata.json
 
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
@@ -46,15 +53,23 @@ jobs:
           set -euo pipefail
           mkdir -p dist
           npm pack --json --ignore-scripts --pack-destination dist
-          TARBALL="$(find "$PWD/dist" -maxdepth 1 -name '*.tgz' -type f -print -quit)"
-          test -n "$TARBALL"
+          VERSION="${{ steps.metadata.outputs.version }}"
+          TARBALL="$PWD/dist/toss-software-cli-$VERSION.tgz"
+          test -f "$TARBALL"
+          test ! -L "$TARBALL"
+          test "$(find "$PWD/dist" -maxdepth 1 -name '*.tgz' -type f -print | wc -l)" -eq 1
           SHA256="$(sha256sum "$TARBALL" | awk '{print $1}')"
           [[ "$SHA256" =~ ^[0-9a-f]{64}$ ]]
+          cp \
+            .superpowers/sdd/2026-08-22-v2.1.1-issue-88-release/release-metadata.json \
+            dist/release-metadata.json
 
       - uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.metadata.outputs.artifact_name }}
-          path: dist/*.tgz
+          path: |
+            dist/toss-software-cli-${{ steps.metadata.outputs.version }}.tgz
+            dist/release-metadata.json
           if-no-files-found: error
           compression-level: 0
 
@@ -140,38 +155,177 @@ jobs:
     needs: [validate, publish_npm, publish_github_packages]
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    permissions: { contents: write }
+    permissions:
+      contents: write
+      packages: read
     steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@toss-soft'
+          package-manager-cache: false
+
       - uses: actions/download-artifact@v8
         with:
           name: ${{ needs.validate.outputs.artifact_name }}
           path: dist
 
-      - name: Create or update GitHub Release
+      - name: Create and verify GitHub Release evidence
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          NODE_AUTH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.validate.outputs.version }}
+          NOTES_PATH: ${{ needs.validate.outputs.notes_path }}
+          RELEASE_COMMIT: ${{ needs.validate.outputs.release_commit }}
         run: |
           set -euo pipefail
-          TARBALL="$(find "$PWD/dist" -maxdepth 1 -name '*.tgz' -type f -print -quit)"
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release edit "$GITHUB_REF_NAME" --title "$GITHUB_REF_NAME" --draft=false --prerelease=false --latest
-            gh release upload "$GITHUB_REF_NAME" "$TARBALL" --clobber
-          else
-            gh release create "$GITHUB_REF_NAME" "$TARBALL" --verify-tag --generate-notes --latest --title "$GITHUB_REF_NAME"
-          fi
-          gh release view "$GITHUB_REF_NAME" --json tagName,isDraft,isPrerelease,url,assets > release.json
-          node --input-type=module <<'NODE'
+          METADATA="$PWD/dist/release-metadata.json"
+          TARBALL="$PWD/dist/toss-software-cli-$VERSION.tgz"
+          test -f "$METADATA"
+          test ! -L "$METADATA"
+          test -f "$TARBALL"
+          test ! -L "$TARBALL"
+          test "$(find "$PWD/dist" -maxdepth 1 -name '*.tgz' -type f -print | wc -l)" -eq 1
+          test "$GITHUB_REF_NAME" = "v$VERSION"
+          test "$NOTES_PATH" = "docs/releases/v$VERSION.md"
+          test -f "$NOTES_PATH"
+          test ! -L "$NOTES_PATH"
+          CHECKED_OUT_COMMIT="$(git rev-parse HEAD)"
+          test "$CHECKED_OUT_COMMIT" = "$RELEASE_COMMIT"
+          METADATA_COMMIT="$(node --input-type=module - "$METADATA" <<'NODE'
           import { readFileSync } from 'node:fs';
 
-          const release = JSON.parse(readFileSync('release.json', 'utf8'));
-          if (
-            release.tagName !== process.env.GITHUB_REF_NAME ||
-            release.isDraft ||
-            release.isPrerelease ||
-            !release.assets.some((asset) => asset.name.endsWith('.tgz'))
-          ) {
-            throw new Error('GitHub Release verification failed');
+          const metadata = JSON.parse(readFileSync(process.argv[2], 'utf8'));
+          if (metadata === null || typeof metadata !== 'object' || Array.isArray(metadata) ||
+              typeof metadata.commit !== 'string' || !/^[0-9a-f]{40}$/.test(metadata.commit)) {
+            throw new Error('Downloaded release metadata has an invalid commit');
+          }
+          process.stdout.write(metadata.commit);
+          NODE
+          )"
+          if [[ "$METADATA_COMMIT" != "$RELEASE_COMMIT" || "$METADATA_COMMIT" != "$CHECKED_OUT_COMMIT" ]]; then
+            echo "Downloaded release metadata commit does not match the verified release commit" >&2
+            exit 1
+          fi
+
+          TARBALL_NAME="$(basename "$TARBALL")"
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" \
+              --jq '[.assets[]|{name:.name,digest:.digest}]' > existing-release-assets.json
+            EXISTING_TARBALL_MODE="$(node --input-type=module - \
+              "$TARBALL" "$TARBALL_NAME" existing-release-assets.json <<'NODE'
+          import { createHash } from 'node:crypto';
+          import {
+            closeSync, constants, fstatSync, openSync, readFileSync
+          } from 'node:fs';
+
+          const [tarballPath, tarballName, assetsPath] = process.argv.slice(2);
+          const assets = JSON.parse(readFileSync(assetsPath, 'utf8'));
+          if (!Array.isArray(assets)) {
+            throw new Error('Existing GitHub Release assets must be an array');
+          }
+          const canonical = assets.filter((asset) => asset?.name === tarballName);
+          if (canonical.length === 0) {
+            process.stdout.write('upload');
+            process.exit(0);
+          }
+          if (canonical.length !== 1) {
+            throw new Error('Existing GitHub Release has an ambiguous canonical tarball');
+          }
+          if (typeof canonical[0].digest !== 'string' ||
+              !/^sha256:[0-9a-f]{64}$/.test(canonical[0].digest)) {
+            throw new Error('Existing GitHub Release tarball digest is unavailable or malformed');
+          }
+          const descriptor = openSync(tarballPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+          let localDigest;
+          try {
+            if (!fstatSync(descriptor).isFile()) {
+              throw new Error('Local release tarball must be a regular file');
+            }
+            localDigest = `sha256:${createHash('sha256').update(readFileSync(descriptor)).digest('hex')}`;
+          } finally {
+            closeSync(descriptor);
+          }
+          if (canonical[0].digest !== localDigest) {
+            throw new Error('Existing GitHub Release tarball digest does not match the local tarball');
+          }
+          process.stdout.write('retain');
+          NODE
+            )"
+            gh release edit "$GITHUB_REF_NAME" \
+              --title "$GITHUB_REF_NAME" \
+              --notes-file "$NOTES_PATH" \
+              --draft=false \
+              --prerelease=false \
+              --latest
+            if [[ "$EXISTING_TARBALL_MODE" = "upload" ]]; then
+              gh release upload "$GITHUB_REF_NAME" "$TARBALL"
+            fi
+          else
+            gh release create "$GITHUB_REF_NAME" "$TARBALL" \
+              --verify-tag \
+              --notes-file "$NOTES_PATH" \
+              --latest \
+              --title "$GITHUB_REF_NAME"
+          fi
+
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" \
+            --jq '.assets[].name' > release-assets.txt
+          while IFS= read -r ASSET_NAME; do
+            if [[ -n "$ASSET_NAME" && "$ASSET_NAME" != "$TARBALL_NAME" ]]; then
+              gh release delete-asset "$GITHUB_REF_NAME" "$ASSET_NAME" --yes
+            fi
+          done < release-assets.txt
+          rm release-assets.txt
+
+          NPM_VERSION="$(npm view "@toss-software/cli@$VERSION" version --registry=https://registry.npmjs.org)"
+          test "$NPM_VERSION" = "$VERSION"
+          GITHUB_PACKAGE_VERSION="$(npm view "@toss-soft/cli@$VERSION" version --registry=https://npm.pkg.github.com)"
+          test "$GITHUB_PACKAGE_VERSION" = "$VERSION"
+          NPM_PACKAGE="@toss-software/cli@$NPM_VERSION"
+          GITHUB_PACKAGE="@toss-soft/cli@$GITHUB_PACKAGE_VERSION"
+
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" \
+            --jq '{tagName:.tag_name,url:.html_url,isDraft:.draft,isPrerelease:.prerelease,assets:[.assets[]|{name:.name,digest:.digest}]}' \
+            > release.json
+          node ./scripts/release-evidence.mjs create \
+            "$METADATA" \
+            "$TARBALL" \
+            "$NPM_PACKAGE" \
+            "$GITHUB_PACKAGE" \
+            release.json \
+            release-evidence.json
+          node ./scripts/release-evidence.mjs validate release-evidence.json
+          gh release upload "$GITHUB_REF_NAME" "$PWD/release-evidence.json" --clobber
+
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" \
+            --jq '{tagName:.tag_name,url:.html_url,isDraft:.draft,isPrerelease:.prerelease,assets:[.assets[]|{name:.name,digest:.digest}]}' \
+            > release-final.json
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+          import { validateReleaseEvidence } from './scripts/release-evidence.mjs';
+
+          const evidence = validateReleaseEvidence(
+            JSON.parse(readFileSync('release-evidence.json', 'utf8'))
+          );
+          const release = JSON.parse(readFileSync('release-final.json', 'utf8'));
+          const expectedNames = [evidence.tarball.name, 'release-evidence.json'].sort();
+          const actualNames = release.assets.map((asset) => asset.name).sort();
+          const tarball = release.assets.find((asset) => asset.name === evidence.tarball.name);
+          const evidenceAsset = release.assets.find((asset) => asset.name === 'release-evidence.json');
+          if (release.tagName !== evidence.tag || release.url !== evidence.release.url ||
+              release.isDraft !== false || release.isPrerelease !== false ||
+              JSON.stringify(actualNames) !== JSON.stringify(expectedNames) ||
+              tarball?.digest !== `sha256:${evidence.tarball.sha256}` ||
+              !/^sha256:[0-9a-f]{64}$/.test(evidenceAsset?.digest ?? '')) {
+            throw new Error('GitHub Release assets do not match validated release evidence');
           }
           NODE

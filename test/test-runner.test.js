@@ -257,7 +257,7 @@ test("executeTestEntry runs only one explicit passing platform path without an u
   assert.match(`${result.stdout}${result.stderr}`,/PASSING_STDOUT_MARKER/);
   assert.match(`${result.stdout}${result.stderr}`,/PASSING_STDERR_MARKER/);
   const output=`${result.stdout}${result.stderr}`;
-  const execArgv=output.match(/PASSING_EXEC_ARGV:(\[[^\n]+\])/);
+  const execArgv=output.match(/PASSING_EXEC_ARGV:(\[[^\n]*\])/);
   const argv=output.match(/PASSING_ARGV:(\[[^\n]+\])/);
   assert.notEqual(execArgv,null);
   assert.notEqual(argv,null);

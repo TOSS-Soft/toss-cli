@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {execFileSync,spawnSync} from "node:child_process";
+import {createHash} from "node:crypto";
 import {readFileSync} from "node:fs";
 import {chmod,link,mkdir,mkdtemp,readdir,realpath,rm,symlink,writeFile} from "node:fs/promises";
 import {tmpdir} from "node:os";
@@ -20,6 +21,20 @@ const identity={
   lock_sha256:"a".repeat(64),runner_id:"toss-reference-macos-node26",
 };
 const command={executable:"npm",arguments:["test"]};
+
+function lockSource(version,{integrity="sha512-same"}={}) {
+  return `${JSON.stringify({
+    name:"fixture",version,lockfileVersion:3,requires:true,
+    packages:{
+      "":{name:"fixture",version,dependencies:{dependency:"1.0.0"}},
+      "node_modules/dependency":{version:"1.0.0",integrity},
+    },
+  })}\n`;
+}
+
+function lockDigest(source) {
+  return createHash("sha256").update(source).digest("hex");
+}
 const sample=wall_ms => ({
   wall_ms,user_cpu_ms:10,system_cpu_ms:5,exit_status:0,
   fresh_process_count:2,peak_process_count:1,duplicates:[],
@@ -447,6 +462,82 @@ test("budget CLI compares truthful fast reports against the full-origin baseline
     const payload=JSON.parse(result.stdout);
     assert.equal(payload.code,code);
     if (message) assert.match(payload.message,message);
+  }
+});
+
+test("budget CLI accepts only paired hash-bound release-only lock evidence",async t => {
+  const root=await mkdtemp(join(tmpdir(),"toss-release-lock-budget-cli-"));
+  t.after(() => rm(root,{recursive:true,force:true}));
+  const baselineLockSource=lockSource("2.1.0");
+  const candidateLockSource=lockSource("2.1.1");
+  const baselinePath=join(root,"baseline.json");
+  const reportPath=join(root,"report.json");
+  const baselineLockPath=join(root,"baseline-package-lock.json");
+  const candidateLockPath=join(root,"candidate-package-lock.json");
+  const baseline=baselineDocument({
+    exactIdentity:{...identity,lock_sha256:lockDigest(baselineLockSource)},
+  });
+  const fastCommand={executable:"npm",arguments:["run","test:fast"]};
+  const candidate=reportDocument({
+    walls:[1000,1000,1000],lane:"fast",exactCommand:fastCommand,
+    exactIdentity:{...identity,lock_sha256:lockDigest(candidateLockSource)},
+  });
+  await writeFile(baselinePath,JSON.stringify(baseline));
+  await writeFile(reportPath,JSON.stringify(candidate));
+  await writeFile(baselineLockPath,baselineLockSource);
+  await writeFile(candidateLockPath,candidateLockSource);
+
+  const baseArguments=[
+    "--baseline",baselinePath,"--report",reportPath,"--lane","fast","--json",
+  ];
+  const paired=[
+    ...baseArguments,"--baseline-lock",baselineLockPath,"--candidate-lock",candidateLockPath,
+  ];
+  const passed=spawnSync(process.execPath,[budgetCli,...paired],{encoding:"utf8"});
+  assert.equal(passed.status,0,passed.stderr);
+  assert.equal(JSON.parse(passed.stdout).code,"PERFORMANCE_BUDGET_OK");
+
+  const strict=spawnSync(process.execPath,[budgetCli,...baseArguments],{encoding:"utf8"});
+  assert.equal(strict.status,5,strict.stderr);
+  assert.equal(JSON.parse(strict.stdout).code,"INCOMPATIBLE_PERFORMANCE_ENVIRONMENT");
+
+  for (const oneSided of [
+    ["--baseline-lock",baselineLockPath],
+    ["--candidate-lock",candidateLockPath],
+  ]) {
+    const result=spawnSync(process.execPath,[budgetCli,...baseArguments,...oneSided],{
+      encoding:"utf8",
+    });
+    assert.equal(result.status,2,result.stderr);
+    assert.match(result.stderr,/requires both --baseline-lock and --candidate-lock/);
+  }
+
+  const invalidCases=[
+    ["malformed","{",candidateLockSource,/baseline lock source.*JSON/i],
+    ["shape",baselineLockSource,'{"version":"2.1.1","packages":[]}',/candidate lockfile.*packages/i],
+    ["hash",baselineLockSource,`${candidateLockSource} `,/candidate lock source SHA-256/i],
+    ["dependency",baselineLockSource,lockSource("2.1.1",{integrity:"sha512-drift"}),
+      /beyond release version fields/i],
+  ];
+  for (const [name,baselineSource,candidateSource,message] of invalidCases) {
+    const caseBaselineLock=join(root,`${name}-baseline-lock.json`);
+    const caseCandidateLock=join(root,`${name}-candidate-lock.json`);
+    const caseReport=join(root,`${name}-report.json`);
+    await writeFile(caseBaselineLock,baselineSource);
+    await writeFile(caseCandidateLock,candidateSource);
+    await writeFile(caseReport,JSON.stringify(reportDocument({
+      walls:[1000,1000,1000],lane:"fast",exactCommand:fastCommand,
+      exactIdentity:{...identity,lock_sha256:
+        name==="dependency" ? lockDigest(candidateSource) : lockDigest(candidateLockSource)},
+    })));
+    const result=spawnSync(process.execPath,[budgetCli,
+      "--baseline",baselinePath,"--report",caseReport,"--lane","fast","--json",
+      "--baseline-lock",caseBaselineLock,"--candidate-lock",caseCandidateLock,
+    ],{encoding:"utf8"});
+    assert.equal(result.status,5,result.stderr);
+    const payload=JSON.parse(result.stdout);
+    assert.equal(payload.code,"INVALID_PERFORMANCE_EVIDENCE");
+    assert.match(payload.message,message);
   }
 });
 

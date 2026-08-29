@@ -1,4 +1,5 @@
 import {canonicalJson} from "../../src/contracts/acp.js";
+import {createHash} from "node:crypto";
 import path from "node:path";
 
 export const PERFORMANCE_REPORT_VERSION="toss-test-performance-report.v1";
@@ -455,12 +456,69 @@ export function validatePerformanceReport(report) {
   );
 }
 
-export function compatiblePerformanceIdentity(baseline,candidate) {
-  return ["node_version","platform","arch","lock_sha256","runner_id"]
-    .every(key => baseline[key]===candidate[key]);
+function parseLockSource(source,label) {
+  if (typeof source!=="string") throw new TypeError(`${label} lock source must be a string`);
+  let lockfile;
+  try {
+    lockfile=JSON.parse(source);
+  } catch {
+    throw new TypeError(`${label} lock source must contain valid JSON`);
+  }
+  const root=plainRecord(lockfile,`${label} lockfile`);
+  if (!Object.hasOwn(root,"version") || typeof root.version!=="string") {
+    throw new TypeError(`${label} lockfile requires string root version`);
+  }
+  const packages=plainRecord(root.packages,`${label} lockfile packages`);
+  const packageRoot=plainRecord(packages[""],`${label} lockfile root package`);
+  if (!Object.hasOwn(packageRoot,"version") || typeof packageRoot.version!=="string") {
+    throw new TypeError(`${label} lockfile root package requires string version`);
+  }
+  const normalized=structuredClone(root);
+  normalized.version="<release-version>";
+  normalized.packages[""].version="<release-version>";
+  return {
+    sha256:createHash("sha256").update(source).digest("hex"),
+    normalized,
+  };
 }
 
-export function comparePerformanceBudget(baseline,candidate,lane) {
+function pairedLockEvidence(value) {
+  if (value===undefined) return undefined;
+  const evidence=closedRecord(value,"performance lock evidence",[],[
+    "baselineLockSource","candidateLockSource",
+  ]);
+  const hasBaseline=Object.hasOwn(evidence,"baselineLockSource");
+  const hasCandidate=Object.hasOwn(evidence,"candidateLockSource");
+  if (hasBaseline!==hasCandidate) {
+    throw new TypeError(
+      "performance lock evidence requires both baselineLockSource and candidateLockSource",
+    );
+  }
+  return hasBaseline ? evidence : undefined;
+}
+
+export function compatiblePerformanceIdentity(baseline,candidate,lockEvidence) {
+  const evidence=pairedLockEvidence(lockEvidence);
+  let lockCompatible=baseline.lock_sha256===candidate.lock_sha256;
+  if (evidence!==undefined) {
+    const baselineLock=parseLockSource(evidence.baselineLockSource,"baseline");
+    const candidateLock=parseLockSource(evidence.candidateLockSource,"candidate");
+    if (baselineLock.sha256!==baseline.lock_sha256) {
+      throw new TypeError("baseline lock source SHA-256 must match performance identity");
+    }
+    if (candidateLock.sha256!==candidate.lock_sha256) {
+      throw new TypeError("candidate lock source SHA-256 must match performance identity");
+    }
+    if (canonicalJson(baselineLock.normalized)!==canonicalJson(candidateLock.normalized)) {
+      throw new TypeError("performance lock evidence differs beyond release version fields");
+    }
+    lockCompatible=true;
+  }
+  return ["node_version","platform","arch","runner_id"]
+    .every(key => baseline[key]===candidate[key]) && lockCompatible;
+}
+
+export function comparePerformanceBudget(baseline,candidate,lane,lockEvidence) {
   const baselineReport=validatePerformanceBaseline(baseline);
   if (lane!=="fast" && lane!=="full") throw new TypeError("performance lane must be fast or full");
   if (baselineReport.lane!=="full") {
@@ -485,7 +543,9 @@ export function comparePerformanceBudget(baseline,candidate,lane) {
   const limit_ms=lane==="fast" ? baselineReport.budgets.fast_max_wall_ms :
     baselineReport.budgets.full_max_wall_ms;
   const actual_ms=candidateReport.medians.wall_ms;
-  if (!compatiblePerformanceIdentity(baselineReport.identity,candidateReport.identity)) {
+  if (!compatiblePerformanceIdentity(
+    baselineReport.identity,candidateReport.identity,lockEvidence,
+  )) {
     return {
       ok:false,code:PERFORMANCE_CODES.INCOMPATIBLE_ENVIRONMENT,limit_ms,actual_ms,
       message:"Performance reports use incompatible environments.",
