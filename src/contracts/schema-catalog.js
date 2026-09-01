@@ -1,7 +1,7 @@
 const ROW_KEYS=["schemaId","uri","relativePath"];
 const SCHEMA_ID=/^[a-z0-9]+(?:-[a-z0-9]+)*(?:\.v[1-9][0-9]*)?$/;
-const URI=/^https:\/\/toss\.software\/schemas\/(agents|common|design|pipeline)\/([a-z0-9]+(?:-[a-z0-9]+)*(?:\.v[1-9][0-9]*)?)\.schema\.json$/;
-const RELATIVE_PATH=/^\.\.\/\.\.\/contracts\/(agents|common|design|pipeline)\/([a-z0-9]+(?:-[a-z0-9]+)*(?:\.v[1-9][0-9]*)?\.schema\.json)$/;
+const URI=/^https:\/\/toss\.software\/schemas\/(agents|common|core|design|pipeline)\/([a-z0-9]+(?:-[a-z0-9]+)*(?:\.v[1-9][0-9]*)?)\.schema\.json$/;
+const RELATIVE_PATH=/^\.\.\/\.\.\/contracts\/(agents|common|core|design|pipeline)\/([a-z0-9]+(?:-[a-z0-9]+)*(?:\.v[1-9][0-9]*)?\.schema\.json)$/;
 
 function catalogError(message) {
   throw new Error(`Invalid contract schema catalog: ${message}`);
@@ -103,6 +103,7 @@ const definitions=[
   ["architecture-constraint.v1","agents","architecture-constraint.v1.schema.json"],
   ["architecture.v1","agents","architecture.v1.schema.json"],
   ["artifact-envelope.v1","common","artifact-envelope.schema.json"],
+  ["authority-record.v1","core","authority-record.v1.schema.json"],
   ["command-result.v1","pipeline","command-result.v1.schema.json"],
   ["decision-answer.v1","pipeline","decision-answer.v1.schema.json"],
   ["decision-package.v1","pipeline","decision-package.v1.schema.json"],
@@ -117,6 +118,9 @@ const definitions=[
   ["github-publication-result.v1","pipeline","github-publication-result.v1.schema.json"],
   ["information-architecture.v1","design","information-architecture.v1.schema.json"],
   ["issue-plan.v1","agents","issue-plan.v1.schema.json"],
+  ["operation-intent.v1","core","operation-intent.v1.schema.json"],
+  ["operation-receipt.v1","core","operation-receipt.v1.schema.json"],
+  ["organization-config.v1","core","organization-config.v1.schema.json"],
   ["pdor-result.v1","pipeline","pdor-result.v1.schema.json"],
   ["pm-analysis.v1","agents","pm-analysis.v1.schema.json"],
   ["project-input.v1","pipeline","project-input.v1.schema.json"],
@@ -124,6 +128,7 @@ const definitions=[
   ["provenance.v1","common","provenance.schema.json"],
   ["question.v1","common","question.schema.json"],
   ["reference.v1","common","reference.schema.json"],
+  ["repository-config.v1","core","repository-config.v1.schema.json"],
   ["screen-spec.v1","design","screen-spec.v1.schema.json"],
   ["spec-audit.v1","agents","spec-audit.v1.schema.json"],
   ["trace-graph.v1","pipeline","trace-graph.v1.schema.json"],

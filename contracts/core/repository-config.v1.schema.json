@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://toss.software/schemas/core/repository-config.v1.schema.json",
+  "title": "TOSS Core Repository Configuration v1",
+  "description": "Closed control-repository configuration for one registered repository.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "repository", "repository_node_id", "default_branch", "active_release", "project_item_id", "project_fields", "registered_at"],
+  "properties": {
+    "schema_version": {"const": "repository-config.v1"},
+    "repository": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
+    "repository_node_id": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"},
+    "default_branch": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"},
+    "active_release": {"type": ["string", "null"], "minLength": 1},
+    "project_item_id": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"},
+    "project_fields": {"$ref": "#/$defs/project_fields"},
+    "registered_at": {"type": "string", "format": "rfc3339-date-time"}
+  },
+  "$defs": {
+    "project_fields": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "gate"],
+      "properties": {
+        "status": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"},
+        "gate": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"}
+      }
+    }
+  }
+}

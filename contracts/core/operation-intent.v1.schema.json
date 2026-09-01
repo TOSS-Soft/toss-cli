@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://toss.software/schemas/core/operation-intent.v1.schema.json",
+  "title": "TOSS Core Operation Intent v1",
+  "description": "An immutable, closed plan for a canonically ordered set of optimistic operations.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "document_type", "intent_id", "command", "created_at", "policy_revision", "source", "authority", "operations"],
+  "properties": {
+    "schema_version": {"const": "operation-intent.v1"},
+    "document_type": {"const": "operation-intent"},
+    "intent_id": {"type": "string", "pattern": "^INTENT-[0-9]{8}-[0-9]{4,}$"},
+    "command": {"type": "string", "pattern": "^[a-z][a-z0-9-]*(?:\\.[a-z][a-z0-9-]*)+$"},
+    "created_at": {"type": "string", "format": "rfc3339-date-time"},
+    "policy_revision": {"type": "string", "pattern": "^POLICY-[0-9]{4,}$"},
+    "source": {"$ref": "#/$defs/source"},
+    "authority": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/authority_reference"},
+        {"$ref": "https://toss.software/schemas/core/authority-record.v1.schema.json"}
+      ]
+    },
+    "operations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/operation"}
+    }
+  },
+  "$defs": {
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "revision", "sha256"],
+      "properties": {
+        "repository": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
+        "revision": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"},
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      }
+    },
+    "authority_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record_id", "sha256"],
+      "properties": {
+        "record_id": {"type": "string", "pattern": "^AUTH-[0-9]{8}-[0-9]{4,}$"},
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      }
+    },
+    "operation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operation_id", "resource", "action", "repository", "expected_revision", "payload"],
+      "properties": {
+        "operation_id": {"type": "string", "pattern": "^OP-[0-9]{4,}$"},
+        "resource": {"enum": ["branch", "issue", "milestone", "project", "pull_request", "repository", "workflow"]},
+        "action": {"enum": ["close", "commit", "create", "merge", "register", "reopen", "update"]},
+        "repository": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
+        "expected_revision": {"type": ["string", "null"], "minLength": 1},
+        "payload": {"type": "object"},
+        "compensation": {
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "required": ["action", "expected_revision", "payload"],
+          "properties": {
+            "action": {"enum": ["close", "delete", "reopen", "update"]},
+            "expected_revision": {"type": ["string", "null"], "minLength": 1},
+            "payload": {"type": "object"}
+          }
+        }
+      }
+    }
+  }
+}

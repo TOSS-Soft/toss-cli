@@ -6,6 +6,7 @@
       "test/acp-v1.test.js",
       "test/architecture.test.js",
       "test/common-contracts.test.js",
+      "test/core-contracts.test.js",
       "test/decisions.test.js",
       "test/design-auditor.test.js",
       "test/design-commands.test.js",
