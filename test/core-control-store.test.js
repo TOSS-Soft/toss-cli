@@ -771,6 +771,10 @@ test("persisted bootstrap corruption never establishes initialized state",async 
     value => ({...value,receipt:{...value.receipt,observed_revisions:value.receipt.observed_revisions.slice(1)}}),
     value => ({...value,receipt:{...value.receipt,observed_revisions:[...value.receipt.observed_revisions,{...value.receipt.observed_revisions[0]}]}}),
     value => { const intent={...value.intent,operations:value.intent.operations.map(operation => operation.payload.kind==="organization-config" ? {...operation,payload:{...operation.payload,sha256:"b".repeat(64)}} : operation)}; return {...value,intent,receipt:{...value.receipt,intent_sha256:sha256Canonical(intent)}}; },
+    value => { const intent={...value.intent,operations:value.intent.operations.map(operation => operation.payload.kind==="verify-default-branch-protection" ? {...operation,action:"create",payload:{kind:"unexpected"}} : operation)}; return {...value,intent,receipt:{...value.receipt,intent_sha256:sha256Canonical(intent)}}; },
+    value => { const intent={...value.intent,operations:value.intent.operations.map(operation => operation.payload.kind==="create-private-control-repository" ? {...operation,expected_revision:"unexpected"} : operation)}; return {...value,intent,receipt:{...value.receipt,intent_sha256:sha256Canonical(intent)}}; },
+    value => { const operations=[...value.intent.operations]; [operations[0],operations[1]]=[operations[1],operations[0]]; const intent={...value.intent,operations}; return {...value,intent,receipt:{...value.receipt,intent_sha256:sha256Canonical(intent)}}; },
+    value => ({...value,receipt:{...value.receipt,observed_revisions:value.receipt.observed_revisions.map((observation,index) => index===0 ? {...observation,revision:null} : observation)}}),
     value => ({...value,lifecycle:{revision:"POLICY-OTHER"}}),
     value => ({...value,organization:{...value.organization,project:{node_id:"PVT_other",number:8}}}),
   ]) {

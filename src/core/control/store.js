@@ -2,6 +2,7 @@ import {types} from "node:util";
 
 import {canonicalJson,sha256Canonical} from "../../contracts/acp.js";
 import {validateCoreDocument} from "../contracts.js";
+import {createOperationIntent} from "../operations/plan.js";
 
 export const CONTROL_PATHS=Object.freeze({
   organization:"config/organization.yaml",
@@ -76,11 +77,18 @@ function validateConfiguration(path,value) {
 
 function rawCompare(left,right) { return left===right ? 0 : left<right ? -1 : 1; }
 
+function exactShape(value,expected,label) {
+  if (canonicalJson(value)!==canonicalJson(expected)) throw ledgerConflict(`${label} is not exact`);
+}
+
 function bootstrapProof({organization,lifecycle,release,intent,receipt}) {
-  if (intent.command!=="init" || intent.authority===null || intent.source.repository!==organization.control_repository) throw ledgerConflict("bootstrap intent must bind explicit authority and control repository");
+  if (intent.command!=="init" || intent.authority===null || intent.source.repository!==organization.control_repository || intent.policy_revision!==organization.policy_revision) throw ledgerConflict("bootstrap intent must bind explicit authority, policy, and control repository");
   if (receipt.status!=="completed" || receipt.intent_id!==intent.intent_id || receipt.intent_sha256!==sha256Canonical(intent)) throw ledgerConflict("bootstrap receipt must be completed and bind the bootstrap intent");
   if (!lifecycle || !release || lifecycle.revision!==organization.policy_revision || release.revision!==organization.policy_revision) throw ledgerConflict("bootstrap policies must bind organization policy revision");
   const hashes=Object.freeze({organization:sha256Canonical(organization),lifecycle:sha256Canonical(lifecycle),release:sha256Canonical(release)});
+  let canonical;
+  try { canonical=createOperationIntent({intent_id:intent.intent_id,created_at:intent.created_at,command:intent.command,policy_revision:intent.policy_revision,source:intent.source,authority:intent.authority,operations:intent.operations.map(({operation_id,...operation}) => operation)}); } catch (error) { throw ledgerConflict("bootstrap operations cannot be canonically reconstructed",{cause:error}); }
+  if (!equivalent(canonical.operations,intent.operations)) throw ledgerConflict("bootstrap operations are not in canonical order with canonical IDs");
   const byKind=new Map();
   for (const operation of intent.operations) {
     if (byKind.has(operation.payload?.kind)) throw ledgerConflict("bootstrap operation kinds must be unique");
@@ -89,21 +97,22 @@ function bootstrapProof({organization,lifecycle,release,intent,receipt}) {
   const required=["create-private-control-repository","verify-default-branch-protection","discover-project-fields","organization-config","lifecycle-policy","release-policy","first-control-transaction"];
   if (intent.operations.length!==required.length || [...byKind.keys()].sort(rawCompare).join("|")!==[...required].sort(rawCompare).join("|")) throw ledgerConflict("bootstrap operation set is not exact");
   const create=byKind.get("create-private-control-repository"); const discover=byKind.get("discover-project-fields");
-  if (create.repository!==organization.control_repository || create.action!=="create" || create.payload.private!==true || !equivalent(create.payload.files,hashes) ||
-      discover.repository!==null || discover.action!=="update" || !equivalent(discover.payload.project,organization.project)) throw ledgerConflict("bootstrap operation bindings are invalid");
+  exactShape(create,{operation_id:create.operation_id,resource:"repository",action:"create",repository:organization.control_repository,expected_revision:null,payload:{kind:"create-private-control-repository",private:true,files:hashes}},"bootstrap repository creation");
+  exactShape(byKind.get("verify-default-branch-protection"),{operation_id:byKind.get("verify-default-branch-protection").operation_id,resource:"repository",action:"update",repository:organization.control_repository,expected_revision:null,payload:{kind:"verify-default-branch-protection"}},"bootstrap branch protection verification");
+  exactShape(discover,{operation_id:discover.operation_id,resource:"project",action:"update",repository:null,expected_revision:null,payload:{kind:"discover-project-fields",project:organization.project}},"bootstrap project discovery");
   for (const [kind,hash] of [["organization-config",hashes.organization],["lifecycle-policy",hashes.lifecycle],["release-policy",hashes.release]]) {
     const operation=byKind.get(kind);
-    if (operation.repository!==organization.control_repository || operation.action!=="commit" || operation.payload.sha256!==hash) throw ledgerConflict("bootstrap document digest is not authorized");
+    exactShape(operation,{operation_id:operation.operation_id,resource:"repository",action:"commit",repository:organization.control_repository,expected_revision:null,payload:{kind,sha256:hash}},"bootstrap document commit");
   }
   const transaction=byKind.get("first-control-transaction");
-  if (transaction.repository!==organization.control_repository || transaction.action!=="commit" || !equivalent(transaction.payload.files,hashes)) throw ledgerConflict("bootstrap transaction digest is not authorized");
+  exactShape(transaction,{operation_id:transaction.operation_id,resource:"repository",action:"commit",repository:organization.control_repository,expected_revision:null,payload:{kind:"first-control-transaction",files:hashes}},"bootstrap transaction");
   const remote=[create,byKind.get("verify-default-branch-protection"),discover];
   const observed=new Map();
   for (const value of receipt.observed_revisions) {
     if (observed.has(value.operation_id)) throw ledgerConflict("bootstrap receipt observes an operation more than once");
     observed.set(value.operation_id,value);
   }
-  if (observed.size!==remote.length || remote.some(operation => !observed.has(operation.operation_id) || observed.get(operation.operation_id).repository!==operation.repository)) throw ledgerConflict("bootstrap receipt must observe every remote bootstrap operation exactly once");
+  if (observed.size!==remote.length || remote.some(operation => !observed.has(operation.operation_id) || observed.get(operation.operation_id).repository!==operation.repository || typeof observed.get(operation.operation_id).revision!=="string" || !observed.get(operation.operation_id).revision)) throw ledgerConflict("bootstrap receipt must observe every remote bootstrap operation exactly once with a revision");
   return Object.freeze({hashes,operations:byKind});
 }
 
