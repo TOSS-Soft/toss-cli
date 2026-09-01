@@ -17,6 +17,7 @@ import YAML from "yaml";
 import {canonicalJson} from "../../contracts/acp.js";
 
 const SHA=/^[a-f0-9]{40}$/u;
+const ZERO_SHA="0".repeat(40);
 const SEGMENT=/^[A-Za-z0-9._-]+$/u;
 const REPOSITORY_FILENAME=/^[a-z0-9._-]+%2F[a-z0-9._-]+\.yaml$/u;
 
@@ -68,6 +69,18 @@ function assertSafeRelativePath(value) {
   const extension=value.endsWith(".yaml") ? ".yaml" : value.endsWith(".json") ? ".json" : null;
   if (!extension) throw new TypeError(`unsupported control document extension: ${value}`);
   return {segments,extension};
+}
+
+function assertSafeRelativePrefix(value) {
+  if (typeof value!=="string" || !value || value.includes("\\") || value.startsWith("/") ||
+      value.includes("\0") || /^[A-Za-z]:/u.test(value)) {
+    throw new TypeError(`unsafe relative prefix: ${String(value)}`);
+  }
+  const segments=value.split("/");
+  if (segments.some(segment => !segment || segment==="." || segment===".." || !SEGMENT.test(segment))) {
+    throw new TypeError(`unsafe relative prefix: ${value}`);
+  }
+  return segments;
 }
 
 function assertPlainData(value,label,seen=new Set()) {
@@ -133,6 +146,9 @@ export function createGitControlRepository(options) {
   const root=ownData(options,"root");
   const execFile=ownDataFunction(options,"execFile");
   const clock=Object.hasOwn(options,"clock") ? ownDataFunction(options,"clock") : Date.now;
+  const writeTempFile=Object.hasOwn(options,"writeTempFile")
+    ? ownDataFunction(options,"writeTempFile")
+    : async (handle,bytes) => handle.writeFile(bytes);
   if (typeof root!=="string" || !root) throw new TypeError("root must be a non-empty path string");
   const absoluteRoot=resolve(root);
 
@@ -188,6 +204,24 @@ export function createGitControlRepository(options) {
     return {target,created};
   }
 
+  async function securePrefix(prefix) {
+    const segments=assertSafeRelativePrefix(prefix);
+    await secureRoot();
+    let current=absoluteRoot;
+    for (const segment of segments) {
+      current=join(current,segment);
+      try {
+        const stat=await lstat(current);
+        if (stat.isSymbolicLink() || !stat.isDirectory()) {
+          throw new TypeError(`symbolic link or non-directory path component is not allowed: ${prefix}`);
+        }
+      } catch (error) {
+        if (isMissing(error)) return;
+        throw error;
+      }
+    }
+  }
+
   async function head() {
     await secureRoot();
     try {
@@ -197,6 +231,26 @@ export function createGitControlRepository(options) {
       return sha;
     } catch (error) {
       if (error?.code===1) return null;
+      throw error;
+    }
+  }
+
+  async function headRef() {
+    const result=await runGit(["symbolic-ref","-q","HEAD"]);
+    const ref=String(result?.stdout ?? "").trim();
+    if (!/^refs\/[A-Za-z0-9._/-]+$/u.test(ref) || ref.includes("//") || ref.endsWith("/")) {
+      throw new Error("control repository HEAD must resolve to a safe symbolic ref");
+    }
+    return ref;
+  }
+
+  async function runPreCommitHook() {
+    try {
+      await runGit(["hook","run","pre-commit"]);
+    } catch (error) {
+      if (error?.code===1 && /cannot find a hook named pre-commit/iu.test(String(error?.stderr ?? ""))) {
+        return;
+      }
       throw error;
     }
   }
@@ -226,6 +280,30 @@ export function createGitControlRepository(options) {
     assertPlainData(document,"control document");
     canonicalJson(document);
     return document;
+  }
+
+  async function listDocuments(prefix,{at="HEAD"}={}) {
+    assertSafeRelativePrefix(prefix);
+    if (at!=="HEAD" && (typeof at!=="string" || !SHA.test(at))) {
+      throw new TypeError("document revision must be HEAD or an exact 40-character commit SHA");
+    }
+    await securePrefix(prefix);
+    const revision=at==="HEAD" ? await head() : at;
+    if (revision===null) return Object.freeze([]);
+    const result=await runGit(["ls-tree","-r","-z","--name-only",revision,"--",prefix]);
+    const output=String(result?.stdout ?? "");
+    if (output && !output.endsWith("\0")) throw new Error("Git returned malformed NUL-delimited document paths");
+    const documents=output ? output.slice(0,-1).split("\0") : [];
+    const unique=new Set();
+    for (const path of documents) {
+      assertSafeRelativePath(path);
+      if (!path.startsWith(`${prefix}/`) || unique.has(path)) {
+        throw new Error(`Git returned an unexpected control document path: ${path}`);
+      }
+      unique.add(path);
+    }
+    documents.sort((left,right) => left<right ? -1 : left>right ? 1 : 0);
+    return Object.freeze(documents);
   }
 
   async function indexSnapshot() {
@@ -301,23 +379,39 @@ export function createGitControlRepository(options) {
         const temp=`${state.target}.toss-core-${process.pid}-${milliseconds}-${temporary.length}.tmp`;
         await secureTarget(state.entry.path);
         const handle=await open(temp,"wx",0o600);
+        temporary.push(temp);
         try {
-          await handle.writeFile(bytes);
+          await writeTempFile(handle,bytes,temp);
         } finally {
           await handle.close();
         }
-        temporary.push(temp);
         await secureTarget(state.entry.path);
         await rename(temp,state.target);
         temporary.pop();
       }
+      await runGit(actualHead===null ? ["read-tree","--empty"] : ["read-tree",actualHead]);
       await runGit(["add","--",...entries.map(entry => entry.path)]);
-      await runGit(["commit","--only","-m",message,"--",...entries.map(entry => entry.path)]);
-      const commitSha=await head();
-      if (commitSha===null || !SHA.test(commitSha) || commitSha===actualHead) {
-        throw new Error("Git did not create a new exact 40-character commit SHA");
+      await runPreCommitHook();
+      const treeResult=await runGit(["write-tree"]);
+      const tree=String(treeResult?.stdout ?? "").trim();
+      if (!SHA.test(tree)) throw new Error("Git did not create an exact 40-character tree SHA");
+      const commitResult=await runGit([
+        "commit-tree",tree,...(actualHead===null ? [] : ["-p",actualHead]),"-m",message,
+      ]);
+      const commitSha=String(commitResult?.stdout ?? "").trim();
+      if (!SHA.test(commitSha)) throw new Error("Git did not create an exact 40-character commit SHA");
+      try {
+        await runGit(["update-ref",await headRef(),commitSha,actualHead ?? ZERO_SHA]);
+      } catch (error) {
+        const conflict=new Error(`control repository expected head conflict: expected ${String(expectedHead)}`);
+        conflict.code="CORE_CONTROL_CONFLICT";
+        conflict.cause=error;
+        throw conflict;
       }
       succeeded=true;
+      await restoreIndex(index);
+      index=null;
+      await runGit(["add","--",...entries.map(entry => entry.path)]);
       return Object.freeze({commit_sha:commitSha});
     } finally {
       try {
@@ -345,5 +439,5 @@ export function createGitControlRepository(options) {
     }
   }
 
-  return Object.freeze({head,readDocument,commitFiles});
+  return Object.freeze({head,readDocument,listDocuments,commitFiles});
 }

@@ -1,6 +1,6 @@
 import {types} from "node:util";
 
-import {canonicalJson} from "../../contracts/acp.js";
+import {canonicalJson,sha256Canonical} from "../../contracts/acp.js";
 import {validateCoreDocument} from "../contracts.js";
 
 export const CONTROL_PATHS=Object.freeze({
@@ -71,6 +71,7 @@ function validateConfiguration(path,value) {
 export function createCoreControlStore({repository}) {
   const head=ownDataFunction(repository,"head");
   const readDocument=ownDataFunction(repository,"readDocument");
+  const listDocuments=ownDataFunction(repository,"listDocuments");
   const commitFiles=ownDataFunction(repository,"commitFiles");
 
   async function readAt(path,revision) {
@@ -85,6 +86,12 @@ export function createCoreControlStore({repository}) {
       throw new Error(`repository configuration identity does not match its path: ${identity}`);
     }
     return repository;
+  }
+
+  async function listedDocuments(prefix,revision) {
+    const paths=await listDocuments(prefix,{at:revision});
+    if (!Array.isArray(paths)) throw new TypeError("repository.listDocuments must return an array");
+    return paths;
   }
 
   async function loadOrganization() {
@@ -131,12 +138,34 @@ export function createCoreControlStore({repository}) {
       readAt(`${CONTROL_PATHS.policies}/lifecycle.yaml`,revision),
       readAt(`${CONTROL_PATHS.policies}/release.yaml`,revision),
     ]);
+    const [programPaths,receiptPaths]=await Promise.all([
+      listedDocuments(CONTROL_PATHS.programs,revision),
+      listedDocuments(CONTROL_PATHS.receipts,revision),
+    ]);
+    const programs=await Promise.all(programPaths.map(async path => {
+      if (!/^programs\/[A-Za-z0-9._-]+\/manifest\.yaml$/u.test(path)) {
+        throw new Error(`unexpected program manifest path: ${path}`);
+      }
+      const document=await readAt(path,revision);
+      if (document===null) throw new Error(`listed program manifest is absent: ${path}`);
+      return document;
+    }));
+    const receipts=await Promise.all(receiptPaths.map(async path => {
+      if (!/^receipts\/[0-9]{4}\/[0-9]{2}\/[A-Za-z0-9._-]+\.json$/u.test(path)) {
+        throw new Error(`unexpected receipt path: ${path}`);
+      }
+      const document=await readAt(path,revision);
+      if (document===null) throw new Error(`listed receipt is absent: ${path}`);
+      const receipt=validateCoreDocument(document,"operation-receipt.v1");
+      if (receiptPath(receipt)!==path) throw new Error(`receipt identity does not match its path: ${path}`);
+      return receipt;
+    }));
     return Object.freeze({
       organization,
       repositories:Object.freeze(repositories),
       policies:Object.freeze({lifecycle,release}),
-      programs:Object.freeze([]),
-      receipts:Object.freeze([]),
+      programs:Object.freeze(programs),
+      receipts:Object.freeze(receipts),
     });
   }
 
@@ -159,6 +188,38 @@ export function createCoreControlStore({repository}) {
     return commitImmutable({expectedHead,document:valid,path:intentPath(valid),schemaId:"operation-intent.v1",label:"intent"});
   }
 
+  async function assertReceiptBinding(receipt,revision) {
+    if (revision===null) {
+      throw new Error("receipt intent must already be persisted");
+    }
+    const paths=await listedDocuments(CONTROL_PATHS.intents,revision);
+    const matches=[];
+    for (const path of paths) {
+      if (!/^intents\/[0-9]{4}\/[0-9]{2}\/[A-Za-z0-9._-]+\.json$/u.test(path)) {
+        throw new Error(`unexpected intent path: ${path}`);
+      }
+      const document=await readAt(path,revision);
+      if (document===null) throw new Error(`listed intent is absent: ${path}`);
+      const intent=validateCoreDocument(document,"operation-intent.v1");
+      if (intentPath(intent)!==path) throw new Error(`intent identity does not match its path: ${path}`);
+      if (intent.intent_id===receipt.intent_id) matches.push(intent);
+    }
+    if (matches.length!==1) {
+      throw new Error(`receipt intent must resolve to exactly one persisted intent: ${receipt.intent_id}`);
+    }
+    const intent=matches[0];
+    if (sha256Canonical(intent)!==receipt.intent_sha256) {
+      throw new Error(`receipt intent hash does not match persisted intent: ${receipt.intent_id}`);
+    }
+    const operations=new Map(intent.operations.map(operation => [operation.operation_id,operation]));
+    for (const observed of receipt.observed_revisions) {
+      const operation=operations.get(observed.operation_id);
+      if (!operation || operation.repository!==observed.repository) {
+        throw new Error(`receipt observed revision is incompatible with intent operation: ${observed.operation_id}`);
+      }
+    }
+  }
+
   async function findIntent(intent) {
     const valid=validateCoreDocument(intent,"operation-intent.v1");
     const revision=await head();
@@ -171,6 +232,11 @@ export function createCoreControlStore({repository}) {
 
   async function commitReceipt({expectedHead,receipt}) {
     const valid=validateCoreDocument(receipt,"operation-receipt.v1");
+    const revision=await head();
+    if (revision!==expectedHead) {
+      throw new Error(`control repository expected head conflict: expected ${String(expectedHead)}, found ${String(revision)}`);
+    }
+    await assertReceiptBinding(valid,revision);
     return commitImmutable({expectedHead,document:valid,path:receiptPath(valid),schemaId:"operation-receipt.v1",label:"receipt"});
   }
 

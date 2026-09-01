@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import {execFile as childExecFile} from "node:child_process";
-import {chmod, mkdtemp, readFile, rm, symlink, writeFile} from "node:fs/promises";
+import {chmod, mkdtemp, readFile, readdir, rm, symlink, writeFile} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {promisify} from "node:util";
 import test from "node:test";
 
+import {sha256Canonical} from "../src/contracts/acp.js";
 import {createGitControlRepository} from "../src/core/control/git-repository.js";
 import {
   CONTROL_PATHS,
@@ -31,6 +32,15 @@ async function createRepository(t) {
 
 function control(root) {
   return createGitControlRepository({root,execFile,clock:() => 1700000000000});
+}
+
+function controlWith(root,overrides) {
+  return createGitControlRepository({
+    root,
+    execFile,
+    clock:() => 1700000000000,
+    ...overrides,
+  });
 }
 
 function organization() {
@@ -91,6 +101,19 @@ function receipt() {
   };
 }
 
+function receiptFor(number) {
+  return {...receipt(),receipt_id:`RECEIPT-20260901-${number}`};
+}
+
+function receiptForIntent(value,{number="0001",observed_revisions=[]}={}) {
+  return {
+    ...receiptFor(number),
+    intent_id:value.intent_id,
+    intent_sha256:sha256Canonical(value),
+    observed_revisions,
+  };
+}
+
 test("control repository bootstraps canonical documents and reports its exact head",async t => {
   const root=await createRepository(t);
   const repositoryControl=control(root);
@@ -140,6 +163,60 @@ test("control repository rejects a stale exact head without changing documents",
   assert.equal(await repositoryControl.readDocument("policies/lifecycle.yaml"),null);
 });
 
+test("control repository compare-and-swaps publication when another writer advances HEAD",async t => {
+  const root=await createRepository(t);
+  const seed=control(root);
+  const first=await seed.commitFiles({
+    expectedHead:null,
+    message:"first",
+    files:{"config/organization.yaml":organization()},
+  });
+  let injected=false;
+  let externalCommit;
+  const repositoryControl=controlWith(root,{execFile:async (file,args,options) => {
+    if (!injected && args[0]==="update-ref") {
+      injected=true;
+      const ref=(await execFile("git",["symbolic-ref","-q","HEAD"],options)).stdout.trim();
+      const tree=(await execFile("git",["rev-parse",`${first.commit_sha}^{tree}`],options)).stdout.trim();
+      externalCommit=(await execFile("git",["commit-tree",tree,"-p",first.commit_sha,"-m","external writer"],options)).stdout.trim();
+      await execFile("git",["update-ref",ref,externalCommit,first.commit_sha],options);
+    }
+    return execFile(file,args,options);
+  }});
+
+  await assert.rejects(repositoryControl.commitFiles({
+    expectedHead:first.commit_sha,
+    message:"must not publish",
+    files:{"policies/lifecycle.yaml":{revision:"POLICY-0001"}},
+  }),/expected head|conflict/i);
+
+  assert.equal(injected,true);
+  assert.equal(await repositoryControl.head(),externalCommit);
+  assert.equal(await repositoryControl.readDocument("policies/lifecycle.yaml"),null);
+});
+
+test("control repository publishes only requested files while retaining unrelated staged entries",async t => {
+  const root=await createRepository(t);
+  const repositoryControl=control(root);
+  const initial=await repositoryControl.commitFiles({
+    expectedHead:null,
+    message:"first",
+    files:{"config/organization.yaml":organization()},
+  });
+  await writeFile(join(root,"unrelated-staged.txt"),"staged\n");
+  await git(root,["add","--","unrelated-staged.txt"]);
+
+  const committed=await repositoryControl.commitFiles({
+    expectedHead:initial.commit_sha,
+    message:"control only",
+    files:{"policies/lifecycle.yaml":{revision:"POLICY-0001"}},
+  });
+
+  assert.equal((await git(root,["diff-tree","--no-commit-id","--name-only","-r",committed.commit_sha])).stdout,
+    "policies/lifecycle.yaml\n");
+  assert.equal((await git(root,["diff","--cached","--name-only"])).stdout,"unrelated-staged.txt\n");
+});
+
 test("control repository rejects traversal and symlink targets",async t => {
   const root=await createRepository(t);
   const repositoryControl=control(root);
@@ -180,20 +257,62 @@ test("repository configuration uses the approved reversible percent filename exc
   await assert.rejects(repositoryControl.readDocument("config/repositories/toss-soft%2Ftoss-cli.json"),/unsafe relative path|unsupported/i);
 });
 
-test("receipt identities are immutable while exact duplicate content is idempotent",async t => {
+test("receipts require one matching persisted intent and remain immutable when bound",async t => {
   const root=await createRepository(t);
   const store=createCoreControlStore({repository:control(root)});
-  const first=await store.commitReceipt({expectedHead:null,receipt:receipt()});
-  const repeated=await store.commitReceipt({expectedHead:first.commit_sha,receipt:receipt()});
+  const planned=intent();
+  const orphan=receiptForIntent(planned);
+
+  await assert.rejects(store.commitReceipt({expectedHead:null,receipt:orphan}),/intent|orphan|persisted/i);
+
+  const intentCommit=await store.commitIntent({expectedHead:null,intent:planned});
+  const bound=receiptForIntent(planned,{observed_revisions:[{
+    operation_id:"OP-0001",
+    repository:"TOSS-Soft/toss-cli",
+    revision:"observed-r1",
+  }]});
+  const first=await store.commitReceipt({expectedHead:intentCommit.commit_sha,receipt:bound});
+  const repeated=await store.commitReceipt({expectedHead:first.commit_sha,receipt:bound});
 
   assert.equal(repeated.commit_sha,first.commit_sha);
   await assert.rejects(store.commitReceipt({
     expectedHead:first.commit_sha,
-    receipt:{...receipt(),status:"failed"},
+    receipt:{...bound,status:"failed"},
   }),/immutable|different content|receipt/i);
-  const withoutCreatedAt={...receipt()};
+  await assert.rejects(store.commitReceipt({
+    expectedHead:first.commit_sha,
+    receipt:{...receiptForIntent(planned,{number:"0002"}),intent_sha256:"0".repeat(64)},
+  }),/hash|intent/i);
+  await assert.rejects(store.commitReceipt({
+    expectedHead:first.commit_sha,
+    receipt:receiptForIntent(planned,{number:"0003",observed_revisions:[{
+      operation_id:"OP-9999",
+      repository:"TOSS-Soft/toss-cli",
+      revision:"observed-r2",
+    }]}),
+  }),/operation|observed/i);
+  const withoutCreatedAt={...bound};
   delete withoutCreatedAt.created_at;
   await assert.rejects(store.commitReceipt({expectedHead:first.commit_sha,receipt:withoutCreatedAt}),/created_at|invalid/i);
+});
+
+test("receipt binding rejects duplicate persisted intent identities",async t => {
+  const root=await createRepository(t);
+  const repositoryControl=control(root);
+  const store=createCoreControlStore({repository:repositoryControl});
+  const planned=intent();
+  const first=await store.commitIntent({expectedHead:null,intent:planned});
+  const duplicate={...planned,created_at:"2026-10-01T08:00:00.000Z"};
+  const second=await repositoryControl.commitFiles({
+    expectedHead:first.commit_sha,
+    message:"duplicate intent identity",
+    files:{"intents/2026/10/INTENT-20260901-0001.json":duplicate},
+  });
+
+  await assert.rejects(store.commitReceipt({
+    expectedHead:second.commit_sha,
+    receipt:receiptForIntent(planned),
+  }),/exactly one persisted intent|duplicate/i);
 });
 
 test("organization state reads every document at one resolved revision",async () => {
@@ -207,6 +326,10 @@ test("organization state reads every document at one resolved revision",async ()
       if (path===repositoryPath("TOSS-Soft/toss-cli")) return repositoryConfig();
       return null;
     },
+    listDocuments:async (_prefix,{at}) => {
+      revisions.push(at);
+      return [];
+    },
     commitFiles:async () => { throw new Error("not used"); },
   };
   const store=createCoreControlStore({repository});
@@ -217,6 +340,56 @@ test("organization state reads every document at one resolved revision",async ()
   assert.deepEqual(state.repositories,[repositoryConfig()]);
   assert.ok(revisions.length>=2);
   assert.deepEqual([...new Set(revisions)],[snapshot]);
+});
+
+test("organization state lists populated programs and receipts at its initially resolved revision",async t => {
+  const root=await createRepository(t);
+  const repositoryControl=control(root);
+  const initial=await repositoryControl.commitFiles({
+    expectedHead:null,
+    message:"populated state",
+    files:{
+      "config/organization.yaml":organization(),
+      [repositoryPath("TOSS-Soft/toss-cli")]:repositoryConfig(),
+      "programs/PROGRAM-A/manifest.yaml":{program_id:"PROGRAM-A"},
+      "programs/PROGRAM-B/manifest.yaml":{program_id:"PROGRAM-B"},
+      "receipts/2026/09/RECEIPT-20260901-0001.json":receiptFor("0001"),
+      "receipts/2026/09/RECEIPT-20260901-0002.json":receiptFor("0002"),
+    },
+  });
+  const ref=(await git(root,["symbolic-ref","-q","HEAD"])).stdout.trim();
+  const tree=(await git(root,["rev-parse",`${initial.commit_sha}^{tree}`])).stdout.trim();
+  const later=(await git(root,["commit-tree",tree,"-p",initial.commit_sha,"-m","later writer"])).stdout.trim();
+  const revisions=[];
+  let advanced=false;
+  const repository={
+    head:repositoryControl.head,
+    readDocument:async (path,{at}) => {
+      revisions.push(at);
+      return repositoryControl.readDocument(path,{at});
+    },
+    listDocuments:async (prefix,{at}) => {
+      revisions.push(at);
+      if (!advanced) {
+        advanced=true;
+        await git(root,["update-ref",ref,later,initial.commit_sha]);
+      }
+      return repositoryControl.listDocuments(prefix,{at});
+    },
+    commitFiles:repositoryControl.commitFiles,
+  };
+  const store=createCoreControlStore({repository});
+
+  const state=await store.loadOrganizationState();
+
+  assert.equal(await repositoryControl.head(),later);
+  assert.deepEqual(state.programs,[{program_id:"PROGRAM-A"},{program_id:"PROGRAM-B"}]);
+  assert.deepEqual(state.receipts.map(value => value.receipt_id),[
+    "RECEIPT-20260901-0001","RECEIPT-20260901-0002",
+  ]);
+  assert.deepEqual([...new Set(revisions)],[initial.commit_sha]);
+  assert.ok(Object.isFrozen(state.programs));
+  assert.ok(Object.isFrozen(state.receipts));
 });
 
 test("failed pre-commit hook restores control files and preserves unrelated index and worktree changes",async t => {
@@ -245,6 +418,36 @@ test("failed pre-commit hook restores control files and preserves unrelated inde
   assert.equal(await readFile(join(root,"unrelated-worktree.txt"),"utf8"),"worktree\n");
   const cached=await git(root,["diff","--cached","--name-only"]);
   assert.equal(cached.stdout,"unrelated-staged.txt\n");
+  assert.equal((await git(root,["status","--porcelain"])).stdout,
+    "A  unrelated-staged.txt\n?? unrelated-worktree.txt\n");
+});
+
+test("temporary write failure removes its temp, lock, target, and created directory",async t => {
+  const root=await createRepository(t);
+  const seed=control(root);
+  const initial=await seed.commitFiles({
+    expectedHead:null,
+    message:"initial",
+    files:{"config/organization.yaml":organization()},
+  });
+  await writeFile(join(root,"unrelated-staged.txt"),"staged\n");
+  await git(root,["add","--","unrelated-staged.txt"]);
+  await writeFile(join(root,"unrelated-worktree.txt"),"worktree\n");
+  const repositoryControl=controlWith(root,{writeTempFile:async () => {
+    throw new Error("injected temporary write failure");
+  }});
+
+  await assert.rejects(repositoryControl.commitFiles({
+    expectedHead:initial.commit_sha,
+    message:"must fail",
+    files:{"policies/lifecycle.yaml":{revision:"POLICY-0001"}},
+  }),/injected temporary write failure/i);
+
+  assert.equal(await repositoryControl.readDocument("policies/lifecycle.yaml"),null);
+  assert.equal((await readdir(root)).includes("policies"),false);
+  assert.equal((await readdir(root)).some(name => name.includes(".toss-core-")),false);
+  assert.equal((await readdir(root)).includes(".toss-core.lock"),false);
+  assert.equal((await git(root,["diff","--cached","--name-only"])).stdout,"unrelated-staged.txt\n");
   assert.equal((await git(root,["status","--porcelain"])).stdout,
     "A  unrelated-staged.txt\n?? unrelated-worktree.txt\n");
 });
