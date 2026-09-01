@@ -56,6 +56,12 @@ function equivalent(left,right) {
   return canonicalJson(left)===canonicalJson(right);
 }
 
+function ledgerConflict(message,{cause}={}) {
+  const error=new Error(message,{cause});
+  error.code="CONTROL_LEDGER_CONFLICT";
+  return error;
+}
+
 function validateConfiguration(path,value) {
   if (path===CONTROL_PATHS.organization) return validateCoreDocument(value,"organization-config.v1");
   if (path.startsWith(`${CONTROL_PATHS.repositories}/`) && path.endsWith(".yaml")) {
@@ -94,21 +100,27 @@ export function createCoreControlStore({repository}) {
     return paths;
   }
 
-  async function resolveGlobalIdentities({revision,prefix,schemaId,label,idField,pathFor}) {
+  async function resolveGlobalIdentities({revision,prefix,schemaId,label,idField,pathFor,ledgerRead=false}) {
     if (revision===null) return [];
     const records=[];
     const identities=new Map();
     const paths=[...await listedDocuments(prefix,revision)].sort();
     for (const path of paths) {
       const document=await readAt(path,revision);
-      if (document===null) throw new Error(`listed ${label} is absent: ${path}`);
-      const valid=validateCoreDocument(document,schemaId);
+      if (document===null) {
+        throw ledgerRead ? ledgerConflict(`listed ${label} is absent: ${path}`) : new Error(`listed ${label} is absent: ${path}`);
+      }
+      let valid;
+      try { valid=validateCoreDocument(document,schemaId); } catch (error) {
+        if (ledgerRead) throw ledgerConflict(`persisted ${label} is corrupt: ${path}`,{cause:error});
+        throw error;
+      }
       if (pathFor(valid)!==path) {
-        throw new Error(`${label} identity does not match its path: ${path}`);
+        throw ledgerRead ? ledgerConflict(`${label} identity does not match its path: ${path}`) : new Error(`${label} identity does not match its path: ${path}`);
       }
       const existing=identities.get(valid[idField]);
       if (existing) {
-        throw new Error(`${label} identity is globally duplicated: ${valid[idField]}`);
+        throw ledgerRead ? ledgerConflict(`${label} identity is globally duplicated: ${valid[idField]}`) : new Error(`${label} identity is globally duplicated: ${valid[idField]}`);
       }
       const record=Object.freeze({path,document:valid});
       identities.set(valid[idField],record);
@@ -265,9 +277,14 @@ export function createCoreControlStore({repository}) {
       label:"intent",
       idField:"intent_id",
       pathFor:intentPath,
+      ledgerRead:true,
     });
     const existing=records.find(record => record.document.intent_id===valid.intent_id);
-    return existing && equivalent(existing.document,valid) ? existing.document : null;
+    if (!existing) return null;
+    if (!equivalent(existing.document,valid)) {
+      throw ledgerConflict(`intent lookup conflicts with immutable content: ${valid.intent_id}`);
+    }
+    return existing.document;
   }
 
   async function findReceipt(intent) {
@@ -281,10 +298,11 @@ export function createCoreControlStore({repository}) {
       label:"receipt",
       idField:"receipt_id",
       pathFor:receiptPath,
+      ledgerRead:true,
     })).filter(record => record.document.intent_id===valid.intent_id);
     if (matches.length===0) return null;
     if (matches.length!==1 || matches[0].document.intent_sha256!==sha256Canonical(valid)) {
-      throw new Error(`receipt lookup is ambiguous or conflicts with intent: ${valid.intent_id}`);
+      throw ledgerConflict(`receipt lookup is ambiguous or conflicts with intent: ${valid.intent_id}`);
     }
     return matches[0].document;
   }

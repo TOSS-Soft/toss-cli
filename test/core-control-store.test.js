@@ -637,7 +637,7 @@ test("findIntent rejects a duplicated persisted identity outside its canonical m
     files:{"intents/2026/10/INTENT-20260901-0001.json":duplicate},
   });
 
-  await assert.rejects(store.findIntent(planned),/duplicate|exactly one|intent/i);
+  await assert.rejects(store.findIntent(planned),error => error?.code==="CONTROL_LEDGER_CONFLICT");
 });
 
 test("organization state rejects duplicated receipt identities across months",async t => {
@@ -680,4 +680,30 @@ test("store exposes a revision-pinned head and exact receipt lookup for operatio
 
   assert.equal(await store.head(),receiptCommit.commit_sha);
   assert.deepEqual(await store.findReceipt(planned),recorded);
+});
+
+test("receipt lookup tags a divergent immutable ledger as a stable conflict",async t => {
+  const root=await createRepository(t);
+  const repositoryControl=control(root);
+  const store=createCoreControlStore({repository:repositoryControl});
+  const planned=intent();
+  const saved=await store.commitIntent({expectedHead:null,intent:planned});
+  await repositoryControl.commitFiles({
+    expectedHead:saved.commit_sha,
+    message:"corrupt receipt binding",
+    files:{"receipts/2026/09/RECEIPT-20260901-0001.json":receipt()},
+  });
+
+  await assert.rejects(store.findReceipt(planned),error => error?.code==="CONTROL_LEDGER_CONFLICT");
+});
+
+test("intent lookup tags divergent immutable content as a stable conflict",async t => {
+  const root=await createRepository(t);
+  const store=createCoreControlStore({repository:control(root)});
+  const planned=intent();
+  await store.commitIntent({expectedHead:null,intent:planned});
+
+  await assert.rejects(store.findIntent({...planned,operations:[{
+    ...planned.operations[0],payload:{default_branch:"trunk"},
+  }]}),error => error?.code==="CONTROL_LEDGER_CONFLICT");
 });

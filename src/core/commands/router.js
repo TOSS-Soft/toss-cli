@@ -38,7 +38,7 @@ function dataRecord(value,label,allowed) {
   return output;
 }
 
-function assertParsedCommand(command) {
+export function validateParsedCoreCommand(command) {
   const normalized=dataRecord(command,"core command",new Set([
     "name","args","options","readOnly","interactive",
   ]));
@@ -118,7 +118,7 @@ function failureFromError(error) {
 
 export async function dispatchCoreCommand(command,context={}) {
   try {
-    const normalized=assertParsedCommand(command);
+    const normalized=validateParsedCoreCommand(command);
     const services=normalizeContext(context);
     if (!FOUNDATION_COMMANDS.has(normalized.name)) {
       return failure(

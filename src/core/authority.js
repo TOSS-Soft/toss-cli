@@ -43,9 +43,12 @@ function sortedUnique(values,label) {
 function sortedRevisions(values,label) {
   if (!Array.isArray(values) || values.length===0) blocked(`${label} must be nonempty`);
   let previous;
+  const repositories=new Set();
   for (const value of values) {
     exact(value,["repository","revision"],label);
     if (typeof value.repository!=="string" || !(value.revision===null || typeof value.revision==="string")) blocked(`${label} is malformed`);
+    if (repositories.has(value.repository)) blocked(`${label} must not repeat a repository`);
+    repositories.add(value.repository);
     const encoded=canonicalJson(value);
     if (previous!==undefined && previous>=encoded) blocked(`${label} must be sorted, unique, and unambiguous`);
     previous=encoded;

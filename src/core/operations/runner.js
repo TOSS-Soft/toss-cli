@@ -3,6 +3,7 @@ import {types} from "node:util";
 import {canonicalJson,sha256Canonical} from "../../contracts/acp.js";
 import {validateCoreDocument} from "../contracts.js";
 import {authorityReference,verifyAuthority} from "../authority.js";
+import {validateParsedCoreCommand} from "../commands/router.js";
 import {CoreBlockedError,CoreConflictError,CoreRemoteError,CoreValidationError} from "../errors.js";
 import {createOperationIntent,operationPreview} from "./plan.js";
 
@@ -96,7 +97,7 @@ function remoteResult(value,intent) {
     const byOperation=new Map(observedRevisions.map(item => [item.operation_id,item]));
     if (byOperation.size!==observedRevisions.length || byOperation.size!==intent.operations.length ||
         intent.operations.some(operation => byOperation.get(operation.operation_id)?.repository!==operation.repository)) {
-      throw new CoreValidationError("Completed GitHub apply result must observe every intended operation exactly once");
+      return Object.freeze({status:"failed",observed_revisions:observedRevisions});
     }
   }
   return Object.freeze({status:result.status,observed_revisions:observedRevisions});
@@ -105,9 +106,20 @@ function remoteResult(value,intent) {
 function exactReceipt(value,intent) {
   if (value===null) return null;
   if (Array.isArray(value)) throw new CoreConflictError("Operation receipt lookup is ambiguous");
-  const receipt=validateCoreDocument(clone(value,"stored receipt"),"operation-receipt.v1");
+  let receipt;
+  try { receipt=validateCoreDocument(clone(value,"stored receipt"),"operation-receipt.v1"); } catch (error) {
+    throw new CoreConflictError("Operation receipt ledger is corrupt",{cause:error});
+  }
   if (receipt.intent_id!==intent.intent_id || receipt.intent_sha256!==sha256Canonical(intent)) throw new CoreConflictError("Operation receipt conflicts with the intent ledger");
   return receipt;
+}
+
+function ledgerConflict(error,operation) {
+  if (error instanceof CoreConflictError) return error;
+  if (error?.code==="CONTROL_LEDGER_CONFLICT") {
+    return new CoreConflictError(`Control ledger ${operation} conflict`,{cause:error});
+  }
+  return null;
 }
 
 export function createOperationRunner({control,github,authorityRegistry,clock,idGenerator,policyRevision,implementationActor="toss-core"}) {
@@ -131,8 +143,16 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
 
   async function apply(intent,{authority}={}) {
     const valid=validateCoreDocument(clone(intent,"intent"),"operation-intent.v1");
-    const storedReceipt=exactReceipt(await findReceipt(valid),valid);
-    if (storedReceipt) return storedReceipt;
+    let storedReceipt;
+    try { storedReceipt=exactReceipt(await findReceipt(valid),valid); } catch (error) {
+      const conflict=ledgerConflict(error,"receipt lookup");
+      if (conflict) throw conflict;
+      throw error;
+    }
+    if (storedReceipt) {
+      if (storedReceipt.status==="failed") throw new CoreRemoteError("Operation has a recorded failed receipt");
+      return storedReceipt;
+    }
     if (valid.authority!==null) {
       if (authority===null || authority===undefined) throw new CoreBlockedError("Operation intent requires authority");
       const verified=verifyAuthority(authority,expectedAuthorityBinding(valid,clock(),implementationActor),authorityRegistry);
@@ -143,8 +163,19 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
     } else if (authority!==null && authority!==undefined) {
       throw new CoreBlockedError("Operation intent does not declare authority");
     }
-    const prior=await findIntent(valid);
-    if (prior!==null && sha256Canonical(prior)!==sha256Canonical(valid)) throw new CoreConflictError("Intent identity conflicts with the ledger");
+    let prior;
+    try { prior=await findIntent(valid); } catch (error) {
+      const conflict=ledgerConflict(error,"intent lookup");
+      if (conflict) throw conflict;
+      throw error;
+    }
+    if (prior!==null) {
+      let storedIntent;
+      try { storedIntent=validateCoreDocument(clone(prior,"stored intent"),"operation-intent.v1"); } catch (error) {
+        throw new CoreConflictError("Operation intent ledger is corrupt",{cause:error});
+      }
+      if (sha256Canonical(storedIntent)!==sha256Canonical(valid)) throw new CoreConflictError("Intent identity conflicts with the ledger");
+    }
     let revision=await head();
     try {
       if (prior===null) revision=(await commitIntent({expectedHead:revision,intent:valid})).commit_sha;
@@ -166,27 +197,33 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
       const result=remoteResult(await applyRemote(valid.operations,{idempotencyKey:sha256Canonical(valid)}),valid);
       const receipt=receiptFor(valid,{receipt_id:idGenerator("receipt"),created_at:clock(),status:result.status,observed_revisions:result.observed_revisions});
       await commitReceipt({expectedHead:revision,receipt});
+      if (result.status==="failed") throw new CoreRemoteError("GitHub apply reported an incomplete or failed outcome");
       return receipt;
     } catch (error) {
+      if (error instanceof CoreRemoteError) throw error;
       try { await persistFailed(valid,revision,inspected); } catch (persistenceError) { throw new CoreRemoteError("GitHub apply failed and failed receipt could not be persisted",{cause:persistenceError}); }
       if (error instanceof CoreValidationError || error instanceof CoreConflictError) throw error;
       throw new CoreRemoteError("GitHub apply failed",{cause:error});
     }
   }
 
-  async function execute({command,source,operations,authority=null}) {
-    const commandValue=clone(command,"command");
-    const commandKeys=Object.keys(commandValue);
-    if (canonicalJson(commandKeys.sort())!==canonicalJson(["name","options","readOnly","interactive","confirmed"].sort()) &&
-        canonicalJson(commandKeys.sort())!==canonicalJson(["name","options","readOnly","interactive"].sort())) {
-      throw new CoreValidationError("operation command must use an exact closed shape");
+  async function execute(input) {
+    const request=clone(input,"execute request");
+    const requestKeys=Object.keys(request).sort();
+    const allowed=["authority","command","operations","source"];
+    const confirmedAllowed=[...allowed,"confirmed"].sort();
+    if (canonicalJson(requestKeys)!==canonicalJson(allowed) && canonicalJson(requestKeys)!==canonicalJson(confirmedAllowed)) {
+      throw new CoreValidationError("Operation execute request must use an exact closed shape");
     }
-    if (!commandValue.options || typeof commandValue.options!=="object" || commandValue.readOnly!==Boolean(!commandValue.options.apply)) throw new CoreValidationError("Operation command safety metadata is invalid");
-    if (commandValue.options.apply && commandValue.options.dryRun) throw new CoreValidationError("Apply and dry-run cannot be combined");
-    if (Object.hasOwn(commandValue,"confirmed") && typeof commandValue.confirmed!=="boolean") throw new CoreValidationError("Operation command confirmation must be boolean");
-    if (commandValue.options.apply && commandValue.options.nonInteractive!==true && commandValue.confirmed!==true) throw new CoreBlockedError("Interactive apply requires CLI confirmation");
-    const suppliedAuthority=authority===null ? null : clone(authority,"authority");
-    const intent=createOperationIntent({intent_id:idGenerator("intent"),created_at:clock(),command:commandValue.name,policy_revision:policyRevision(),source,authority:suppliedAuthority===null ? null : authorityReference(suppliedAuthority),operations});
+    if (Object.hasOwn(request,"confirmed") && typeof request.confirmed!=="boolean") throw new CoreValidationError("Operation confirmation must be boolean");
+    let commandValue;
+    try { commandValue=validateParsedCoreCommand(request.command); } catch (error) {
+      throw new CoreValidationError("Operation command is not an exact normalized core command",{cause:error});
+    }
+    if (commandValue.options.apply!==true && request.confirmed===true) throw new CoreValidationError("Operation confirmation is valid only for apply");
+    if (commandValue.options.apply===true && commandValue.options.nonInteractive!==true && request.confirmed!==true) throw new CoreBlockedError("Interactive apply requires CLI confirmation");
+    const suppliedAuthority=request.authority===null ? null : clone(request.authority,"authority");
+    const intent=createOperationIntent({intent_id:idGenerator("intent"),created_at:clock(),command:commandValue.name,policy_revision:policyRevision(),source:request.source,authority:suppliedAuthority===null ? null : authorityReference(suppliedAuthority),operations:request.operations});
     if (!commandValue.options.apply || commandValue.options.dryRun) return preview(intent);
     return apply(intent,{authority:suppliedAuthority});
   }
