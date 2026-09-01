@@ -18,6 +18,7 @@ import {canonicalJson} from "../../contracts/acp.js";
 
 const SHA=/^[a-f0-9]{40}$/u;
 const ZERO_SHA="0".repeat(40);
+const EMPTY_TREE_SHA="4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const SEGMENT=/^[A-Za-z0-9._-]+$/u;
 const REPOSITORY_FILENAME=/^[a-z0-9._-]+%2F[a-z0-9._-]+\.yaml$/u;
 
@@ -151,10 +152,15 @@ export function createGitControlRepository(options) {
     : async (handle,bytes) => handle.writeFile(bytes);
   if (typeof root!=="string" || !root) throw new TypeError("root must be a non-empty path string");
   const absoluteRoot=resolve(root);
+  let temporarySequence=0;
 
   async function runGit(args) {
     return execFile("git",args,{cwd:absoluteRoot});
   }
+
+  const stageFinalIndex=Object.hasOwn(options,"stageFinalIndex")
+    ? ownDataFunction(options,"stageFinalIndex")
+    : stageProposedIndex;
 
   async function secureRoot() {
     const stat=await lstat(absoluteRoot);
@@ -244,14 +250,71 @@ export function createGitControlRepository(options) {
     return ref;
   }
 
-  async function runPreCommitHook() {
+  async function runHook(name,args=[],{nonVeto=false}={}) {
     try {
-      await runGit(["hook","run","pre-commit"]);
+      await runGit(["hook","run",name,"--",...args]);
     } catch (error) {
-      if (error?.code===1 && /cannot find a hook named pre-commit/iu.test(String(error?.stderr ?? ""))) {
-        return;
+      if (error?.code===1 && new RegExp(`cannot find a hook named ${name}`,"iu").test(String(error?.stderr ?? ""))) {
+        return false;
       }
+      if (nonVeto) return false;
       throw error;
+    }
+    return true;
+  }
+
+  async function createMessageFile(message,temporary) {
+    await secureRoot();
+    const path=join(absoluteRoot,`.toss-core-message-${process.pid}-${temporarySequence++}.tmp`);
+    const handle=await open(path,"wx",0o600);
+    temporary.push(path);
+    try {
+      await handle.writeFile(message,"utf8");
+    } finally {
+      await handle.close();
+    }
+    return path;
+  }
+
+  async function requestedIndexIsCanonical(entries,actualHead) {
+    const result=await runGit([
+      "diff-index","--cached","--name-only","-z",actualHead ?? EMPTY_TREE_SHA,
+    ]);
+    const output=String(result?.stdout ?? "");
+    if (output && !output.endsWith("\0")) throw new Error("Git returned malformed staged path output");
+    const requested=new Set(entries.map(entry => entry.path));
+    const changed=output ? output.slice(0,-1).split("\0") : [];
+    for (const path of changed) {
+      assertSafeRelativePath(path);
+      if (!requested.has(path)) throw new Error(`hook staged an unexpected path: ${path}`);
+    }
+    for (const entry of entries) {
+      const result=await runGit(["show",`:${entry.path}`]);
+      if (String(result?.stdout ?? "")!==entry.bytes.toString("utf8")) {
+        throw new Error(`hook changed canonical control document bytes: ${entry.path}`);
+      }
+    }
+  }
+
+  async function stageProposedIndex(entries,commitSha) {
+    const result=await runGit(["ls-tree","-r","-z",commitSha,"--",...entries.map(entry => entry.path)]);
+    const output=String(result?.stdout ?? "");
+    if (output && !output.endsWith("\0")) throw new Error("Git returned malformed proposed tree output");
+    const expected=new Set(entries.map(entry => entry.path));
+    const objects=new Map();
+    for (const record of output ? output.slice(0,-1).split("\0") : []) {
+      const match=/^100644 blob ([a-f0-9]{40})\t(.+)$/u.exec(record);
+      if (!match) throw new Error("Git returned an unexpected proposed control tree entry");
+      const [,blob,path]=match;
+      assertSafeRelativePath(path);
+      if (!expected.delete(path) || objects.has(path)) {
+        throw new Error(`Git returned an unexpected proposed control tree path: ${path}`);
+      }
+      objects.set(path,blob);
+    }
+    if (expected.size!==0) throw new Error("Git omitted a requested control document from the proposed tree");
+    for (const entry of entries) {
+      await runGit(["update-index","--add","--cacheinfo",`100644,${objects.get(entry.path)},${entry.path}`]);
     }
   }
 
@@ -371,6 +434,7 @@ export function createGitControlRepository(options) {
       }
       for (const state of states) {
         const bytes=canonicalBytes(state.entry.document,state.entry.extension);
+        state.entry.bytes=bytes;
         const timestamp=clock();
         const milliseconds=timestamp instanceof Date ? timestamp.getTime() : timestamp;
         if (!Number.isSafeInteger(milliseconds) || milliseconds<0) {
@@ -391,15 +455,25 @@ export function createGitControlRepository(options) {
       }
       await runGit(actualHead===null ? ["read-tree","--empty"] : ["read-tree",actualHead]);
       await runGit(["add","--",...entries.map(entry => entry.path)]);
-      await runPreCommitHook();
+      await runHook("pre-commit");
+      const messagePath=await createMessageFile(message,temporary);
+      await runHook("prepare-commit-msg",[messagePath,"message"]);
+      await runHook("commit-msg",[messagePath]);
+      const messageText=await readFile(messagePath,"utf8");
+      assertMessage(messageText);
+      await requestedIndexIsCanonical(entries,actualHead);
       const treeResult=await runGit(["write-tree"]);
       const tree=String(treeResult?.stdout ?? "").trim();
       if (!SHA.test(tree)) throw new Error("Git did not create an exact 40-character tree SHA");
       const commitResult=await runGit([
-        "commit-tree",tree,...(actualHead===null ? [] : ["-p",actualHead]),"-m",message,
+        "commit-tree",tree,...(actualHead===null ? [] : ["-p",actualHead]),"-F",messagePath,
       ]);
+      await rm(messagePath,{force:true});
+      temporary.splice(temporary.indexOf(messagePath),1);
       const commitSha=String(commitResult?.stdout ?? "").trim();
       if (!SHA.test(commitSha)) throw new Error("Git did not create an exact 40-character commit SHA");
+      await restoreIndex(index);
+      await stageFinalIndex(entries,commitSha);
       try {
         await runGit(["update-ref",await headRef(),commitSha,actualHead ?? ZERO_SHA]);
       } catch (error) {
@@ -409,9 +483,7 @@ export function createGitControlRepository(options) {
         throw conflict;
       }
       succeeded=true;
-      await restoreIndex(index);
-      index=null;
-      await runGit(["add","--",...entries.map(entry => entry.path)]);
+      await runHook("post-commit",[],{nonVeto:true});
       return Object.freeze({commit_sha:commitSha});
     } finally {
       try {

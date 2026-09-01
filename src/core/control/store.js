@@ -169,23 +169,53 @@ export function createCoreControlStore({repository}) {
     });
   }
 
-  async function commitImmutable({expectedHead,document,path,schemaId,label}) {
+  async function commitGlobalImmutable({
+    expectedHead,document,schemaId,label,prefix,idField,pathFor,beforeWrite,
+  }) {
     const valid=validateCoreDocument(document,schemaId);
+    const path=pathFor(valid);
     const current=await head();
     if (current!==expectedHead) {
       throw new Error(`control repository expected head conflict: expected ${String(expectedHead)}, found ${String(current)}`);
     }
-    const existing=current===null ? null : await readAt(path,current);
-    if (existing!==null) {
-      if (equivalent(existing,valid)) return Object.freeze({commit_sha:current});
-      throw new Error(`${label} identity is immutable and already has different content`);
+    const matches=[];
+    if (current!==null) {
+      const paths=await listedDocuments(prefix,current);
+      for (const existingPath of paths) {
+        const existingDocument=await readAt(existingPath,current);
+        if (existingDocument===null) throw new Error(`listed ${label} is absent: ${existingPath}`);
+        const existing=validateCoreDocument(existingDocument,schemaId);
+        if (pathFor(existing)!==existingPath) {
+          throw new Error(`${label} identity does not match its path: ${existingPath}`);
+        }
+        if (existing[idField]===valid[idField]) matches.push({path:existingPath,document:existing});
+      }
     }
+    if (matches.length>1) {
+      throw new Error(`${label} identity is globally duplicated: ${valid[idField]}`);
+    }
+    if (matches.length===1) {
+      const existing=matches[0];
+      if (existing.path===path && equivalent(existing.document,valid)) {
+        return Object.freeze({commit_sha:current});
+      }
+      throw new Error(`${label} identity is immutable and already has different content or path`);
+    }
+    if (beforeWrite) await beforeWrite(valid,current);
     return commitFiles({expectedHead,message:`core: record ${label} ${path}`,files:{[path]:valid}});
   }
 
   async function commitIntent({expectedHead,intent}) {
     const valid=validateCoreDocument(intent,"operation-intent.v1");
-    return commitImmutable({expectedHead,document:valid,path:intentPath(valid),schemaId:"operation-intent.v1",label:"intent"});
+    return commitGlobalImmutable({
+      expectedHead,
+      document:valid,
+      schemaId:"operation-intent.v1",
+      label:"intent",
+      prefix:CONTROL_PATHS.intents,
+      idField:"intent_id",
+      pathFor:intentPath,
+    });
   }
 
   async function assertReceiptBinding(receipt,revision) {
@@ -232,12 +262,16 @@ export function createCoreControlStore({repository}) {
 
   async function commitReceipt({expectedHead,receipt}) {
     const valid=validateCoreDocument(receipt,"operation-receipt.v1");
-    const revision=await head();
-    if (revision!==expectedHead) {
-      throw new Error(`control repository expected head conflict: expected ${String(expectedHead)}, found ${String(revision)}`);
-    }
-    await assertReceiptBinding(valid,revision);
-    return commitImmutable({expectedHead,document:valid,path:receiptPath(valid),schemaId:"operation-receipt.v1",label:"receipt"});
+    return commitGlobalImmutable({
+      expectedHead,
+      document:valid,
+      schemaId:"operation-receipt.v1",
+      label:"receipt",
+      prefix:CONTROL_PATHS.receipts,
+      idField:"receipt_id",
+      pathFor:receiptPath,
+      beforeWrite:assertReceiptBinding,
+    });
   }
 
   async function commitConfiguration({expectedHead,files}) {

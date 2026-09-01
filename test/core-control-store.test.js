@@ -315,6 +315,30 @@ test("receipt binding rejects duplicate persisted intent identities",async t => 
   }),/exactly one persisted intent|duplicate/i);
 });
 
+test("public intent and receipt identities cannot be reused in another valid month",async t => {
+  const root=await createRepository(t);
+  const store=createCoreControlStore({repository:control(root)});
+  const planned=intent();
+  const intentCommit=await store.commitIntent({expectedHead:null,intent:planned});
+  const reusedIntent={...planned,created_at:"2026-10-01T08:00:00.000Z"};
+
+  await assert.rejects(store.commitIntent({
+    expectedHead:intentCommit.commit_sha,
+    intent:reusedIntent,
+  }),/immutable|identity|conflict/i);
+
+  const firstReceipt=receiptForIntent(planned);
+  const receiptCommit=await store.commitReceipt({
+    expectedHead:intentCommit.commit_sha,
+    receipt:firstReceipt,
+  });
+  const reusedReceipt={...firstReceipt,created_at:"2026-10-01T08:01:00.000Z"};
+  await assert.rejects(store.commitReceipt({
+    expectedHead:receiptCommit.commit_sha,
+    receipt:reusedReceipt,
+  }),/immutable|identity|conflict/i);
+});
+
 test("organization state reads every document at one resolved revision",async () => {
   const revisions=[];
   const snapshot="a".repeat(40);
@@ -422,6 +446,104 @@ test("failed pre-commit hook restores control files and preserves unrelated inde
     "A  unrelated-staged.txt\n?? unrelated-worktree.txt\n");
 });
 
+test("commit-msg hook vetoes publication and restores the control transaction",async t => {
+  const root=await createRepository(t);
+  const repositoryControl=control(root);
+  const initial=await repositoryControl.commitFiles({
+    expectedHead:null,
+    message:"initial",
+    files:{"config/organization.yaml":organization()},
+  });
+  await writeFile(join(root,"unrelated-staged.txt"),"staged\n");
+  await git(root,["add","--","unrelated-staged.txt"]);
+  const hook=join(root,".git","hooks","commit-msg");
+  await writeFile(hook,"#!/bin/sh\nexit 1\n");
+  await chmod(hook,0o755);
+
+  await assert.rejects(repositoryControl.commitFiles({
+    expectedHead:initial.commit_sha,
+    message:"must fail",
+    files:{"policies/lifecycle.yaml":{revision:"POLICY-0001"}},
+  }),/hook|commit-msg|failed/i);
+
+  assert.equal(await repositoryControl.head(),initial.commit_sha);
+  assert.equal(await repositoryControl.readDocument("policies/lifecycle.yaml"),null);
+  assert.equal((await git(root,["diff","--cached","--name-only"])).stdout,"unrelated-staged.txt\n");
+});
+
+test("a hook staging an unrelated path is rejected before a control tree is published",async t => {
+  const root=await createRepository(t);
+  const repositoryControl=control(root);
+  const initial=await repositoryControl.commitFiles({
+    expectedHead:null,
+    message:"initial",
+    files:{"config/organization.yaml":organization()},
+  });
+  const hook=join(root,".git","hooks","pre-commit");
+  await writeFile(hook,"#!/bin/sh\nprintf unexpected > unexpected.txt\ngit add unexpected.txt\n");
+  await chmod(hook,0o755);
+
+  await assert.rejects(repositoryControl.commitFiles({
+    expectedHead:initial.commit_sha,
+    message:"must fail",
+    files:{"policies/lifecycle.yaml":{revision:"POLICY-0001"}},
+  }),/unexpected path|unsupported control document extension|hook/i);
+
+  assert.equal(await repositoryControl.head(),initial.commit_sha);
+  await assert.rejects(git(root,["show",`${initial.commit_sha}:unexpected.txt`]),/does not exist|not in/i);
+  assert.equal(await repositoryControl.readDocument("policies/lifecycle.yaml"),null);
+});
+
+test("prepare-commit-msg edits are reflected in the committed message",async t => {
+  const root=await createRepository(t);
+  const repositoryControl=control(root);
+  const hook=join(root,".git","hooks","prepare-commit-msg");
+  await writeFile(hook,"#!/bin/sh\nprintf 'rewritten control message\\n' > \"$1\"\n");
+  await chmod(hook,0o755);
+
+  const committed=await repositoryControl.commitFiles({
+    expectedHead:null,
+    message:"original message",
+    files:{"config/organization.yaml":organization()},
+  });
+
+  assert.match((await git(root,["log","-1","--format=%B",committed.commit_sha])).stdout,/^rewritten control message\n/u);
+});
+
+test("a nonzero post-commit hook cannot veto an already published control commit",async t => {
+  const root=await createRepository(t);
+  const repositoryControl=control(root);
+  const hook=join(root,".git","hooks","post-commit");
+  await writeFile(hook,"#!/bin/sh\nexit 1\n");
+  await chmod(hook,0o755);
+
+  const committed=await repositoryControl.commitFiles({
+    expectedHead:null,
+    message:"published despite hook",
+    files:{"config/organization.yaml":organization()},
+  });
+
+  assert.equal(await repositoryControl.head(),committed.commit_sha);
+});
+
+test("final index entries come from the proposed commit instead of hook-mutated working files",async t => {
+  const root=await createRepository(t);
+  const repositoryControl=control(root);
+  const hook=join(root,".git","hooks","commit-msg");
+  await writeFile(hook,"#!/bin/sh\nprintf 'revision: HOOK-MUTATED\\n' > policies/lifecycle.yaml\n");
+  await chmod(hook,0o755);
+
+  const committed=await repositoryControl.commitFiles({
+    expectedHead:null,
+    message:"canonical proposed index",
+    files:{"policies/lifecycle.yaml":{revision:"POLICY-0001"}},
+  });
+
+  assert.equal((await git(root,["show",":policies/lifecycle.yaml"])).stdout,
+    (await git(root,["show",`${committed.commit_sha}:policies/lifecycle.yaml`])).stdout);
+  assert.equal((await git(root,["show",":policies/lifecycle.yaml"])).stdout,"revision: POLICY-0001\n");
+});
+
 test("temporary write failure removes its temp, lock, target, and created directory",async t => {
   const root=await createRepository(t);
   const seed=control(root);
@@ -450,6 +572,31 @@ test("temporary write failure removes its temp, lock, target, and created direct
   assert.equal((await git(root,["diff","--cached","--name-only"])).stdout,"unrelated-staged.txt\n");
   assert.equal((await git(root,["status","--porcelain"])).stdout,
     "A  unrelated-staged.txt\n?? unrelated-worktree.txt\n");
+});
+
+test("final index preparation failure rolls back before the durable CAS",async t => {
+  const root=await createRepository(t);
+  const seed=control(root);
+  const initial=await seed.commitFiles({
+    expectedHead:null,
+    message:"initial",
+    files:{"config/organization.yaml":organization()},
+  });
+  await writeFile(join(root,"unrelated-staged.txt"),"staged\n");
+  await git(root,["add","--","unrelated-staged.txt"]);
+  const repositoryControl=controlWith(root,{stageFinalIndex:async () => {
+    throw new Error("injected final index preparation failure");
+  }});
+
+  await assert.rejects(repositoryControl.commitFiles({
+    expectedHead:initial.commit_sha,
+    message:"must fail",
+    files:{"policies/lifecycle.yaml":{revision:"POLICY-0001"}},
+  }),/injected final index preparation failure/i);
+
+  assert.equal(await repositoryControl.head(),initial.commit_sha);
+  assert.equal(await repositoryControl.readDocument("policies/lifecycle.yaml"),null);
+  assert.equal((await git(root,["diff","--cached","--name-only"])).stdout,"unrelated-staged.txt\n");
 });
 
 test("store validates persisted core contracts and exposes exact intent lookup",async t => {
