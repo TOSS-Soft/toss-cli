@@ -10,7 +10,7 @@
     "schema_version": {"const": "operation-intent.v1"},
     "document_type": {"const": "operation-intent"},
     "intent_id": {"type": "string", "pattern": "^INTENT-[0-9]{8}-[0-9]{4,}$"},
-    "command": {"type": "string", "pattern": "^[a-z][a-z0-9-]*(?:\\.[a-z][a-z0-9-]*)+$"},
+    "command": {"type": "string", "pattern": "^[a-z][a-z0-9]*(?:-[a-z0-9]+)*(?:\\.[a-z][a-z0-9]*(?:-[a-z0-9]+)*)*$"},
     "created_at": {"type": "string", "format": "rfc3339-date-time"},
     "policy_revision": {"type": "string", "pattern": "^POLICY-[0-9]{4,}$"},
     "source": {"$ref": "#/$defs/source"},

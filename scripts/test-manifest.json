@@ -8,6 +8,7 @@
       "test/common-contracts.test.js",
       "test/core-command-contract.test.js",
       "test/core-contracts.test.js",
+      "test/core-foundation-commands.test.js",
       "test/decisions.test.js",
       "test/design-auditor.test.js",
       "test/design-commands.test.js",

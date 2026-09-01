@@ -122,6 +122,17 @@ test("authority records reject malformed expiry timestamps",() => {
   },"authority-record.v1").valid,false);
 });
 
+test("core command contracts accept normalized single and dotted names only",() => {
+  for (const command of ["init","sync","audit","doctor","repo.add"]) {
+    assert.equal(validateDocument({...AUTHORITY,command},"authority-record.v1").valid,true,command);
+    assert.equal(validateDocument({...INTENT,command},"operation-intent.v1").valid,true,command);
+  }
+  for (const command of [".init","init.","repo..add","Repo.add","init-","repo-.add","repo.-add"]) {
+    assert.equal(validateDocument({...AUTHORITY,command},"authority-record.v1").valid,false,command);
+    assert.equal(validateDocument({...INTENT,command},"operation-intent.v1").valid,false,command);
+  }
+});
+
 test("operation receipts require lowercase SHA-256 intent hashes",() => {
   assert.equal(validateDocument({
     ...RECEIPT,

@@ -8,9 +8,16 @@ import {
   CoreCommandUsageError,
   parseCoreCommand,
 } from "./options.js";
+import {runInitCommand} from "./init.js";
+import {runRepositoryCommand} from "./repository.js";
 
 const FOUNDATION_COMMANDS=new Set(["init","repo.add","repo.list"]);
 const CONTEXT_KEYS=new Set(["handlers","services"]);
+const BUILTIN_HANDLERS=Object.freeze({
+  init:runInitCommand,
+  "repo.add":runRepositoryCommand,
+  "repo.list":runRepositoryCommand,
+});
 
 export {CORE_EXIT_CODES,CoreCommandUsageError,parseCoreCommand};
 
@@ -127,7 +134,7 @@ export async function dispatchCoreCommand(command,context={}) {
         "Command is declared but not implemented: "+normalized.name,
       );
     }
-    const handler=services.handlers?.[normalized.name];
+    const handler=services.handlers?.[normalized.name] ?? BUILTIN_HANDLERS[normalized.name];
     if (!handler) {
       return failure(
         CORE_EXIT_CODES.NOT_IMPLEMENTED,

@@ -137,6 +137,15 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
 
   async function preview(intent) { return operationPreview(intent); }
 
+  function verifyAuthorityFor(intent,authority) {
+    const valid=validateCoreDocument(clone(intent,"intent"),"operation-intent.v1");
+    if (valid.authority===null) throw new CoreBlockedError("Operation intent does not declare authority");
+    if (authority===null || authority===undefined) throw new CoreBlockedError("Operation intent requires authority");
+    const verified=verifyAuthority(authority,expectedAuthorityBinding(valid,clock(),implementationActor),authorityRegistry);
+    if (canonicalJson(valid.authority)!==canonicalJson(authorityReference(verified)) && canonicalJson(valid.authority)!==canonicalJson(verified)) throw new CoreBlockedError("Operation intent authority does not bind the supplied authority record");
+    return verified;
+  }
+
   async function persistFailed(intent,expectedHead,observed_revisions=[]) {
     const receipt=receiptFor(intent,{receipt_id:idGenerator("receipt"),created_at:clock(),status:"failed",observed_revisions});
     await commitReceipt({expectedHead,receipt});
@@ -156,12 +165,7 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
       return storedReceipt;
     }
     if (valid.authority!==null) {
-      if (authority===null || authority===undefined) throw new CoreBlockedError("Operation intent requires authority");
-      const verified=verifyAuthority(authority,expectedAuthorityBinding(valid,clock(),implementationActor),authorityRegistry);
-      if (canonicalJson(valid.authority)!==canonicalJson(authorityReference(verified)) &&
-          canonicalJson(valid.authority)!==canonicalJson(verified)) {
-        throw new CoreBlockedError("Operation intent authority does not bind the supplied authority record");
-      }
+      verifyAuthorityFor(valid,authority);
     } else if (authority!==null && authority!==undefined) {
       throw new CoreBlockedError("Operation intent does not declare authority");
     }
@@ -236,5 +240,5 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
     if (!commandValue.options.apply || commandValue.options.dryRun) return preview(intent);
     return apply(intent,{authority:suppliedAuthority});
   }
-  return Object.freeze({preview,apply,execute});
+  return Object.freeze({preview,apply,execute,verifyAuthorityFor});
 }

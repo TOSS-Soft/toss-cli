@@ -202,6 +202,22 @@ export function createCoreControlStore({repository}) {
     });
   }
 
+  async function loadBootstrapState() {
+    const revision=await head();
+    if (revision===null) return null;
+    const organizationDocument=await readAt(CONTROL_PATHS.organization,revision);
+    if (organizationDocument===null) return null;
+    const organization=validateCoreDocument(organizationDocument,"organization-config.v1");
+    const intents=await resolveGlobalIdentities({revision,prefix:CONTROL_PATHS.intents,schemaId:"operation-intent.v1",label:"intent",idField:"intent_id",pathFor:intentPath,ledgerRead:true});
+    const bootstrapIntents=intents.filter(record => record.document.command==="init");
+    if (bootstrapIntents.length!==1) throw ledgerConflict("control repository must contain exactly one bootstrap intent");
+    const intent=bootstrapIntents[0].document;
+    const receipts=await resolveGlobalIdentities({revision,prefix:CONTROL_PATHS.receipts,schemaId:"operation-receipt.v1",label:"receipt",idField:"receipt_id",pathFor:receiptPath,ledgerRead:true});
+    const matching=receipts.filter(record => record.document.intent_id===intent.intent_id && record.document.intent_sha256===sha256Canonical(intent));
+    if (matching.length!==1) throw ledgerConflict("bootstrap intent must have exactly one matching receipt");
+    return Object.freeze({organization,intent,receipt:matching[0].document,revision});
+  }
+
   async function commitGlobalImmutable({
     expectedHead,document,schemaId,label,prefix,idField,pathFor,beforeWrite,
   }) {
@@ -321,6 +337,32 @@ export function createCoreControlStore({repository}) {
     });
   }
 
+  async function commitBootstrap({expectedHead,files}) {
+    if (expectedHead!==null) throw new TypeError("bootstrap is permitted only for an unborn control repository");
+    const current=await head();
+    if (current!==null) throw ledgerConflict("bootstrap is permitted only for an unborn control repository");
+    if (files===null || typeof files!=="object" || Array.isArray(files) || types.isProxy(files)) throw new TypeError("bootstrap files must be a non-proxy object map");
+    const entries=Object.entries(files);
+    const organizationEntry=entries.find(([path]) => path===CONTROL_PATHS.organization);
+    const lifecycleEntry=entries.find(([path]) => path===`${CONTROL_PATHS.policies}/lifecycle.yaml`);
+    const releaseEntry=entries.find(([path]) => path===`${CONTROL_PATHS.policies}/release.yaml`);
+    const intentEntries=entries.filter(([path]) => path.startsWith(`${CONTROL_PATHS.intents}/`) && path.endsWith(".json"));
+    const receiptEntries=entries.filter(([path]) => path.startsWith(`${CONTROL_PATHS.receipts}/`) && path.endsWith(".json"));
+    if (!organizationEntry || !lifecycleEntry || !releaseEntry || intentEntries.length!==1 || receiptEntries.length!==1 || entries.length!==5) throw new TypeError("bootstrap must contain exactly organization, both policies, one intent, and one receipt");
+    const organization=validateCoreDocument(organizationEntry[1],"organization-config.v1");
+    if (organization.repositories.length!==0) throw new TypeError("bootstrap organization must not register repositories");
+    canonicalJson(lifecycleEntry[1]); canonicalJson(releaseEntry[1]);
+    const intent=validateCoreDocument(intentEntries[0][1],"operation-intent.v1");
+    const receipt=validateCoreDocument(receiptEntries[0][1],"operation-receipt.v1");
+    if (intent.command!=="init" || intent.authority===null || intent.source.repository!==organization.control_repository || intentPath(intent)!==intentEntries[0][0] || receiptPath(receipt)!==receiptEntries[0][0]) throw new TypeError("bootstrap intent and receipt must use canonical bootstrap identities");
+    if (receipt.intent_id!==intent.intent_id || receipt.intent_sha256!==sha256Canonical(intent)) throw new TypeError("bootstrap receipt must bind the bootstrap intent");
+    const operations=new Map(intent.operations.map(operation => [operation.operation_id,operation]));
+    for (const observed of receipt.observed_revisions) {
+      if (!operations.has(observed.operation_id) || operations.get(observed.operation_id).repository!==observed.repository) throw new TypeError("bootstrap receipt observed revision is incompatible with bootstrap intent");
+    }
+    return commitFiles({expectedHead:null,message:"core: bootstrap control repository",files});
+  }
+
   async function commitConfiguration({expectedHead,files}) {
     if (files===null || typeof files!=="object" || Array.isArray(files) || types.isProxy(files)) {
       throw new TypeError("configuration files must be a non-proxy object map");
@@ -333,10 +375,12 @@ export function createCoreControlStore({repository}) {
   return Object.freeze({
     loadOrganization,
     loadOrganizationState,
+    loadBootstrapState,
     loadRepository,
     listRepositories,
     commitIntent,
     commitReceipt,
+    commitBootstrap,
     commitConfiguration,
     head,
     findIntent,

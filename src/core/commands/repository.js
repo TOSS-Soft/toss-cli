@@ -1,0 +1,89 @@
+import {repositoryPath} from "../control/store.js";
+import {CoreBlockedError,CoreConflictError,CoreValidationError} from "../errors.js";
+import {closedData,exact,ownDataFunction,requireAuthority} from "./common.js";
+
+function canonicalRepository(value) {
+  if (typeof value!=="string" || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(value)) throw new CoreValidationError("Repository must be canonical OWNER/REPO");
+  return value;
+}
+
+function repositoryInput(value) {
+  const input=closedData(value,"repository input");
+  exact(input,["default_branch","project_owner","project_number"],"repository input");
+  if (typeof input.default_branch!=="string" || !/\S/u.test(input.default_branch) || typeof input.project_owner!=="string" || !/\S/u.test(input.project_owner) || !Number.isInteger(input.project_number) || input.project_number<1) throw new CoreValidationError("Repository input is malformed");
+  return input;
+}
+
+function registration(value,repository) {
+  const snapshot=closedData(value,"repository registration snapshot");
+  exact(snapshot,["kind","source","repository","project"],"repository registration snapshot");
+  exact(snapshot.source,["repository","revision","sha256"],"repository registration source");
+  exact(snapshot.repository,["node_id","default_branch","revision","access","rules","project_item_id"],"repository registration repository");
+  exact(snapshot.repository.access,["admin"],"repository registration access");
+  exact(snapshot.repository.rules,["default_branch_protected"],"repository registration rules");
+  exact(snapshot.project,["node_id","number","fields"],"repository registration project");
+  exact(snapshot.project.fields,["status","gate"],"repository registration project fields");
+  if (snapshot.kind!=="repository-registration" || snapshot.source.repository!==repository ||
+      typeof snapshot.source.revision!=="string" || !/^[a-f0-9]{64}$/u.test(snapshot.source.sha256) || typeof snapshot.repository.node_id!=="string" || !/\S/u.test(snapshot.repository.node_id) ||
+      typeof snapshot.repository.default_branch!=="string" || !/\S/u.test(snapshot.repository.default_branch) || typeof snapshot.repository.revision!=="string" || !/\S/u.test(snapshot.repository.revision) || snapshot.repository.access.admin!==true || snapshot.repository.rules.default_branch_protected!==true ||
+      typeof snapshot.repository.project_item_id!=="string" || !/\S/u.test(snapshot.repository.project_item_id) || typeof snapshot.project.node_id!=="string" || !/\S/u.test(snapshot.project.node_id) || !Number.isInteger(snapshot.project.number) || snapshot.project.number<1 || typeof snapshot.project.fields.status!=="string" || !/\S/u.test(snapshot.project.fields.status) || typeof snapshot.project.fields.gate!=="string" || !/\S/u.test(snapshot.project.fields.gate)) throw new CoreValidationError("Repository registration snapshot is malformed");
+  return snapshot;
+}
+
+function desiredConfig(repository,input,snapshot,clock) {
+  return Object.freeze({schema_version:"repository-config.v1",repository,repository_node_id:snapshot.repository.node_id,default_branch:input.default_branch,active_release:null,project_item_id:snapshot.repository.project_item_id,project_fields:Object.freeze({status:snapshot.project.fields.status,gate:snapshot.project.fields.gate}),registered_at:clock()});
+}
+
+function sameRegistration(existing,desired) {
+  return existing.repository===desired.repository && existing.repository_node_id===desired.repository_node_id && existing.default_branch===desired.default_branch && existing.active_release===desired.active_release && existing.project_item_id===desired.project_item_id && existing.project_fields.status===desired.project_fields.status && existing.project_fields.gate===desired.project_fields.gate;
+}
+
+async function add(command,services) {
+  const repository=canonicalRepository(command.args[0]);
+  if (command.options.from===null) throw new CoreValidationError("repo add requires --from <FILE>");
+  const input=repositoryInput(await ownDataFunction(services,"readInput","services")(command.options.from));
+  const organization=await ownDataFunction(services.control,"loadOrganization","control")();
+  if (organization===null) throw new CoreBlockedError("Organization initialization or reconciliation is required before repository mutation");
+  if (input.project_owner!==organization.organization || input.project_number!==organization.project.number) throw new CoreValidationError("Repository input does not bind the configured organization Project");
+  const snapshot=registration(await ownDataFunction(services.github,"snapshot","github")({kind:"repository-registration",repository,project:organization.project}),repository);
+  if (snapshot.project.node_id!==organization.project.node_id || snapshot.project.number!==organization.project.number || snapshot.repository.default_branch!==input.default_branch) throw new CoreConflictError("Repository registration snapshot does not match the requested Project or default branch");
+  const desired=desiredConfig(repository,input,snapshot,services.clock);
+  const existing=await ownDataFunction(services.control,"loadRepository","control")(repository);
+  if (existing!==null) {
+    if (!sameRegistration(existing,desired)) throw new CoreConflictError("Repository identity is already registered with different node or configuration");
+    return Object.freeze({status:"already-registered",repository,control_revision:await ownDataFunction(services.control,"head","control")()});
+  }
+  const authority=await requireAuthority(command,services);
+  const operation=Object.freeze({resource:"repository",action:"register",repository,expected_revision:snapshot.repository.revision,payload:Object.freeze({kind:"repository-registration",repository_config:desired,access:snapshot.repository.access,rules:snapshot.repository.rules,project:snapshot.project})});
+  const outcome=await ownDataFunction(services.operations,"execute","operations")({command,source:snapshot.source,operations:[operation],authority});
+  if (!command.options.apply || command.options.dryRun) return outcome;
+  const head=await ownDataFunction(services.control,"head","control")();
+  const nextOrganization=Object.freeze({...organization,repositories:Object.freeze([...organization.repositories,repository].sort())});
+  const committed=await ownDataFunction(services.control,"commitConfiguration","control")({expectedHead:head,files:Object.freeze({"config/organization.yaml":nextOrganization,[repositoryPath(repository)]:desired})});
+  return Object.freeze({status:"registered",repository,control_revision:committed.commit_sha,receipt:outcome});
+}
+
+async function list(services) {
+  const control=services.control;
+  const [repositories,revision]=await Promise.all([ownDataFunction(control,"listRepositories","control")(),ownDataFunction(control,"head","control")()]);
+  const values=closedData(repositories,"registered repositories");
+  if (!Array.isArray(values)) throw new CoreValidationError("Registered repositories must be an array");
+  const ordered=Object.freeze([...values].sort((left,right) => left.repository.localeCompare(right.repository,"en",{sensitivity:"variant"})));
+  const remote=closedData(await ownDataFunction(services.github,"snapshot","github")({kind:"repository-list",repositories:ordered.map(value => value.repository)}),"repository list snapshot");
+  exact(remote,["kind","revisions"],"repository list snapshot");
+  if (remote.kind!=="repository-list" || !Array.isArray(remote.revisions) || remote.revisions.length!==ordered.length) throw new CoreValidationError("Repository list snapshot is malformed");
+  const revisions=new Map();
+  for (const item of remote.revisions) {
+    exact(item,["repository","revision"],"repository list revision");
+    if (typeof item.repository!=="string" || !(item.revision===null || typeof item.revision==="string") || revisions.has(item.repository)) throw new CoreValidationError("Repository list snapshot has malformed revisions");
+    revisions.set(item.repository,item.revision);
+  }
+  if (ordered.some(value => !revisions.has(value.repository))) throw new CoreValidationError("Repository list snapshot does not cover every registered repository");
+  return Object.freeze({repositories:ordered,control_revision:revision,github_revisions:Object.freeze(ordered.map(value => Object.freeze({repository:value.repository,revision:revisions.get(value.repository)})))});
+}
+
+export async function runRepositoryCommand(command,services) {
+  if (command.name==="repo.add") return add(command,services);
+  if (command.name==="repo.list") return list(services);
+  throw new CoreValidationError("Unsupported repository command");
+}

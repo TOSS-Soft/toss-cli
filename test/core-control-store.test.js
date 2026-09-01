@@ -719,3 +719,21 @@ test("intent commit tags stale head and immutable identity conflicts",async t =>
     ...planned,operations:[{...planned.operations[0],payload:{default_branch:"trunk"}}],
   }}),error => error?.code==="CONTROL_LEDGER_CONFLICT");
 });
+
+test("bootstrap commits its closed configuration, intent, and receipt in one unborn-repository CAS",async t => {
+  const root=await createRepository(t);
+  const store=createCoreControlStore({repository:control(root)});
+  const planned={...intent(),command:"init",source:{...intent().source,repository:"TOSS-Soft/toss-os-control"},authority:{record_id:"AUTH-20260901-0001",sha256:"a".repeat(64)},operations:[{...intent().operations[0],repository:"TOSS-Soft/toss-os-control"}]};
+  const recorded=receiptForIntent(planned);
+  const committed=await store.commitBootstrap({expectedHead:null,files:{
+    "config/organization.yaml":{...organization(),repositories:[]},
+    "policies/lifecycle.yaml":{revision:"POLICY-0001"},
+    "policies/release.yaml":{revision:"POLICY-0001"},
+    "intents/2026/09/INTENT-20260901-0001.json":planned,
+    "receipts/2026/09/RECEIPT-20260901-0001.json":recorded,
+  }});
+  assert.match(committed.commit_sha,/^[a-f0-9]{40}$/u);
+  assert.equal((await store.loadOrganization()).organization,"TOSS-Soft");
+  assert.equal((await store.loadBootstrapState()).intent.intent_id,"INTENT-20260901-0001");
+  await assert.rejects(store.commitBootstrap({expectedHead:committed.commit_sha,files:{"config/organization.yaml":organization()}}),/unborn|bootstrap|head/i);
+});
