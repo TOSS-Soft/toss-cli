@@ -189,7 +189,11 @@ export function createCoreControlStore({repository}) {
     const revision=await head();
     if (revision===null) return Object.freeze({revision:null,organization:null,repositories:Object.freeze([])});
     const organizationDocument=await readAt(CONTROL_PATHS.organization,revision);
-    if (organizationDocument===null) return Object.freeze({revision,organization:null,repositories:Object.freeze([])});
+    if (organizationDocument===null) {
+      const paths=await listedDocuments(CONTROL_PATHS.repositories,revision);
+      if (paths.length!==0) throw ledgerConflict("repository configuration namespace exists without organization configuration");
+      return Object.freeze({revision,organization:null,repositories:Object.freeze([])});
+    }
     const organization=validateCoreDocument(organizationDocument,"organization-config.v1");
     const paths=[...await listedDocuments(CONTROL_PATHS.repositories,revision)].sort(rawCompare);
     const repositories=[]; const identities=new Set();
@@ -217,7 +221,7 @@ export function createCoreControlStore({repository}) {
     let valid;
     try { valid=validateCoreDocument(config,"repository-config.v1"); } catch (error) { throw ledgerConflict("repository registration intent has corrupt configuration",{cause:error}); }
     if (valid.repository!==identity) throw ledgerConflict("repository registration intent does not bind its identity");
-    const receipt=await findReceipt(intent);
+    const receipt=await findReceiptAt(intent,state.revision);
     if (receipt===null || receipt.status!=="completed") return null;
     return Object.freeze({revision:state.revision,intent,receipt,configuration:valid});
   }
@@ -370,9 +374,8 @@ export function createCoreControlStore({repository}) {
     return existing.document;
   }
 
-  async function findReceipt(intent) {
+  async function findReceiptAt(intent,revision) {
     const valid=validateCoreDocument(intent,"operation-intent.v1");
-    const revision=await head();
     if (revision===null) return null;
     const matches=(await resolveGlobalIdentities({
       revision,
@@ -388,6 +391,10 @@ export function createCoreControlStore({repository}) {
       throw ledgerConflict(`receipt lookup is ambiguous or conflicts with intent: ${valid.intent_id}`);
     }
     return matches[0].document;
+  }
+
+  async function findReceipt(intent) {
+    return findReceiptAt(intent,await head());
   }
 
   async function commitReceipt({expectedHead,receipt}) {

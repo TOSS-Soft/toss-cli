@@ -258,6 +258,13 @@ test("repository configuration uses the approved reversible percent filename exc
   await assert.rejects(repositoryControl.readDocument("config/repositories/toss-soft%2Ftoss-cli.json"),/unsafe relative path|unsupported/i);
 });
 
+test("configuration commits reject non-registry paths and registry drift without organization",async t => {
+  const root=await createRepository(t); const repositoryControl=control(root); const store=createCoreControlStore({repository:repositoryControl});
+  await assert.rejects(store.commitConfiguration({expectedHead:null,files:{"config/organization.yaml":organization(),"policies/unsafe.yaml":repositoryConfig()}}),/permitted/i);
+  await repositoryControl.commitFiles({expectedHead:null,message:"orphan repository config",files:{[repositoryPath("TOSS-Soft/toss-cli")]:repositoryConfig()}});
+  await assert.rejects(store.loadRegistryState(),error => error?.code==="CONTROL_LEDGER_CONFLICT");
+});
+
 test("receipts require one matching persisted intent and remain immutable when bound",async t => {
   const root=await createRepository(t);
   const store=createCoreControlStore({repository:control(root)});
@@ -747,4 +754,29 @@ test("bootstrap commits its closed configuration, intent, and receipt in one unb
   assert.equal((await store.loadOrganization()).organization,"TOSS-Soft");
   assert.equal((await store.loadBootstrapState()).intent.intent_id,"INTENT-20260901-0001");
   await assert.rejects(store.commitBootstrap({expectedHead:committed.commit_sha,files:{"config/organization.yaml":organization()}}),/unborn|bootstrap|head/i);
+});
+
+test("persisted bootstrap corruption never establishes initialized state",async t => {
+  const build=() => {
+    const organization={schema_version:"organization-config.v1",organization:"TOSS-Soft",project:{node_id:"PVT_kwDO",number:2},control_repository:"TOSS-Soft/toss-os-control",policy_revision:"POLICY-0001",repositories:[]}; const lifecycle={revision:"POLICY-0001"}; const release={revision:"POLICY-0001"}; const hashes={organization:sha256Canonical(organization),lifecycle:sha256Canonical(lifecycle),release:sha256Canonical(release)}; const repository="TOSS-Soft/toss-os-control";
+    const intent=createOperationIntent({intent_id:"INTENT-20260901-0099",created_at:"2026-09-01T08:00:00.000Z",command:"init",policy_revision:"POLICY-0001",source:{repository,revision:"r0",sha256:"a".repeat(64)},authority:{record_id:"AUTH-20260901-0001",sha256:"a".repeat(64)},operations:[
+      {resource:"repository",action:"create",repository,expected_revision:null,payload:{kind:"create-private-control-repository",private:true,files:hashes}}, {resource:"repository",action:"update",repository,expected_revision:null,payload:{kind:"verify-default-branch-protection"}}, {resource:"project",action:"update",repository:null,expected_revision:null,payload:{kind:"discover-project-fields",project:organization.project}},
+      ...[["organization-config",hashes.organization],["lifecycle-policy",hashes.lifecycle],["release-policy",hashes.release]].map(([kind,sha256]) => ({resource:"repository",action:"commit",repository,expected_revision:null,payload:{kind,sha256}})), {resource:"repository",action:"commit",repository,expected_revision:null,payload:{kind:"first-control-transaction",files:hashes}},
+    ]});
+    const receipt={...receiptForIntent(intent,{number:"0099",observed_revisions:intent.operations.filter(operation => !["organization-config","lifecycle-policy","release-policy","first-control-transaction"].includes(operation.payload.kind)).map(operation => ({operation_id:operation.operation_id,repository:operation.repository,revision:"r1"}))})};
+    return {organization,lifecycle,release,intent,receipt};
+  };
+  for (const mutation of [
+    value => ({...value,receipt:{...value.receipt,status:"failed"}}),
+    value => ({...value,receipt:{...value.receipt,observed_revisions:value.receipt.observed_revisions.slice(1)}}),
+    value => ({...value,receipt:{...value.receipt,observed_revisions:[...value.receipt.observed_revisions,{...value.receipt.observed_revisions[0]}]}}),
+    value => { const intent={...value.intent,operations:value.intent.operations.map(operation => operation.payload.kind==="organization-config" ? {...operation,payload:{...operation.payload,sha256:"b".repeat(64)}} : operation)}; return {...value,intent,receipt:{...value.receipt,intent_sha256:sha256Canonical(intent)}}; },
+    value => ({...value,lifecycle:{revision:"POLICY-OTHER"}}),
+    value => ({...value,organization:{...value.organization,project:{node_id:"PVT_other",number:8}}}),
+  ]) {
+    const root=await createRepository(t); const repositoryControl=control(root); const store=createCoreControlStore({repository:repositoryControl}); const value=mutation(build());
+    const files={"config/organization.yaml":value.organization,"policies/lifecycle.yaml":value.lifecycle,"policies/release.yaml":value.release,[`intents/2026/09/${value.intent.intent_id}.json`]:value.intent,[`receipts/2026/09/${value.receipt.receipt_id}.json`]:value.receipt};
+    await repositoryControl.commitFiles({expectedHead:null,message:"corrupt bootstrap fixture",files});
+    await assert.rejects(store.loadBootstrapState(),error => error?.code==="CONTROL_LEDGER_CONFLICT");
+  }
 });
