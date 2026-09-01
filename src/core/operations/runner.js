@@ -230,12 +230,17 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
   }
 
   async function execute(input) {
-    if (!input || typeof input!=="object" || Array.isArray(input) || types.isProxy(input)) throw new CoreValidationError("Operation execute request must be a plain non-proxy object");
+    if (!input || typeof input!=="object" || Array.isArray(input) || types.isProxy(input) ||
+        ![Object.prototype,null].includes(Object.getPrototypeOf(input))) {
+      throw new CoreValidationError("Operation execute request must be a plain non-proxy object");
+    }
     const descriptors=Object.getOwnPropertyDescriptors(input);
     const confirmation=descriptors.confirm?.value;
     if (Object.hasOwn(descriptors,"confirm") && (!descriptors.confirm.enumerable || !("value" in descriptors.confirm) || typeof confirmation!=="function" || types.isProxy(confirmation))) throw new CoreValidationError("Operation confirmation callback must be an own-data non-proxy function");
     const clean=Object.create(null);
-    for (const [key,descriptor] of Object.entries(descriptors)) {
+    for (const key of Reflect.ownKeys(descriptors)) {
+      if (typeof key!=="string") throw new CoreValidationError("Operation execute request contains a symbol field");
+      const descriptor=descriptors[key];
       if (key==="confirm") continue;
       if (!descriptor.enumerable || !("value" in descriptor)) throw new CoreValidationError("Operation execute request contains an accessor or hidden field");
       clean[key]=descriptor.value;

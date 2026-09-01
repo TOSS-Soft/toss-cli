@@ -21,7 +21,7 @@ const SHA=/^[a-f0-9]{40}$/u;
 const ZERO_SHA="0".repeat(40);
 const EMPTY_TREE_SHA="4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 const SEGMENT=/^[A-Za-z0-9._-]+$/u;
-const REPOSITORY_FILENAME=/^[a-z0-9._-]+%2F[a-z0-9._-]+\.yaml$/u;
+const REPOSITORY_FILENAME=/^[A-Za-z0-9._-]+%2F[A-Za-z0-9._-]+\.yaml$/u;
 
 function ownData(options,key) {
   if (options===null || typeof options!=="object" || types.isProxy(options)) {
@@ -121,10 +121,14 @@ function normalizeFiles(files) {
   if (files===null || typeof files!=="object" || Array.isArray(files) || types.isProxy(files)) {
     throw new TypeError("files must be a non-proxy object map");
   }
+  if (![Object.prototype,null].includes(Object.getPrototypeOf(files))) {
+    throw new TypeError("files must be a plain object map");
+  }
+  const descriptors=Object.getOwnPropertyDescriptors(files);
   const entries=[];
-  for (const path of Object.keys(files)) {
-    const descriptor=Object.getOwnPropertyDescriptor(files,path);
-    if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
+  for (const path of Reflect.ownKeys(descriptors)) {
+    const descriptor=descriptors[path];
+    if (typeof path!=="string" || !descriptor || !("value" in descriptor) || !descriptor.enumerable) {
       throw new TypeError("files must contain only own enumerable data properties");
     }
     const checked=assertSafeRelativePath(path);
@@ -371,7 +375,7 @@ export function createGitControlRepository(options) {
     }
     await securePrefix(prefix);
     const revision=at==="HEAD" ? await head() : at;
-    if (revision===null) return Object.freeze([]);
+    if (revision===null) return [];
     const result=await runGit(["ls-tree","-r","-z","--name-only",revision,"--",prefix]);
     const output=String(result?.stdout ?? "");
     if (output && !output.endsWith("\0")) throw new Error("Git returned malformed NUL-delimited document paths");
@@ -385,7 +389,7 @@ export function createGitControlRepository(options) {
       unique.add(path);
     }
     documents.sort((left,right) => left<right ? -1 : left>right ? 1 : 0);
-    return Object.freeze(documents);
+    return documents;
   }
 
   async function rootSnapshotAt({at}={}) {
@@ -405,7 +409,7 @@ export function createGitControlRepository(options) {
     }
     paths.sort();
     if (new Set(paths).size!==paths.length) throw new Error("root control tree contains duplicate paths");
-    return Object.freeze({revision,paths:Object.freeze(paths)});
+    return Object.freeze({revision,paths});
   }
 
   async function indexSnapshot() {

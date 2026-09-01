@@ -41,7 +41,7 @@ export function repositoryFilename(identity) {
   if (typeof identity!=="string" || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(identity)) {
     throw new TypeError("repository identity must be canonical OWNER/REPO");
   }
-  return `${encodeURIComponent(identity.toLowerCase())}.yaml`;
+  return `${encodeURIComponent(identity)}.yaml`;
 }
 
 export function repositoryPath(identity) {
@@ -84,6 +84,23 @@ function frozenCanonicalCopy(value) {
   return deepFreeze(JSON.parse(canonicalJson(value)));
 }
 
+function closeFileEntries(files,label) {
+  if (files===null || typeof files!=="object" || Array.isArray(files) || types.isProxy(files) ||
+      ![Object.prototype,null].includes(Object.getPrototypeOf(files))) {
+    throw new TypeError(`${label} must be a plain non-proxy object map`);
+  }
+  const descriptors=Object.getOwnPropertyDescriptors(files);
+  const entries=[];
+  for (const key of Reflect.ownKeys(descriptors)) {
+    const descriptor=descriptors[key];
+    if (typeof key!=="string" || !("value" in descriptor) || !descriptor.enumerable) {
+      throw new TypeError(`${label} must contain only own enumerable data properties`);
+    }
+    entries.push([key,descriptor.value]);
+  }
+  return entries;
+}
+
 function ledgerConflict(message,{cause}={}) {
   const error=new Error(message,{cause});
   error.code="CONTROL_LEDGER_CONFLICT";
@@ -103,6 +120,10 @@ function validateConfiguration(path,value) {
 }
 
 function rawCompare(left,right) { return left===right ? 0 : left<right ? -1 : 1; }
+
+function repositoryCollisionKey(identity) {
+  return repositoryPath(identity).toLowerCase();
+}
 
 function exactShape(value,expected,label) {
   if (canonicalJson(value)!==canonicalJson(expected)) throw ledgerConflict(`${label} is not exact`);
@@ -201,9 +222,14 @@ export function createCoreControlStore({repository}) {
   }
 
   async function listedDocuments(prefix,revision) {
-    const paths=await listDocuments(prefix,{at:revision});
-    if (!Array.isArray(paths)) throw new TypeError("repository.listDocuments must return an array");
-    return paths;
+    return closeDocumentPaths(
+      await listDocuments(prefix,{at:revision}),
+      `repository.${prefix} paths`,
+    );
+  }
+
+  function documentsUnder(paths,prefix) {
+    return Object.freeze(paths.filter(path => path.startsWith(`${prefix}/`)));
   }
 
   async function currentControlPathsAt(revision) {
@@ -223,8 +249,8 @@ export function createCoreControlStore({repository}) {
       readAt(CONTROL_PATHS.organization,root),
       readAt(`${CONTROL_PATHS.policies}/lifecycle.yaml`,root),
       readAt(`${CONTROL_PATHS.policies}/release.yaml`,root),
-      resolveGlobalIdentities({revision:root,prefix:CONTROL_PATHS.intents,schemaId:"operation-intent.v1",label:"intent",idField:"intent_id",pathFor:intentPath,ledgerRead:true}),
-      resolveGlobalIdentities({revision:root,prefix:CONTROL_PATHS.receipts,schemaId:"operation-receipt.v1",label:"receipt",idField:"receipt_id",pathFor:receiptPath,ledgerRead:true}),
+      resolveGlobalIdentities({revision:root,prefix:CONTROL_PATHS.intents,paths:documentsUnder(snapshot.paths,CONTROL_PATHS.intents),schemaId:"operation-intent.v1",label:"intent",idField:"intent_id",pathFor:intentPath,ledgerRead:true}),
+      resolveGlobalIdentities({revision:root,prefix:CONTROL_PATHS.receipts,paths:documentsUnder(snapshot.paths,CONTROL_PATHS.receipts),schemaId:"operation-receipt.v1",label:"receipt",idField:"receipt_id",pathFor:receiptPath,ledgerRead:true}),
     ]);
     if (organizationDocument===null || lifecycle===null || release===null ||
         intents.length!==1 || receipts.length!==1) {
@@ -251,6 +277,61 @@ export function createCoreControlStore({repository}) {
     return Object.freeze({bootstrap,intentIdentity,receiptIdentity});
   }
 
+  async function loadCurrentBaselineAt(revision) {
+    const [organizationDocument,lifecycleDocument,releaseDocument]=await Promise.all([
+      readAt(CONTROL_PATHS.organization,revision),
+      readAt(`${CONTROL_PATHS.policies}/lifecycle.yaml`,revision),
+      readAt(`${CONTROL_PATHS.policies}/release.yaml`,revision),
+    ]);
+    if (organizationDocument===null || lifecycleDocument===null || releaseDocument===null) {
+      throw ledgerConflict("verified control ledger is missing its current organization or policy baseline");
+    }
+    try {
+      const organization=validateCoreDocument(organizationDocument,"organization-config.v1");
+      if (lifecycleDocument===null || typeof lifecycleDocument!=="object" || Array.isArray(lifecycleDocument) ||
+          releaseDocument===null || typeof releaseDocument!=="object" || Array.isArray(releaseDocument) ||
+          lifecycleDocument.revision!==organization.policy_revision ||
+          releaseDocument.revision!==organization.policy_revision) {
+        throw new TypeError("current policies must bind the organization policy revision");
+      }
+      return frozenCanonicalCopy({
+        organization,
+        lifecycle:lifecycleDocument,
+        release:releaseDocument,
+      });
+    } catch (error) {
+      throw ledgerConflict("verified control ledger has a corrupt current baseline",{cause:error});
+    }
+  }
+
+  async function loadCurrentRepositoriesAt(revision,currentPaths,organization) {
+    const paths=documentsUnder(currentPaths,CONTROL_PATHS.repositories);
+    const repositories=[];
+    const identities=new Set();
+    const collisionPaths=new Map();
+    for (const path of paths) {
+      if (!path.endsWith(".yaml")) throw ledgerConflict(`unexpected repository configuration path: ${path}`);
+      const foldedPath=path.toLowerCase();
+      if (collisionPaths.has(foldedPath)) throw ledgerConflict(`repository configuration path has a case-only collision: ${path}`);
+      collisionPaths.set(foldedPath,path);
+      const document=await readAt(path,revision);
+      if (document===null) throw ledgerConflict(`listed repository configuration is absent: ${path}`);
+      let repository;
+      try { repository=validateConfiguration(path,document); }
+      catch (error) { throw ledgerConflict(`repository configuration is corrupt: ${path}`,{cause:error}); }
+      const collisionKey=repositoryCollisionKey(repository.repository);
+      if (identities.has(collisionKey)) throw ledgerConflict(`repository configuration identity has a case-only collision: ${repository.repository}`);
+      identities.add(collisionKey);
+      repositories.push(repository);
+    }
+    repositories.sort((left,right) => rawCompare(left.repository,right.repository));
+    const names=repositories.map(value => value.repository);
+    if (canonicalJson(organization.repositories)!==canonicalJson(names)) {
+      throw ledgerConflict("organization repository registry does not exactly match repository configuration namespace");
+    }
+    return frozenCanonicalCopy(repositories);
+  }
+
   async function loadValidatedLedgerAt(revision) {
     if (revision===null) return Object.freeze({
       revision:null,classification:"absent",bootstrap:null,
@@ -262,10 +343,10 @@ export function createCoreControlStore({repository}) {
     catch (error) { throw ledgerConflict("bootstrap root snapshot is malformed",{cause:error}); }
     let currentPaths; let intentRecords; let receiptRecords;
     try {
-      [currentPaths,intentRecords,receiptRecords]=await Promise.all([
-        currentControlPathsAt(revision),
-        resolveGlobalIdentities({revision,prefix:CONTROL_PATHS.intents,schemaId:"operation-intent.v1",label:"intent",idField:"intent_id",pathFor:intentPath,ledgerRead:true}),
-        resolveGlobalIdentities({revision,prefix:CONTROL_PATHS.receipts,schemaId:"operation-receipt.v1",label:"receipt",idField:"receipt_id",pathFor:receiptPath,ledgerRead:true}),
+      currentPaths=await currentControlPathsAt(revision);
+      [intentRecords,receiptRecords]=await Promise.all([
+        resolveGlobalIdentities({revision,prefix:CONTROL_PATHS.intents,paths:documentsUnder(currentPaths,CONTROL_PATHS.intents),schemaId:"operation-intent.v1",label:"intent",idField:"intent_id",pathFor:intentPath,ledgerRead:true}),
+        resolveGlobalIdentities({revision,prefix:CONTROL_PATHS.receipts,paths:documentsUnder(currentPaths,CONTROL_PATHS.receipts),schemaId:"operation-receipt.v1",label:"receipt",idField:"receipt_id",pathFor:receiptPath,ledgerRead:true}),
       ]);
     } catch (error) {
       throw error?.code==="CONTROL_LEDGER_CONFLICT" ? error : ledgerConflict("current control ledger is corrupt",{cause:error});
@@ -301,6 +382,10 @@ export function createCoreControlStore({repository}) {
           : ledgerConflict("immutable bootstrap record identity is malformed",{cause:error});
       }
     }
+    const currentBaseline=bootstrap===null ? null : await loadCurrentBaselineAt(revision);
+    const currentRepositories=bootstrap===null
+      ? Object.freeze([])
+      : await loadCurrentRepositoriesAt(revision,currentPaths,currentBaseline.organization);
     validatePersistedReceiptRecords(receiptRecords,intentRecords,{bootstrapReceipt:bootstrap?.receipt});
     return Object.freeze({
       revision,
@@ -309,15 +394,17 @@ export function createCoreControlStore({repository}) {
       intentRecords:Object.freeze(intentRecords),
       receiptRecords:Object.freeze(receiptRecords),
       currentPaths,
+      currentBaseline,
+      currentRepositories,
     });
   }
 
-  async function resolveGlobalIdentities({revision,prefix,schemaId,label,idField,pathFor,ledgerRead=false}) {
+  async function resolveGlobalIdentities({revision,prefix,paths=null,schemaId,label,idField,pathFor,ledgerRead=false}) {
     if (revision===null) return [];
     const records=[];
     const identities=new Map();
-    const paths=[...await listedDocuments(prefix,revision)].sort();
-    for (const path of paths) {
+    const resolvedPaths=paths ?? await listedDocuments(prefix,revision);
+    for (const path of resolvedPaths) {
       const document=await readAt(path,revision);
       if (document===null) {
         throw ledgerRead ? ledgerConflict(`listed ${label} is absent: ${path}`) : new Error(`listed ${label} is absent: ${path}`);
@@ -343,55 +430,22 @@ export function createCoreControlStore({repository}) {
 
   async function loadOrganizationAt(validated) {
     if (validated.classification==="absent") return null;
-    const document=await readAt(CONTROL_PATHS.organization,validated.revision);
-    if (document===null) return null;
-    try { return frozenCanonicalCopy(validateCoreDocument(document,"organization-config.v1")); }
-    catch (error) { throw ledgerConflict("organization configuration is corrupt",{cause:error}); }
+    return validated.currentBaseline.organization;
   }
 
   async function loadRepositoryAt(identity,validated) {
     if (validated.classification==="absent") return null;
-    const document=await readAt(repositoryPath(identity),validated.revision);
-    if (document===null) return null;
-    let configuration;
-    try { configuration=validateCoreDocument(document,"repository-config.v1"); }
-    catch (error) { throw ledgerConflict("repository configuration is corrupt",{cause:error}); }
-    if (configuration.repository!==identity) {
-      throw ledgerConflict(`repository configuration identity does not match its path: ${identity}`);
-    }
-    return frozenCanonicalCopy(configuration);
+    return validated.currentRepositories.find(configuration => configuration.repository===identity) ?? null;
   }
 
   async function loadRegistryStateAt(validated) {
     const revision=validated.revision;
     if (validated.classification==="absent") return Object.freeze({revision,organization:null,repositories:Object.freeze([])});
-    const organizationDocument=await readAt(CONTROL_PATHS.organization,revision);
-    if (organizationDocument===null) {
-      const paths=await listedDocuments(CONTROL_PATHS.repositories,revision);
-      if (paths.length!==0) throw ledgerConflict("repository configuration namespace exists without organization configuration");
-      return Object.freeze({revision,organization:null,repositories:Object.freeze([])});
-    }
-    let organization;
-    try { organization=validateCoreDocument(organizationDocument,"organization-config.v1"); }
-    catch (error) { throw ledgerConflict("organization configuration is corrupt",{cause:error}); }
-    const paths=[...await listedDocuments(CONTROL_PATHS.repositories,revision)].sort(rawCompare);
-    const repositories=[]; const identities=new Set();
-    for (const path of paths) {
-      if (!path.startsWith(`${CONTROL_PATHS.repositories}/`) || !path.endsWith(".yaml")) throw ledgerConflict(`unexpected repository configuration path: ${path}`);
-      const document=await readAt(path,revision);
-      if (document===null) throw ledgerConflict(`listed repository configuration is absent: ${path}`);
-      let repository;
-      try { repository=validateConfiguration(path,document); }
-      catch (error) { throw ledgerConflict(`repository configuration is corrupt: ${path}`,{cause:error}); }
-      if (identities.has(repository.repository)) throw ledgerConflict(`repository configuration identity is duplicated: ${repository.repository}`);
-      identities.add(repository.repository); repositories.push(repository);
-    }
-    const names=repositories.map(value => value.repository).sort(rawCompare);
-    if (canonicalJson(organization.repositories)!==canonicalJson(names)) throw ledgerConflict("organization repository registry does not exactly match repository configuration namespace");
+    const organization=validated.currentBaseline.organization;
     return frozenCanonicalCopy({
       revision,
       organization,
-      repositories:repositories.sort((left,right) => rawCompare(left.repository,right.repository)),
+      repositories:validated.currentRepositories,
     });
   }
 
@@ -450,17 +504,8 @@ export function createCoreControlStore({repository}) {
       return frozenCanonicalCopy({organization:null,repositories:[],policies:{},programs:[],receipts:[]});
     }
     const organization=await loadOrganizationAt(validated);
-    const repositories=organization===null ? [] : await Promise.all(
-      organization.repositories.map(async identity => {
-        const configuration=await loadRepositoryAt(identity,validated);
-        if (configuration===null) throw ledgerConflict(`registered repository configuration is missing: ${identity}`);
-        return configuration;
-      }),
-    );
-    const [lifecycle,release]=await Promise.all([
-      readAt(`${CONTROL_PATHS.policies}/lifecycle.yaml`,revision),
-      readAt(`${CONTROL_PATHS.policies}/release.yaml`,revision),
-    ]);
+    const repositories=validated.currentRepositories;
+    const {lifecycle,release}=validated.currentBaseline;
     const [programPaths]=await Promise.all([
       listedDocuments(CONTROL_PATHS.programs,revision),
     ]);
@@ -591,8 +636,7 @@ export function createCoreControlStore({repository}) {
     if (expectedHead!==null) throw new TypeError("bootstrap is permitted only for an unborn control repository");
     const current=await head();
     if (current!==null) throw ledgerConflict("bootstrap is permitted only for an unborn control repository");
-    if (files===null || typeof files!=="object" || Array.isArray(files) || types.isProxy(files)) throw new TypeError("bootstrap files must be a non-proxy object map");
-    const entries=Object.entries(files);
+    const entries=closeFileEntries(files,"bootstrap files");
     const organizationEntry=entries.find(([path]) => path===CONTROL_PATHS.organization);
     const lifecycleEntry=entries.find(([path]) => path===`${CONTROL_PATHS.policies}/lifecycle.yaml`);
     const releaseEntry=entries.find(([path]) => path===`${CONTROL_PATHS.policies}/release.yaml`);
@@ -610,16 +654,29 @@ export function createCoreControlStore({repository}) {
   }
 
   async function commitConfiguration({expectedHead,files}) {
-    if (files===null || typeof files!=="object" || Array.isArray(files) || types.isProxy(files)) {
-      throw new TypeError("configuration files must be a non-proxy object map");
-    }
+    const entries=closeFileEntries(files,"configuration files");
     const current=await loadRegistryState();
     if (current.revision!==expectedHead) throw ledgerConflict(`control repository expected head conflict: expected ${String(expectedHead)}, found ${String(current.revision)}`);
     const normalized={};
-    for (const [path,value] of Object.entries(files)) normalized[path]=validateConfiguration(path,value);
+    const normalizedPaths=new Map();
+    for (const [path,value] of entries) {
+      const foldedPath=path.toLowerCase();
+      if (normalizedPaths.has(foldedPath)) throw ledgerConflict(`configuration files contain a case-only path collision: ${path}`);
+      normalizedPaths.set(foldedPath,path);
+      normalized[path]=validateConfiguration(path,value);
+    }
     if (!Object.hasOwn(normalized,CONTROL_PATHS.organization)) throw new TypeError("configuration commit must include organization configuration");
     const resulting=new Map(current.repositories.map(value => [value.repository,value]));
-    for (const [path,value] of Object.entries(normalized)) if (path!==CONTROL_PATHS.organization) resulting.set(value.repository,value);
+    const repositoryIdentities=new Map(current.repositories.map(value => [repositoryCollisionKey(value.repository),value.repository]));
+    for (const [path,value] of Object.entries(normalized)) if (path!==CONTROL_PATHS.organization) {
+      const collisionKey=repositoryCollisionKey(value.repository);
+      const existingIdentity=repositoryIdentities.get(collisionKey);
+      if (existingIdentity!==undefined && existingIdentity!==value.repository) {
+        throw ledgerConflict(`repository identity has a case-only collision: ${value.repository}`);
+      }
+      repositoryIdentities.set(collisionKey,value.repository);
+      resulting.set(value.repository,value);
+    }
     const names=[...resulting.keys()].sort(rawCompare);
     if (canonicalJson(normalized[CONTROL_PATHS.organization].repositories)!==canonicalJson(names)) throw new TypeError("organization repository registry must exactly equal the resulting repository configuration namespace");
     return commitFiles({expectedHead,message:"core: update control configuration",files:normalized});

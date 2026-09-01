@@ -37,23 +37,57 @@ function assertCanonicalOperationOrder(value) {
   }
 }
 
-function assertNoProxies(value,seen=new Set()) {
+function assertClosedContract(value,seen=new Set()) {
   if (value===null || typeof value!=="object") return;
   if (types.isProxy(value)) {
     throw new CoreValidationError("Invalid core contract: proxy values are not allowed");
   }
-  if (seen.has(value)) return;
+  if (seen.has(value)) throw new CoreValidationError("Invalid core contract: cyclic values are not allowed");
   seen.add(value);
-  for (const key of Reflect.ownKeys(value)) {
-    const descriptor=Object.getOwnPropertyDescriptor(value,key);
-    if (descriptor && "value" in descriptor) assertNoProxies(descriptor.value,seen);
+  try {
+    const prototype=Object.getPrototypeOf(value);
+    const descriptors=Object.getOwnPropertyDescriptors(value);
+    const keys=Reflect.ownKeys(descriptors);
+    if (Array.isArray(value)) {
+      if (prototype!==Array.prototype) throw new CoreValidationError("Invalid core contract: arrays must be plain");
+      const lengthDescriptor=descriptors.length;
+      if (!lengthDescriptor || !("value" in lengthDescriptor) || lengthDescriptor.enumerable ||
+          !Number.isSafeInteger(lengthDescriptor.value) || lengthDescriptor.value<0) {
+        throw new CoreValidationError("Invalid core contract: arrays must have a valid length descriptor");
+      }
+      let count=0;
+      for (const key of keys) {
+        if (key==="length") continue;
+        const descriptor=descriptors[key];
+        const index=typeof key==="string" ? Number(key) : -1;
+        if (typeof key!=="string" || !Number.isSafeInteger(index) || index<0 ||
+            index>=lengthDescriptor.value || String(index)!==key || !("value" in descriptor) ||
+            !descriptor.enumerable) {
+          throw new CoreValidationError("Invalid core contract: arrays must be dense own data");
+        }
+        count+=1;
+        assertClosedContract(descriptor.value,seen);
+      }
+      if (count!==lengthDescriptor.value) throw new CoreValidationError("Invalid core contract: arrays must be dense own data");
+      return;
+    }
+    if (![Object.prototype,null].includes(prototype)) throw new CoreValidationError("Invalid core contract: objects must be plain");
+    for (const key of keys) {
+      const descriptor=descriptors[key];
+      if (typeof key!=="string" || !("value" in descriptor) || !descriptor.enumerable) {
+        throw new CoreValidationError("Invalid core contract: objects must contain only own enumerable data");
+      }
+      assertClosedContract(descriptor.value,seen);
+    }
+  } finally {
+    seen.delete(value);
   }
 }
 
 export {CoreValidationError};
 
 export function validateCoreDocument(value,schemaId) {
-  assertNoProxies(value);
+  assertClosedContract(value);
   let result;
   try {
     result=validateDocument(value,schemaId);

@@ -5,6 +5,7 @@ import {tmpdir} from "node:os";
 import {join} from "node:path";
 import {promisify} from "node:util";
 import test from "node:test";
+import YAML from "yaml";
 
 import {sha256Canonical} from "../src/contracts/acp.js";
 import {createOperationIntent} from "../src/core/operations/plan.js";
@@ -12,6 +13,7 @@ import {createGitControlRepository} from "../src/core/control/git-repository.js"
 import {
   closeDocumentPaths,
   closeRootSnapshot,
+  CONTROL_ROOTS,
   hasControlMaterial,
 } from "../src/core/control/root-snapshot.js";
 import {
@@ -224,7 +226,7 @@ function repositoryWithRootPort(rootPort) {
   return Object.freeze({
     async head() { return revision; },
     async readDocument() { return null; },
-    async listDocuments() { return Object.freeze([]); },
+    async listDocuments() { return []; },
     rootSnapshotAt:rootPort,
     async commitFiles() { throw new Error("write is not expected"); },
   });
@@ -269,6 +271,10 @@ test("root snapshots close own data without invoking hostile values",() => {
   const paths=["config/organization.yaml"];
   Object.defineProperty(paths,"hidden",{value:"receipts/2026/09/hidden.json"});
   assert.throws(() => closeDocumentPaths(paths,"root snapshot paths"),/own|hidden|path/i);
+
+  const nonWritableLength=[];
+  Object.defineProperty(nonWritableLength,"length",{writable:false});
+  assert.throws(() => closeDocumentPaths(nonWritableLength,"non-writable length"),TypeError);
 
   let arrayGetterCalls=0;
   const accessorIndex=[];
@@ -462,15 +468,99 @@ test("control repository rejects traversal and symlink targets",async t => {
   }),/symbolic link|symlink/i);
 });
 
+test("Git file maps reject symbol hidden accessor and proxy entries without invoking them",async t => {
+  let hostileCalls=0;
+  const buildCases=() => {
+    const symbolic={"config/organization.yaml":organization()}; symbolic[Symbol("hidden")]=true;
+    const hidden={"config/organization.yaml":organization()}; Object.defineProperty(hidden,"hidden",{value:true});
+    const accessor={"config/organization.yaml":organization()}; Object.defineProperty(accessor,"hidden",{
+      enumerable:true,
+      get() { hostileCalls+=1; return true; },
+    });
+    const proxy=new Proxy({"config/organization.yaml":organization()},{
+      ownKeys() { hostileCalls+=1; throw new Error("must not enumerate proxy"); },
+      getOwnPropertyDescriptor() { hostileCalls+=1; throw new Error("must not inspect proxy"); },
+    });
+    return [symbolic,hidden,accessor,proxy];
+  };
+  for (const files of buildCases()) {
+    const root=await createRepository(t);
+    const repositoryControl=control(root);
+    await assert.rejects(repositoryControl.commitFiles({expectedHead:null,message:"closed map",files}),TypeError);
+    assert.equal(await repositoryControl.head(),null);
+  }
+  assert.equal(hostileCalls,0);
+});
+
+test("store bootstrap and configuration maps reject exotic own entries",async t => {
+  let hostileCalls=0;
+  const decorate=(base,kind) => {
+    if (kind==="symbol") base[Symbol("hidden")]=true;
+    if (kind==="hidden") Object.defineProperty(base,"hidden",{value:true});
+    if (kind==="accessor") Object.defineProperty(base,"hidden",{
+      enumerable:true,
+      get() { hostileCalls+=1; return true; },
+    });
+    if (kind==="proxy") return new Proxy(base,{
+      ownKeys() { hostileCalls+=1; throw new Error("must not enumerate proxy"); },
+      getOwnPropertyDescriptor() { hostileCalls+=1; throw new Error("must not inspect proxy"); },
+    });
+    return base;
+  };
+  for (const kind of ["symbol","hidden","accessor","proxy"]) {
+    const root=await createRepository(t);
+    const store=createCoreControlStore({repository:control(root)});
+    const fixture=bootstrapFixture();
+    await assert.rejects(store.commitBootstrap({
+      expectedHead:null,
+      files:decorate({...fixture.files},kind),
+    }),TypeError);
+    assert.equal(await store.head(),null);
+  }
+  for (const kind of ["symbol","hidden","accessor","proxy"]) {
+    const {store,bootstrap,head}=await createBootstrappedStore(t);
+    await assert.rejects(store.commitConfiguration({
+      expectedHead:head,
+      files:decorate({[CONTROL_PATHS.organization]:bootstrap.organization},kind),
+    }),TypeError);
+    assert.equal(await store.head(),head);
+  }
+
+  const {store,bootstrap,head}=await createBootstrappedStore(t);
+  const organizationDocument={...bootstrap.organization};
+  Object.defineProperty(organizationDocument,"repositories",{
+    enumerable:true,
+    get() { hostileCalls+=1; return []; },
+  });
+  await assert.rejects(store.commitConfiguration({
+    expectedHead:head,
+    files:{[CONTROL_PATHS.organization]:organizationDocument},
+  }),error => error?.code==="CORE_CONTRACT_INVALID");
+
+  const root=await createRepository(t);
+  const bootstrapStore=createCoreControlStore({repository:control(root)});
+  const fixture=bootstrapFixture();
+  const lifecycle={};
+  Object.defineProperty(lifecycle,"revision",{
+    enumerable:true,
+    get() { hostileCalls+=1; return "POLICY-0001"; },
+  });
+  await assert.rejects(bootstrapStore.commitBootstrap({
+    expectedHead:null,
+    files:{...fixture.files,"policies/lifecycle.yaml":lifecycle},
+  }));
+  assert.equal(hostileCalls,0);
+});
+
 test("repository configuration uses the approved reversible percent filename exception only",async t => {
   const root=await createRepository(t);
   const repositoryControl=control(root);
   const store=createCoreControlStore({repository:repositoryControl});
   const path=repositoryPath("TOSS-Soft/toss-cli");
 
-  assert.equal(repositoryFilename("TOSS-Soft/toss-cli"),"toss-soft%2Ftoss-cli.yaml");
-  assert.equal(path,"config/repositories/toss-soft%2Ftoss-cli.yaml");
-  assert.equal(decodeURIComponent(repositoryFilename("TOSS-Soft/toss-cli").slice(0,-5)),"toss-soft/toss-cli");
+  assert.equal(repositoryFilename("TOSS-Soft/toss-cli"),"TOSS-Soft%2Ftoss-cli.yaml");
+  assert.equal(path,"config/repositories/TOSS-Soft%2Ftoss-cli.yaml");
+  assert.equal(decodeURIComponent(repositoryFilename("TOSS-Soft/toss-cli").slice(0,-5)),"TOSS-Soft/toss-cli");
   await store.commitConfiguration({
     expectedHead:null,
     files:{"config/organization.yaml":organization(),[path]:repositoryConfig()},
@@ -480,6 +570,64 @@ test("repository configuration uses the approved reversible percent filename exc
   await assert.rejects(repositoryControl.readDocument("config/repositories/toss-soft%20toss-cli.yaml"),/unsafe relative path/i);
   await assert.rejects(repositoryControl.readDocument("config/toss-soft%2Ftoss-cli.yaml"),/unsafe relative path/i);
   await assert.rejects(repositoryControl.readDocument("config/repositories/toss-soft%2Ftoss-cli.json"),/unsafe relative path|unsupported/i);
+});
+
+test("repository configuration rejects case-only identity replacement before commit",async t => {
+  const {repositoryControl,store,bootstrap,head}=await createBootstrappedStore(t);
+  const existing=repositoryConfig();
+  const registered=await store.commitConfiguration({
+    expectedHead:head,
+    files:{
+      [CONTROL_PATHS.organization]:{...bootstrap.organization,repositories:[existing.repository]},
+      [repositoryPath(existing.repository)]:existing,
+    },
+  });
+  const replacement={
+    ...existing,
+    repository:"toss-soft/toss-cli",
+    repository_node_id:"R_case_only",
+  };
+  const desired={
+    ...bootstrap.organization,
+    repositories:[existing.repository,replacement.repository].sort(),
+  };
+
+  await assert.rejects(store.commitConfiguration({
+    expectedHead:registered.commit_sha,
+    files:{
+      [CONTROL_PATHS.organization]:desired,
+      [repositoryPath(replacement.repository)]:replacement,
+    },
+  }),error => error?.code==="CONTROL_LEDGER_CONFLICT");
+
+  assert.equal(await repositoryControl.head(),registered.commit_sha);
+  assert.deepEqual(await store.loadRepository(existing.repository),existing);
+  assert.deepEqual((await store.loadOrganization()).repositories,[existing.repository]);
+});
+
+test("persisted case-only repository path collisions fail closed",async t => {
+  const {root,store,bootstrap,head}=await createBootstrappedStore(t);
+  const existing=repositoryConfig();
+  const registered=await store.commitConfiguration({
+    expectedHead:head,
+    files:{
+      [CONTROL_PATHS.organization]:{...bootstrap.organization,repositories:[existing.repository]},
+      [repositoryPath(existing.repository)]:existing,
+    },
+  });
+  const replacement={...existing,repository:"toss-soft/toss-cli",repository_node_id:"R_case_only"};
+  const conflictingPath="config/repositories/toss-soft%2Ftoss-cli.yaml"===repositoryPath(existing.repository)
+    ? "config/repositories/TOSS-Soft%2Ftoss-cli.yaml"
+    : "config/repositories/toss-soft%2Ftoss-cli.yaml";
+  await writeFile(join(root,conflictingPath),YAML.stringify(replacement,{sortMapEntries:true}),"utf8");
+  await writeFile(join(root,CONTROL_PATHS.organization),YAML.stringify({
+    ...bootstrap.organization,
+    repositories:[existing.repository,replacement.repository].sort(),
+  },{sortMapEntries:true}),"utf8");
+  await git(root,["add","--",conflictingPath,CONTROL_PATHS.organization]);
+  await git(root,["commit","-m","persist case-only repository collision"]);
+  assert.notEqual(await store.head(),registered.commit_sha);
+  await assertAllPublicReadersConflict(store,{targetIntent:bootstrap.intent});
 });
 
 test("configuration commits reject non-registry paths and registry drift without organization",async t => {
@@ -1246,6 +1394,21 @@ test("validated readers preserve a root bootstrap across ordinary ledger and con
   assert.equal((await store.listRepositories()).length,1);
 });
 
+test("all public readers require the current organization and policy baseline",async t => {
+  for (const path of [
+    CONTROL_PATHS.organization,
+    `${CONTROL_PATHS.policies}/lifecycle.yaml`,
+    `${CONTROL_PATHS.policies}/release.yaml`,
+  ]) {
+    await t.test(path,async t => {
+      const {root,store,bootstrap}=await createBootstrappedStore(t);
+      await git(root,["rm","--",path]);
+      await git(root,["commit","-m",`remove current baseline ${path}`]);
+      await assertAllPublicReadersConflict(store,{targetIntent:bootstrap.intent});
+    });
+  }
+});
+
 test("receipt lookup rejects persisted receipt corruption in a partial control history",async t => {
   const root=await createRepository(t);
   const repositoryControl=control(root); const store=createCoreControlStore({repository:repositoryControl});
@@ -1424,6 +1587,54 @@ test("store wraps malformed root ports without invoking hostile fields",async ()
       error?.code==="CONTROL_LEDGER_CONFLICT");
   }
   assert.equal(getterCalls,0);
+});
+
+test("validated ledger closes each pinned path inventory before identity resolution",async () => {
+  const revision="a".repeat(40);
+  let hostileCalls=0;
+  const accessor=[];
+  Object.defineProperty(accessor,"0",{
+    enumerable:true,
+    configurable:true,
+    get() { hostileCalls+=1; return "intents/2026/09/INTENT-20260901-0001.json"; },
+  });
+  const hidden=[];
+  Object.defineProperty(hidden,"hidden",{value:"intents/hidden.json"});
+  const extra=[];
+  extra.extra="intents/extra.json";
+  const sparse=Array(2);
+  sparse[1]="intents/2026/09/INTENT-20260901-0001.json";
+  const proxy=new Proxy([],{
+    ownKeys() { hostileCalls+=1; throw new Error("must not enumerate proxy"); },
+    getOwnPropertyDescriptor() { hostileCalls+=1; throw new Error("must not inspect proxy"); },
+  });
+  for (const paths of [accessor,hidden,extra,sparse,proxy]) {
+    const repository=repositoryWithRootPort(async () => ({revision,paths:[]}));
+    const store=createCoreControlStore({repository:Object.freeze({
+      ...repository,
+      async listDocuments(prefix) { return prefix===CONTROL_PATHS.intents ? paths : []; },
+    })});
+    await assert.rejects(store.loadOrganizationState(),error =>
+      error?.code==="CONTROL_LEDGER_CONFLICT");
+  }
+  assert.equal(hostileCalls,0);
+
+  let headCalls=0;
+  const inventories=[];
+  const store=createCoreControlStore({repository:Object.freeze({
+    async head() { headCalls+=1; return revision; },
+    async readDocument() { return null; },
+    async listDocuments(prefix,{at}) {
+      inventories.push({prefix,at});
+      return [];
+    },
+    async rootSnapshotAt({at}) { assert.equal(at,revision); return {revision,paths:[]}; },
+    async commitFiles() { throw new Error("write is not expected"); },
+  })});
+  assert.equal(await store.loadBootstrapState(),null);
+  assert.equal(headCalls,1);
+  assert.deepEqual(inventories.map(value => value.prefix).sort(),[...CONTROL_ROOTS].sort());
+  assert.equal(inventories.every(value => value.at===revision),true);
 });
 
 test("bootstrap state returns a deeply frozen root proof",async t => {

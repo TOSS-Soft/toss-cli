@@ -350,6 +350,41 @@ test("execute closes command fields, normalized options, and safety metadata bef
   assert.deepEqual(events,[]);
 });
 
+test("execute rejects symbol hidden accessor and proxy request fields without invoking them",async () => {
+  const events=[];
+  const runner=createOperationRunner({
+    control:memoryControl(events), github:{
+      async snapshot() { events.push("snapshot"); return {}; },
+      async inspect() { events.push("inspect"); return []; },
+      async apply() { events.push("apply"); return {status:"completed",observed_revisions:[]}; },
+    }, authorityRegistry:null,clock:() => "2026-09-01T08:01:00.000Z",
+    idGenerator:() => "INTENT-20260901-0001",policyRevision:() => "POLICY-0001",
+  });
+  const base=()=> ({
+    command:parseCoreCommand(["repo","add","TOSS-Soft/toss-cli"]),
+    source:operationInput().source,
+    operations:operationInput().operations,
+    authority:null,
+  });
+  let hostileCalls=0;
+  const symbolic=base(); symbolic[Symbol("hidden")]=true;
+  const hidden=base(); Object.defineProperty(hidden,"hidden",{value:true});
+  const accessor=base(); Object.defineProperty(accessor,"hidden",{
+    enumerable:true,
+    get() { hostileCalls+=1; return true; },
+  });
+  const proxy=new Proxy(base(),{
+    ownKeys() { hostileCalls+=1; throw new Error("must not enumerate proxy"); },
+    getOwnPropertyDescriptor() { hostileCalls+=1; throw new Error("must not inspect proxy"); },
+  });
+  for (const request of [symbolic,hidden,accessor,proxy]) {
+    await assert.rejects(runner.execute(request),error =>
+      error?.code==="CORE_CONTRACT_INVALID" && error?.exitCode===5);
+  }
+  assert.equal(hostileCalls,0);
+  assert.deepEqual(events,[]);
+});
+
 test("runner rejects accessor-backed remote ports before they can be trusted",() => {
   const control=memoryControl();
   assert.throws(() => createOperationRunner({

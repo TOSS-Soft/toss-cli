@@ -2,7 +2,7 @@ import {types} from "node:util";
 
 const SHA=/^[a-f0-9]{40}$/u;
 const SEGMENT=/^[A-Za-z0-9._-]+$/u;
-const REPOSITORY_FILENAME=/^[a-z0-9._-]+%2F[a-z0-9._-]+[.]yaml$/u;
+const REPOSITORY_FILENAME=/^[A-Za-z0-9._-]+%2F[A-Za-z0-9._-]+[.]yaml$/u;
 
 export const CONTROL_ROOTS=Object.freeze([
   "config","intents","migrations","policies","programs","receipts",
@@ -36,7 +36,9 @@ export function closeDocumentPaths(value,label) {
   const descriptors=Object.getOwnPropertyDescriptors(value);
   const keys=Reflect.ownKeys(descriptors);
   const lengthDescriptor=descriptors.length;
-  if (!lengthDescriptor || !("value" in lengthDescriptor) || lengthDescriptor.enumerable) {
+  if (!lengthDescriptor || !("value" in lengthDescriptor) ||
+      lengthDescriptor.writable!==true || lengthDescriptor.enumerable!==false ||
+      lengthDescriptor.configurable!==false) {
     throw new TypeError(`${label} must be dense and contain no extra properties`);
   }
   const length=lengthDescriptor.value;
