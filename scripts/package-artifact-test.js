@@ -61,6 +61,17 @@ function runPackedCoreCli(packageRoot,args,cwd) {
   return run(process.execPath,[path.join(packageRoot,"bin","toss-core.js"),...args],{cwd});
 }
 
+function regularFiles(rootDirectory,current="") {
+  const directory=path.join(rootDirectory,current);
+  return fs.readdirSync(directory,{withFileTypes:true})
+    .sort((left,right) => left.name===right.name ? 0 : left.name<right.name ? -1 : 1)
+    .flatMap(entry => {
+      const relative=path.join(current,entry.name);
+      if (entry.isDirectory()) return regularFiles(rootDirectory,relative);
+      return entry.isFile() ? [relative.split(path.sep).join("/")] : [];
+    });
+}
+
 try {
   const npmRoot=resolveNpmRoot();
   const npmRequire=createRequire(path.join(npmRoot,"package.json"));
@@ -107,10 +118,10 @@ try {
       `packed artifact omits core contract ${filename}`,
     );
   }
-  for (const sourceFile of ["src/core/cli.js","src/core/runtime.js","src/core/local-runtime.js"]) {
+  for (const sourceFile of regularFiles(path.join(root,"src","core")).map(file => `src/core/${file}`)) {
     assert.ok(
       packedFiles.some(file => file?.path===sourceFile),
-      `packed artifact omits core runtime source ${sourceFile}`,
+      `packed artifact omits core source ${sourceFile}`,
     );
   }
 

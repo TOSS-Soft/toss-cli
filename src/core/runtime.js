@@ -46,6 +46,15 @@ function safeControlPath(cwd,value) {
   return target;
 }
 
+function controlClock(clock) {
+  return () => {
+    const value=clock();
+    if (typeof value!=="string") return value;
+    const milliseconds=Date.parse(value);
+    return Number.isSafeInteger(milliseconds) && milliseconds>=0 ? milliseconds : value;
+  };
+}
+
 export function createCoreRuntime(options) {
   const value=ownOptions(options);
   if (typeof value.cwd!=="string" || !value.cwd.trim() || typeof value.controlPath!=="string" || !value.controlPath.trim()) throw new TypeError("core runtime cwd and controlPath must be nonblank paths");
@@ -56,7 +65,11 @@ export function createCoreRuntime(options) {
   const policyRevision=functionValue(value.policyRevision,"core runtime policyRevision");
   if (!value.authorityRegistry || typeof value.authorityRegistry!=="object" || types.isProxy(value.authorityRegistry)) throw new TypeError("core runtime authorityRegistry must be explicit non-proxy data");
   const reader=value.inputReader===undefined ? createCoreInputReader({cwd:value.cwd}) : port(value.inputReader,"inputReader",["readInput","readAuthority"]);
-  const repository=createGitControlRepository({root:safeControlPath(value.cwd,value.controlPath),execFile,clock});
+  const repository=createGitControlRepository({
+    root:safeControlPath(value.cwd,value.controlPath),
+    execFile,
+    clock:controlClock(clock),
+  });
   const control=createCoreControlStore({repository});
   const operations=createOperationRunner({control,github,authorityRegistry:value.authorityRegistry,clock,idGenerator,policyRevision});
   return Object.freeze({control,github,operations,clock,idGenerator,readInput:reader.readInput,readAuthority:reader.readAuthority});
