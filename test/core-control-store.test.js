@@ -291,6 +291,10 @@ test("receipts require one matching persisted intent and remain immutable when b
   assert.equal(repeated.commit_sha,first.commit_sha);
   await assert.rejects(store.commitReceipt({
     expectedHead:first.commit_sha,
+    receipt:receiptForIntent(planned,{number:"0002"}),
+  }),/receipt.*intent|already.*receipt|immutable/i);
+  await assert.rejects(store.commitReceipt({
+    expectedHead:first.commit_sha,
     receipt:{...bound,status:"failed"},
   }),/immutable|different content|receipt/i);
   await assert.rejects(store.commitReceipt({
@@ -474,6 +478,30 @@ test("organization state validates aggregate receipt coverage against exact pers
   await repositoryControl.commitFiles({expectedHead:null,message:"aggregate valid",files:{[intentPath(planned)]:planned,[receiptPath(failed)]:failed}});
   const first=await store.loadOrganizationState(); const second=await store.loadOrganizationState();
   assert.deepEqual(first.receipts,[failed]); assert.deepEqual(second,first);
+});
+
+test("all receipt readers reject distinct receipt identities bound to one intent",async t => {
+  const planned=intent();
+  for (const receipts of [
+    [receiptForIntent(planned),receiptForIntent(planned,{number:"0002"})],
+    [receiptForIntent(planned),{...receiptForIntent(planned,{number:"0002"}),status:"failed",observed_revisions:[]}],
+  ]) {
+    const root=await createRepository(t); const repositoryControl=control(root); const store=createCoreControlStore({repository:repositoryControl});
+    await repositoryControl.commitFiles({expectedHead:null,message:"duplicate receipt binding",files:{[intentPath(planned)]:planned,...Object.fromEntries(receipts.map(receipt => [receiptPath(receipt),receipt]))}});
+    await assert.rejects(store.loadOrganizationState(),error => error?.code==="CONTROL_LEDGER_CONFLICT");
+    await assert.rejects(store.findReceipt(planned),error => error?.code==="CONTROL_LEDGER_CONFLICT");
+  }
+});
+
+test("aggregate state rejects init-like partial receipts without a complete bootstrap proof",async t => {
+  const planned=createOperationIntent({intent_id:"INTENT-20260901-0001",created_at:"2026-09-01T08:00:00.000Z",command:"init",policy_revision:"POLICY-0001",source:{repository:"TOSS-Soft/toss-os-control",revision:"r1",sha256:"a".repeat(64)},authority:null,operations:[
+    {resource:"repository",action:"commit",repository:"TOSS-Soft/toss-os-control",expected_revision:null,payload:{kind:"organization-config"}},
+  ]});
+  const receipt=receiptForIntent(planned,{observed_revisions:[]});
+  const root=await createRepository(t); const repositoryControl=control(root); const store=createCoreControlStore({repository:repositoryControl});
+  await repositoryControl.commitFiles({expectedHead:null,message:"init-like partial receipt",files:{[intentPath(planned)]:planned,[receiptPath(receipt)]:receipt}});
+  await assert.rejects(store.loadOrganizationState(),error => error?.code==="CONTROL_LEDGER_CONFLICT");
+  await assert.rejects(store.findReceipt(planned),error => error?.code==="CONTROL_LEDGER_CONFLICT");
 });
 
 test("failed pre-commit hook restores control files and preserves unrelated index and worktree changes",async t => {
@@ -847,7 +875,7 @@ test("persisted bootstrap corruption never establishes initialized state",async 
     const receipt={...receiptForIntent(intent,{number:"0099",observed_revisions:intent.operations.filter(operation => !["organization-config","lifecycle-policy","release-policy","first-control-transaction"].includes(operation.payload.kind)).map(operation => ({operation_id:operation.operation_id,repository:operation.repository,revision:"r1"}))})};
     return {organization,lifecycle,release,intent,receipt};
   };
-  for (const mutation of [
+  for (const [index,mutation] of [
     value => ({...value,receipt:{...value.receipt,status:"failed"}}),
     value => ({...value,receipt:{...value.receipt,observed_revisions:value.receipt.observed_revisions.slice(1)}}),
     value => ({...value,receipt:{...value.receipt,observed_revisions:[...value.receipt.observed_revisions,{...value.receipt.observed_revisions[0]}]}}),
@@ -858,10 +886,11 @@ test("persisted bootstrap corruption never establishes initialized state",async 
     value => ({...value,receipt:{...value.receipt,observed_revisions:value.receipt.observed_revisions.map((observation,index) => index===0 ? {...observation,revision:null} : observation)}}),
     value => ({...value,lifecycle:{revision:"POLICY-OTHER"}}),
     value => ({...value,organization:{...value.organization,project:{node_id:"PVT_other",number:8}}}),
-  ]) {
+  ].entries()) {
     const root=await createRepository(t); const repositoryControl=control(root); const store=createCoreControlStore({repository:repositoryControl}); const value=mutation(build());
     const files={"config/organization.yaml":value.organization,"policies/lifecycle.yaml":value.lifecycle,"policies/release.yaml":value.release,[`intents/2026/09/${value.intent.intent_id}.json`]:value.intent,[`receipts/2026/09/${value.receipt.receipt_id}.json`]:value.receipt};
     await repositoryControl.commitFiles({expectedHead:null,message:"corrupt bootstrap fixture",files});
     await assert.rejects(store.loadBootstrapState(),error => error?.code==="CONTROL_LEDGER_CONFLICT");
+    if (index!==0) await assert.rejects(store.loadOrganizationState(),error => error?.code==="CONTROL_LEDGER_CONFLICT");
   }
 });

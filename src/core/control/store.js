@@ -83,6 +83,7 @@ function exactShape(value,expected,label) {
 
 function bootstrapProof({organization,lifecycle,release,intent,receipt}) {
   if (intent.command!=="init" || intent.authority===null || intent.source.repository!==organization.control_repository || intent.policy_revision!==organization.policy_revision) throw ledgerConflict("bootstrap intent must bind explicit authority, policy, and control repository");
+  if (organization.repositories.length!==0) throw ledgerConflict("bootstrap organization must not register repositories");
   if (receipt.status!=="completed" || receipt.intent_id!==intent.intent_id || receipt.intent_sha256!==sha256Canonical(intent)) throw ledgerConflict("bootstrap receipt must be completed and bind the bootstrap intent");
   if (!lifecycle || !release || lifecycle.revision!==organization.policy_revision || release.revision!==organization.policy_revision) throw ledgerConflict("bootstrap policies must bind organization policy revision");
   const hashes=Object.freeze({organization:sha256Canonical(organization),lifecycle:sha256Canonical(lifecycle),release:sha256Canonical(release)});
@@ -120,9 +121,6 @@ function bootstrapProof({organization,lifecycle,release,intent,receipt}) {
 function assertReceiptCoverage(receipt,intent) {
   if (receipt.intent_id!==intent.intent_id || receipt.intent_sha256!==sha256Canonical(intent)) throw new Error("receipt intent binding does not match the persisted intent");
   const operations=new Map(intent.operations.map(operation => [operation.operation_id,operation]));
-  const required=intent.command==="init"
-    ? intent.operations.filter(operation => !["organization-config","lifecycle-policy","release-policy","first-control-transaction"].includes(operation.payload?.kind))
-    : intent.operations;
   const observedIds=new Set();
   for (const observed of receipt.observed_revisions) {
     const operation=operations.get(observed.operation_id);
@@ -131,7 +129,7 @@ function assertReceiptCoverage(receipt,intent) {
     }
     observedIds.add(observed.operation_id);
   }
-  if (receipt.status==="completed" && (observedIds.size!==required.length || required.some(operation => !observedIds.has(operation.operation_id)))) {
+  if (receipt.status==="completed" && (observedIds.size!==operations.size || intent.operations.some(operation => !observedIds.has(operation.operation_id)))) {
     throw new Error("completed receipt must observe every intent operation exactly once");
   }
 }
@@ -142,12 +140,15 @@ function validatePersistedReceiptCoverage(receipt,intent) {
   }
 }
 
-function validatePersistedReceiptRecords(receipts,intents) {
+function validatePersistedReceiptRecords(receipts,intents,{bootstrapReceipt=null}={}) {
   const byIntentId=new Map(intents.map(record => [record.document.intent_id,record.document]));
+  const receiptByIntentId=new Map();
   for (const record of receipts) {
     const intent=byIntentId.get(record.document.intent_id);
     if (!intent) throw ledgerConflict(`receipt intent is absent from the ledger: ${record.document.intent_id}`);
-    validatePersistedReceiptCoverage(record.document,intent);
+    if (receiptByIntentId.has(record.document.intent_id)) throw ledgerConflict(`receipt intent has multiple immutable receipts: ${record.document.intent_id}`);
+    receiptByIntentId.set(record.document.intent_id,record);
+    if (record.document.receipt_id!==bootstrapReceipt?.receipt_id) validatePersistedReceiptCoverage(record.document,intent);
   }
 }
 
@@ -175,6 +176,24 @@ export function createCoreControlStore({repository}) {
     const paths=await listDocuments(prefix,{at:revision});
     if (!Array.isArray(paths)) throw new TypeError("repository.listDocuments must return an array");
     return paths;
+  }
+
+  async function bootstrapReceiptException({revision,intents,receipts,organization,lifecycle,release}) {
+    if (intents.length!==1 || receipts.length!==1 || intents[0].document.command!=="init") return null;
+    let organizationValue=organization; let lifecycleValue=lifecycle; let releaseValue=release;
+    if (organizationValue===undefined) {
+      const document=await readAt(CONTROL_PATHS.organization,revision);
+      organizationValue=document===null ? null : validateCoreDocument(document,"organization-config.v1");
+    }
+    if (lifecycleValue===undefined || releaseValue===undefined) [lifecycleValue,releaseValue]=await Promise.all([
+      readAt(`${CONTROL_PATHS.policies}/lifecycle.yaml`,revision),
+      readAt(`${CONTROL_PATHS.policies}/release.yaml`,revision),
+    ]);
+    if (organizationValue===null) return null;
+    try {
+      bootstrapProof({organization:organizationValue,lifecycle:lifecycleValue,release:releaseValue,intent:intents[0].document,receipt:receipts[0].document});
+      return receipts[0].document;
+    } catch { return null; }
   }
 
   async function resolveGlobalIdentities({revision,prefix,schemaId,label,idField,pathFor,ledgerRead=false}) {
@@ -307,7 +326,7 @@ export function createCoreControlStore({repository}) {
         ledgerRead:true,
       }),
     ]);
-    validatePersistedReceiptRecords(receiptRecords,intentRecords);
+    validatePersistedReceiptRecords(receiptRecords,intentRecords,{bootstrapReceipt:await bootstrapReceiptException({revision,intents:intentRecords,receipts:receiptRecords,organization,lifecycle,release})});
     const programs=await Promise.all([...programPaths].sort().map(async path => {
       if (!/^programs\/[A-Za-z0-9._-]+\/manifest\.yaml$/u.test(path)) {
         throw new Error(`unexpected program manifest path: ${path}`);
@@ -338,7 +357,7 @@ export function createCoreControlStore({repository}) {
     if (bootstrapIntents.length!==1) throw ledgerConflict("control repository must contain exactly one bootstrap intent");
     const intent=bootstrapIntents[0].document;
     const receipts=await resolveGlobalIdentities({revision,prefix:CONTROL_PATHS.receipts,schemaId:"operation-receipt.v1",label:"receipt",idField:"receipt_id",pathFor:receiptPath,ledgerRead:true});
-    validatePersistedReceiptRecords(receipts,intents);
+    validatePersistedReceiptRecords(receipts,intents,{bootstrapReceipt:await bootstrapReceiptException({revision,intents,receipts,organization,lifecycle,release})});
     const matching=receipts.filter(record => record.document.intent_id===intent.intent_id && record.document.intent_sha256===sha256Canonical(intent));
     if (matching.length!==1) throw ledgerConflict("bootstrap intent must have exactly one matching receipt");
     bootstrapProof({organization,lifecycle,release,intent,receipt:matching[0].document});
@@ -398,6 +417,15 @@ export function createCoreControlStore({repository}) {
     }
     const intent=matches[0];
     assertReceiptCoverage(receipt,intent);
+    const matchingReceipts=(await resolveGlobalIdentities({
+      revision,
+      prefix:CONTROL_PATHS.receipts,
+      schemaId:"operation-receipt.v1",
+      label:"receipt",
+      idField:"receipt_id",
+      pathFor:receiptPath,
+    })).filter(record => record.document.intent_id===receipt.intent_id);
+    if (matchingReceipts.length!==0) throw new Error(`receipt intent already has an immutable receipt: ${receipt.intent_id}`);
   }
 
   async function findIntent(intent) {
@@ -424,7 +452,7 @@ export function createCoreControlStore({repository}) {
   async function findReceiptAt(intent,revision) {
     const valid=validateCoreDocument(intent,"operation-intent.v1");
     if (revision===null) return null;
-    const matches=(await resolveGlobalIdentities({
+    const [receiptRecords,intentRecords]=await Promise.all([resolveGlobalIdentities({
       revision,
       prefix:CONTROL_PATHS.receipts,
       schemaId:"operation-receipt.v1",
@@ -432,12 +460,7 @@ export function createCoreControlStore({repository}) {
       idField:"receipt_id",
       pathFor:receiptPath,
       ledgerRead:true,
-    })).filter(record => record.document.intent_id===valid.intent_id);
-    if (matches.length===0) return null;
-    if (matches.length!==1 || matches[0].document.intent_sha256!==sha256Canonical(valid)) {
-      throw ledgerConflict(`receipt lookup is ambiguous or conflicts with intent: ${valid.intent_id}`);
-    }
-    const persisted=(await resolveGlobalIdentities({
+    }),resolveGlobalIdentities({
       revision,
       prefix:CONTROL_PATHS.intents,
       schemaId:"operation-intent.v1",
@@ -445,7 +468,15 @@ export function createCoreControlStore({repository}) {
       idField:"intent_id",
       pathFor:intentPath,
       ledgerRead:true,
-    })).filter(record => record.document.intent_id===valid.intent_id);
+    })]);
+    const bootstrapReceipt=await bootstrapReceiptException({revision,intents:intentRecords,receipts:receiptRecords});
+    const matches=receiptRecords.filter(record => record.document.intent_id===valid.intent_id);
+    const persisted=intentRecords.filter(record => record.document.intent_id===valid.intent_id);
+    validatePersistedReceiptRecords(matches,persisted,{bootstrapReceipt});
+    if (matches.length===0) return null;
+    if (matches.length!==1 || matches[0].document.intent_sha256!==sha256Canonical(valid)) {
+      throw ledgerConflict(`receipt lookup is ambiguous or conflicts with intent: ${valid.intent_id}`);
+    }
     if (persisted.length!==1 || !equivalent(persisted[0].document,valid)) throw ledgerConflict(`receipt intent is absent or conflicts with the ledger: ${valid.intent_id}`);
     validatePersistedReceiptCoverage(matches[0].document,persisted[0].document);
     return matches[0].document;
