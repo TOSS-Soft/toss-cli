@@ -172,6 +172,22 @@ async function createBootstrappedStore(t) {
   return {root,repositoryControl,store,bootstrap,head:committed.commit_sha};
 }
 
+async function assertAllPublicReadersConflict(store,{identity="TOSS-Soft/toss-cli",targetIntent}) {
+  for (const read of [
+    () => store.loadBootstrapState(),
+    () => store.loadOrganizationState(),
+    () => store.loadOrganization(),
+    () => store.loadRepository(identity),
+    () => store.listRepositories(),
+    () => store.loadRegistryState(),
+    () => store.findReceipt(targetIntent),
+    () => store.findIntent(targetIntent),
+    () => store.findCompletedRepositoryRegistration(identity),
+  ]) {
+    await assert.rejects(read(),error => error?.code==="CONTROL_LEDGER_CONFLICT");
+  }
+}
+
 function repositoryWithRootPort(rootPort) {
   const revision="a".repeat(40);
   return Object.freeze({
@@ -668,28 +684,62 @@ test("organization state validates aggregate receipt coverage against exact pers
   assert.deepEqual(first.receipts.map(value => value.receipt_id),[failed.receipt_id,bootstrap.receipt.receipt_id]); assert.deepEqual(second,first);
 });
 
-test("all receipt readers reject distinct receipt identities bound to one intent",async t => {
+test("all public readers reject distinct receipt identities after a valid root bootstrap",async t => {
   const planned=intent();
   for (const receipts of [
     [receiptForIntent(planned),receiptForIntent(planned,{number:"0002"})],
     [receiptForIntent(planned),{...receiptForIntent(planned,{number:"0002"}),status:"failed",observed_revisions:[]}],
   ]) {
-    const root=await createRepository(t); const repositoryControl=control(root); const store=createCoreControlStore({repository:repositoryControl});
-    await repositoryControl.commitFiles({expectedHead:null,message:"duplicate receipt binding",files:{[intentPath(planned)]:planned,...Object.fromEntries(receipts.map(receipt => [receiptPath(receipt),receipt]))}});
-    await assert.rejects(store.loadOrganizationState(),error => error?.code==="CONTROL_LEDGER_CONFLICT");
-    await assert.rejects(store.findReceipt(planned),error => error?.code==="CONTROL_LEDGER_CONFLICT");
+    const {repositoryControl,store,head}=await createBootstrappedStore(t);
+    const committed=await repositoryControl.commitFiles({expectedHead:head,message:"duplicate receipt binding",files:{[intentPath(planned)]:planned,...Object.fromEntries(receipts.map(value => [receiptPath(value),value]))}});
+    assert.equal(sha256Canonical(await repositoryControl.readDocument(intentPath(planned),{at:committed.commit_sha})),sha256Canonical(planned));
+    assert.equal(sha256Canonical(await repositoryControl.readDocument(receiptPath(receipts[0]),{at:committed.commit_sha})),sha256Canonical(receipts[0]));
+    assert.equal(sha256Canonical(await repositoryControl.readDocument(receiptPath(receipts[1]),{at:committed.commit_sha})),sha256Canonical(receipts[1]));
+    await assertAllPublicReadersConflict(store,{targetIntent:planned});
   }
 });
 
-test("aggregate state rejects init-like partial receipts without a complete bootstrap proof",async t => {
+test("all public readers reject an ordinary init subset receipt after a valid root bootstrap",async t => {
   const planned=createOperationIntent({intent_id:"INTENT-20260901-0001",created_at:"2026-09-01T08:00:00.000Z",command:"init",policy_revision:"POLICY-0001",source:{repository:"TOSS-Soft/toss-os-control",revision:"r1",sha256:"a".repeat(64)},authority:null,operations:[
     {resource:"repository",action:"commit",repository:"TOSS-Soft/toss-os-control",expected_revision:null,payload:{kind:"organization-config"}},
   ]});
   const receipt=receiptForIntent(planned,{observed_revisions:[]});
-  const root=await createRepository(t); const repositoryControl=control(root); const store=createCoreControlStore({repository:repositoryControl});
-  await repositoryControl.commitFiles({expectedHead:null,message:"init-like partial receipt",files:{[intentPath(planned)]:planned,[receiptPath(receipt)]:receipt}});
-  await assert.rejects(store.loadOrganizationState(),error => error?.code==="CONTROL_LEDGER_CONFLICT");
-  await assert.rejects(store.findReceipt(planned),error => error?.code==="CONTROL_LEDGER_CONFLICT");
+  const {repositoryControl,store,head}=await createBootstrappedStore(t);
+  const committed=await repositoryControl.commitFiles({expectedHead:head,message:"init-like partial receipt",files:{[intentPath(planned)]:planned,[receiptPath(receipt)]:receipt}});
+  assert.equal(sha256Canonical(await repositoryControl.readDocument(intentPath(planned),{at:committed.commit_sha})),sha256Canonical(planned));
+  assert.equal(sha256Canonical(await repositoryControl.readDocument(receiptPath(receipt),{at:committed.commit_sha})),sha256Canonical(receipt));
+  await assertAllPublicReadersConflict(store,{targetIntent:planned});
+});
+
+test("all public readers reject a later bootstrap-shaped subset receipt",async t => {
+  const {repositoryControl,store,head}=await createBootstrappedStore(t);
+  const later=bootstrapFixture({intentId:"INTENT-20260901-0001",receiptNumber:"0001"});
+  const committed=await repositoryControl.commitFiles({
+    expectedHead:head,
+    message:"late bootstrap-shaped subset receipt",
+    files:{[intentPath(later.intent)]:later.intent,[receiptPath(later.receipt)]:later.receipt},
+  });
+  assert.equal(sha256Canonical(await repositoryControl.readDocument(intentPath(later.intent),{at:committed.commit_sha})),sha256Canonical(later.intent));
+  assert.equal(sha256Canonical(await repositoryControl.readDocument(receiptPath(later.receipt),{at:committed.commit_sha})),sha256Canonical(later.receipt));
+  await assertAllPublicReadersConflict(store,{targetIntent:later.intent});
+});
+
+test("all public readers reject changed immutable root records",async t => {
+  for (const [name,pathFor,changed] of [
+    ["intent",intentPath,bootstrap => ({...bootstrap.intent,created_at:"2026-10-01T08:00:00.000Z"})],
+    ["receipt",receiptPath,bootstrap => ({...bootstrap.receipt,created_at:"2026-10-01T08:01:00.000Z"})],
+  ]) {
+    const {repositoryControl,store,bootstrap,head}=await createBootstrappedStore(t);
+    const path=pathFor(bootstrap[name]);
+    const document=changed(bootstrap);
+    const committed=await repositoryControl.commitFiles({
+      expectedHead:head,
+      message:`changed root ${name}`,
+      files:{[path]:document},
+    });
+    assert.equal(sha256Canonical(await repositoryControl.readDocument(path,{at:committed.commit_sha})),sha256Canonical(document));
+    await assertAllPublicReadersConflict(store,{targetIntent:bootstrap.intent});
+  }
 });
 
 test("failed pre-commit hook restores control files and preserves unrelated index and worktree changes",async t => {
@@ -986,18 +1036,7 @@ test("all public readers reject late or partial control state consistently",asyn
     message:"late bootstrap",
     files:fixture.files,
   });
-  for (const read of [
-    () => store.loadBootstrapState(),
-    () => store.loadOrganizationState(),
-    () => store.loadOrganization(),
-    () => store.loadRepository("TOSS-Soft/toss-cli"),
-    () => store.listRepositories(),
-    () => store.loadRegistryState(),
-    () => store.findReceipt(fixture.intent),
-    () => store.findCompletedRepositoryRegistration("TOSS-Soft/toss-cli"),
-  ]) {
-    await assert.rejects(read(),error => error?.code==="CONTROL_LEDGER_CONFLICT");
-  }
+  await assertAllPublicReadersConflict(store,{targetIntent:fixture.intent});
 });
 
 test("validated readers preserve a root bootstrap across ordinary ledger and configuration commits",async t => {
