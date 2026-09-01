@@ -311,3 +311,19 @@ test("core CLI reserves exact confirmation for implemented interactive applies",
   );
   assert.equal(JSON.parse(automated.stdout.read()).error.code,"COMMAND_NOT_IMPLEMENTED");
 });
+
+test("confirmation bridge rejects exotic service objects without invoking service getters",async () => {
+  const command=parseCoreCommand(["init"]);
+  const handler=async () => ({ok:true});
+  let reads=0;
+  const accessor={}; Object.defineProperty(accessor,"control",{enumerable:true,get() { reads+=1; throw new Error("must not run"); }});
+  const accessorResult=await dispatchCoreCommand(command,{services:accessor,confirm:async () => true,handlers:{init:handler}});
+  assert.equal(accessorResult.exitCode,70); assert.equal(reads,0);
+  const proxy=new Proxy({}, {getPrototypeOf() { reads+=1; throw new Error("must not run"); }});
+  const proxyResult=await dispatchCoreCommand(command,{services:proxy,confirm:async () => true,handlers:{init:handler}});
+  assert.equal(proxyResult.exitCode,70); assert.equal(reads,0);
+  const symbolServices={control:{}}; symbolServices[Symbol("hidden")]=true;
+  assert.equal((await dispatchCoreCommand(command,{services:symbolServices,confirm:async () => true,handlers:{init:handler}})).exitCode,70);
+  const hiddenServices={control:{}}; Object.defineProperty(hiddenServices,"github",{enumerable:false,value:{}});
+  assert.equal((await dispatchCoreCommand(command,{services:hiddenServices,confirm:async () => true,handlers:{init:handler}})).exitCode,70);
+});

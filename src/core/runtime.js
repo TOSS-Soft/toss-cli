@@ -1,5 +1,5 @@
-import {isAbsolute,relative,resolve,sep} from "node:path";
-import {lstatSync} from "node:fs";
+import * as path from "node:path";
+import {lstatSync,realpathSync} from "node:fs";
 import {types} from "node:util";
 
 import {createCoreInputReader} from "./input.js";
@@ -40,22 +40,30 @@ function port(value,label,methods) {
   }
   return value;
 }
-function safeControlPath(cwd,value) {
-  if (typeof value!=="string" || !value || value.includes("\0") || value.includes("\\") || isAbsolute(value) || /^[A-Za-z]:/u.test(value) || value.split("/").some(segment => !segment || segment==="." || segment==="..")) throw new TypeError("core runtime controlPath must use safe relative segments");
-  const root=resolve(cwd); const target=resolve(root,value); const rel=relative(root,target);
-  if (!rel || rel===".." || rel.startsWith(`..${sep}`)) throw new TypeError("core runtime controlPath must remain within cwd");
-  for (const selected of [root,target]) {
-    let current=sep;
-    for (const segment of selected.split(sep).filter(Boolean)) {
-      current=current===sep ? `${sep}${segment}` : `${current}${sep}${segment}`;
-      try {
-        if (lstatSync(current).isSymbolicLink() && !["/var","/tmp"].includes(current)) throw new TypeError("core runtime controlPath must not traverse a symbolic link");
-      } catch (error) {
-        if (error?.code==="ENOENT") break;
-        throw error;
-      }
+export function assertNoSymlinkRelativePath(root,segments,{pathApi=path,lstat=lstatSync}={}) {
+  let current=root;
+  for (const segment of segments) {
+    current=pathApi.join(current,segment);
+    try {
+      if (lstat(current).isSymbolicLink()) throw new TypeError("core runtime controlPath must not traverse a symbolic link");
+    } catch (error) {
+      if (error?.code!=="ENOENT") throw error;
     }
   }
+}
+
+function safeControlPath(cwd,value) {
+  if (typeof value!=="string" || !value || value.includes("\0") || value.includes("\\") || path.isAbsolute(value) || /^[A-Za-z]:/u.test(value) || value.split("/").some(segment => !segment || segment==="." || segment==="..")) throw new TypeError("core runtime controlPath must use safe relative segments");
+  const lexicalRoot=path.resolve(cwd);
+  let root=lexicalRoot;
+  try {
+    root=realpathSync(lexicalRoot);
+  } catch (error) {
+    if (error?.code!=="ENOENT") throw error;
+  }
+  const target=path.resolve(root,value); const rel=path.relative(root,target);
+  if (!rel || rel===".." || rel.startsWith(`..${path.sep}`)) throw new TypeError("core runtime controlPath must remain within cwd");
+  assertNoSymlinkRelativePath(root,rel.split(path.sep).filter(Boolean));
   return target;
 }
 

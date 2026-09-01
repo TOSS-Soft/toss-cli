@@ -36,6 +36,19 @@ test("an expected revision changes the deterministic operation intent hash",() =
   assert.notEqual(operationPreview(first).intent_sha256,operationPreview(second).intent_sha256);
 });
 
+test("operation planning preserves a closed compensation record in its canonical intent",() => {
+  const intent=createOperationIntent({...operationInput(),operations:[{
+    ...operationInput().operations[0],
+    compensation:{action:"close",expected_revision:"rev-2",payload:{reason:"rollback"}},
+  }]});
+  assert.equal(canonicalJson(intent.operations[0].compensation),canonicalJson({
+    action:"close",expected_revision:"rev-2",payload:{reason:"rollback"},
+  }));
+  assert.throws(() => createOperationIntent({...operationInput(),operations:[{
+    ...operationInput().operations[0],compensation:{action:"close",expected_revision:"rev-2",payload:{},extra:true},
+  }]}),/invalid|additional|exact/i);
+});
+
 function operationInput({expected_revision="rev-1"}={}) {
   return {
     intent_id:"INTENT-20260901-0001",

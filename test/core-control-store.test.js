@@ -12,6 +12,7 @@ import {createGitControlRepository} from "../src/core/control/git-repository.js"
 import {
   CONTROL_PATHS,
   createCoreControlStore,
+  receiptPath,
   repositoryFilename,
   repositoryPath,
 } from "../src/core/control/store.js";
@@ -725,6 +726,20 @@ test("store exposes a revision-pinned head and exact receipt lookup for operatio
 
   assert.equal(await store.head(),receiptCommit.commit_sha);
   assert.deepEqual(await store.findReceipt(planned),recorded);
+});
+
+test("receipt lookup rejects a persisted incomplete completed receipt but permits failed partial evidence",async t => {
+  const root=await createRepository(t);
+  const repositoryControl=control(root); const store=createCoreControlStore({repository:repositoryControl});
+  const planned=intent(); const saved=await store.commitIntent({expectedHead:null,intent:planned});
+  const incomplete={...receiptForIntent(planned),observed_revisions:[]};
+  const corrupted=await repositoryControl.commitFiles({expectedHead:saved.commit_sha,message:"corrupt completed receipt",files:{[receiptPath(incomplete)]:incomplete}});
+  await assert.rejects(store.findReceipt(planned),error => error?.code==="CONTROL_LEDGER_CONFLICT");
+  const failedIntent={...planned,intent_id:"INTENT-20260901-0002"};
+  const failedIntentCommit=await store.commitIntent({expectedHead:corrupted.commit_sha,intent:failedIntent});
+  const failed={...receiptForIntent(failedIntent,{number:"0002",observed_revisions:[]}),status:"failed"};
+  await store.commitReceipt({expectedHead:failedIntentCommit.commit_sha,receipt:failed});
+  assert.deepEqual(await store.findReceipt(failedIntent),failed);
 });
 
 test("receipt lookup tags a divergent immutable ledger as a stable conflict",async t => {

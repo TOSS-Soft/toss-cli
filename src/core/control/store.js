@@ -117,6 +117,22 @@ function bootstrapProof({organization,lifecycle,release,intent,receipt}) {
   return Object.freeze({hashes,operations:byKind});
 }
 
+function assertReceiptCoverage(receipt,intent) {
+  if (receipt.intent_id!==intent.intent_id || receipt.intent_sha256!==sha256Canonical(intent)) throw new Error("receipt intent binding does not match the persisted intent");
+  const operations=new Map(intent.operations.map(operation => [operation.operation_id,operation]));
+  const observedIds=new Set();
+  for (const observed of receipt.observed_revisions) {
+    const operation=operations.get(observed.operation_id);
+    if (!operation || operation.repository!==observed.repository || observedIds.has(observed.operation_id)) {
+      throw new Error(`receipt observed revision is incompatible with intent operation: ${observed.operation_id}`);
+    }
+    observedIds.add(observed.operation_id);
+  }
+  if (receipt.status==="completed" && (observedIds.size!==operations.size || intent.operations.some(operation => !observedIds.has(operation.operation_id)))) {
+    throw new Error("completed receipt must observe every intent operation exactly once");
+  }
+}
+
 export function createCoreControlStore({repository}) {
   const head=ownDataFunction(repository,"head");
   const readDocument=ownDataFunction(repository,"readDocument");
@@ -351,22 +367,7 @@ export function createCoreControlStore({repository}) {
       throw new Error(`receipt intent must resolve to exactly one persisted intent: ${receipt.intent_id}`);
     }
     const intent=matches[0];
-    if (sha256Canonical(intent)!==receipt.intent_sha256) {
-      throw new Error(`receipt intent hash does not match persisted intent: ${receipt.intent_id}`);
-    }
-    const operations=new Map(intent.operations.map(operation => [operation.operation_id,operation]));
-    const observedIds=new Set();
-    for (const observed of receipt.observed_revisions) {
-      const operation=operations.get(observed.operation_id);
-      if (!operation || operation.repository!==observed.repository || observedIds.has(observed.operation_id)) {
-        throw new Error(`receipt observed revision is incompatible with intent operation: ${observed.operation_id}`);
-      }
-      observedIds.add(observed.operation_id);
-    }
-    if (receipt.status==="completed" && (observedIds.size!==operations.size ||
-        intent.operations.some(operation => !observedIds.has(operation.operation_id)))) {
-      throw new Error("completed receipt must observe every intent operation exactly once");
-    }
+    assertReceiptCoverage(receipt,intent);
   }
 
   async function findIntent(intent) {
@@ -406,6 +407,17 @@ export function createCoreControlStore({repository}) {
     if (matches.length!==1 || matches[0].document.intent_sha256!==sha256Canonical(valid)) {
       throw ledgerConflict(`receipt lookup is ambiguous or conflicts with intent: ${valid.intent_id}`);
     }
+    const persisted=(await resolveGlobalIdentities({
+      revision,
+      prefix:CONTROL_PATHS.intents,
+      schemaId:"operation-intent.v1",
+      label:"intent",
+      idField:"intent_id",
+      pathFor:intentPath,
+      ledgerRead:true,
+    })).filter(record => record.document.intent_id===valid.intent_id);
+    if (persisted.length!==1 || !equivalent(persisted[0].document,valid)) throw ledgerConflict(`receipt intent is absent or conflicts with the ledger: ${valid.intent_id}`);
+    try { assertReceiptCoverage(matches[0].document,persisted[0].document); } catch (error) { throw ledgerConflict("persisted receipt coverage is corrupt",{cause:error}); }
     return matches[0].document;
   }
 

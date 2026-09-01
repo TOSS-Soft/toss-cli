@@ -166,16 +166,6 @@ export function createGitControlRepository(options) {
     : stageProposedIndex;
 
   async function secureRoot() {
-    let current="/";
-    for (const segment of absoluteRoot.split("/").filter(Boolean)) {
-      current=current==="/" ? `/${segment}` : `${current}/${segment}`;
-      try {
-        if ((await lstat(current)).isSymbolicLink() && !["/var","/tmp"].includes(current)) throw new TypeError("control repository root must not traverse a symbolic link");
-      } catch (error) {
-        if (isMissing(error)) break;
-        throw error;
-      }
-    }
     const stat=await lstat(absoluteRoot);
     if (stat.isSymbolicLink() || !stat.isDirectory()) {
       throw new TypeError("control repository root must be a non-symlink directory");

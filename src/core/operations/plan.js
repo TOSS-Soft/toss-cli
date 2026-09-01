@@ -50,13 +50,16 @@ function exactKeys(value,keys,label) {
 }
 
 function normalizeOperation(value) {
-  exactKeys(value,["resource","action","repository","expected_revision","payload"],"operation");
+  const keys=Object.keys(value).sort();
+  const required=["resource","action","repository","expected_revision","payload"].sort();
+  if (canonicalJson(keys)!==canonicalJson(required) && canonicalJson(keys)!==canonicalJson([...required,"compensation"].sort())) fail("operation must use the exact closed shape");
   return Object.freeze({
     resource:value.resource,
     action:value.action,
     repository:value.repository,
     expected_revision:value.expected_revision,
     payload:value.payload,
+    ...(Object.hasOwn(value,"compensation") ? {compensation:value.compensation} : {}),
   });
 }
 

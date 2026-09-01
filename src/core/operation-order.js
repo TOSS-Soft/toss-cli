@@ -17,5 +17,5 @@ export function compareOperations(left,right) {
   if (payload!==0) return payload;
   const revision=nullFirst(left.expected_revision,right.expected_revision);
   if (revision!==0) return revision;
-  return compareCanonicalText(canonicalJson({resource:left.resource,action:left.action,repository:left.repository,expected_revision:left.expected_revision,payload:left.payload}),canonicalJson({resource:right.resource,action:right.action,repository:right.repository,expected_revision:right.expected_revision,payload:right.payload}));
+  return compareCanonicalText(canonicalJson({resource:left.resource,action:left.action,repository:left.repository,expected_revision:left.expected_revision,payload:left.payload,...(Object.hasOwn(left,"compensation") ? {compensation:left.compensation} : {})}),canonicalJson({resource:right.resource,action:right.action,repository:right.repository,expected_revision:right.expected_revision,payload:right.payload,...(Object.hasOwn(right,"compensation") ? {compensation:right.compensation} : {})}));
 }

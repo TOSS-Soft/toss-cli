@@ -96,8 +96,16 @@ function normalizeContext(context) {
   if (Object.hasOwn(record,"services")) normalized.services=record.services;
   if (Object.hasOwn(record,"confirm")) {
     if (typeof record.confirm!=="function" || utilTypes.isProxy(record.confirm)) throw new TypeError("core dispatch confirmation must be a non-proxy function");
-    if (!normalized.services || ![Object.prototype,null].includes(Object.getPrototypeOf(normalized.services))) throw new TypeError("core dispatch confirmation requires plain services");
-    normalized.services=Object.freeze({...normalized.services,confirm:record.confirm});
+    const services=normalized.services;
+    if (!services || typeof services!=="object" || Array.isArray(services) || utilTypes.isProxy(services) || ![Object.prototype,null].includes(Object.getPrototypeOf(services))) throw new TypeError("core dispatch confirmation requires plain non-proxy services");
+    const capability=Object.create(null);
+    for (const key of Reflect.ownKeys(services)) {
+      const descriptor=Object.getOwnPropertyDescriptor(services,key);
+      if (typeof key!=="string" || !descriptor?.enumerable || !("value" in descriptor) || key==="confirm") throw new TypeError("core dispatch services must contain only own enumerable data properties");
+      capability[key]=descriptor.value;
+    }
+    capability.confirm=record.confirm;
+    normalized.services=Object.freeze(capability);
   }
   if (Object.hasOwn(record,"handlers")) {
     const handlers=dataRecord(record.handlers,"core command handlers",FOUNDATION_COMMANDS);

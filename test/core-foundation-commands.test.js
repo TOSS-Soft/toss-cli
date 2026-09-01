@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import {mkdir,mkdtemp, realpath, rm, symlink, writeFile} from "node:fs/promises";
 import {tmpdir} from "node:os";
-import {join} from "node:path";
+import {join,win32} from "node:path";
 import test from "node:test";
 
 import {parseCoreCommand} from "../src/core/commands/router.js";
 import {createCoreInputReader} from "../src/core/input.js";
 import {runInitCommand} from "../src/core/commands/init.js";
 import {runRepositoryCommand} from "../src/core/commands/repository.js";
-import {createCoreRuntime} from "../src/core/runtime.js";
+import {assertNoSymlinkRelativePath,createCoreRuntime} from "../src/core/runtime.js";
 import {createOperationIntent} from "../src/core/operations/plan.js";
 import {sha256Canonical} from "../src/contracts/acp.js";
 
@@ -93,10 +93,14 @@ test("repo add completes a persisted registration locally after restart without 
   await assert.rejects(runRepositoryCommand(command(["repo","add",repository,"--from","repo.yaml","--apply","--non-interactive","--authority","authority.json"]),firstServices),error => error?.exitCode===70);
   assert.equal(durable.state.intents.length,1); assert.equal(durable.state.receipts.length,1); const original=durable.state.intents[0].operations[0].payload.repository_config; const remoteCalls=github.calls.filter(call => call.method==="inspect" || call.method==="apply").length;
   const recoveryPreview=await runRepositoryCommand(command(["repo","add",repository,"--from","repo.yaml"]),firstServices); const dryRecovery=await runRepositoryCommand(command(["repo","add",repository,"--from","repo.yaml","--dry-run"]),firstServices); assert.equal(recoveryPreview.status,"recovery-preview"); assert.equal(dryRecovery.status,"recovery-preview"); assert.equal(Object.isFrozen(recoveryPreview),true); assert.equal(recoveryPreview.receipt.receipt_id,"RECEIPT-20260901-0099"); assert.deepEqual(recoveryPreview.configuration,original); assert.equal(github.calls.filter(call => call.method==="inspect" || call.method==="apply").length,remoteCalls);
+  let confirmedRecovery; const writesBeforeDecline=durable.state.revision;
+  await assert.rejects(runRepositoryCommand(command(["repo","add",repository,"--from","repo.yaml","--apply","--authority","authority.json"]),{...firstServices,confirm:async preview => { confirmedRecovery=preview; return false; }}),error => error?.exitCode===4);
+  assert.equal(confirmedRecovery.intent_id,durable.state.intents[0].intent_id); assert.equal(confirmedRecovery.receipt.receipt_id,"RECEIPT-20260901-0099"); assert.deepEqual(confirmedRecovery.configuration,original); assert.equal(durable.state.revision,writesBeforeDecline); assert.equal(durable.state.repositories.has(repository),false);
   await assert.rejects(runRepositoryCommand(command(["repo","add",repository,"--from","repo.yaml","--apply","--non-interactive"]),firstServices),error => error?.exitCode===4);
   const invalidOperations=Object.freeze({async execute() { throw new Error("must not execute"); },async verifyAuthorityFor() { const error=new Error("forged authority"); error.exitCode=4; throw error; }}); await assert.rejects(runRepositoryCommand(command(["repo","add",repository,"--from","repo.yaml","--apply","--non-interactive","--authority","authority.json"]),{...firstServices,operations:invalidOperations}),error => error?.exitCode===4); assert.equal(github.calls.filter(call => call.method==="inspect" || call.method==="apply").length,remoteCalls);
-  const restarted={...firstServices,control:durable.control(),operations:durable.operations(github,() => "2030-01-01T00:00:00.000Z"),clock:() => "2030-01-01T00:00:00.000Z"}; const completed=await runRepositoryCommand(command(["repo","add",repository,"--from","repo.yaml","--apply","--non-interactive","--authority","authority.json"]),restarted);
-  assert.equal(completed.status,"registered"); assert.equal(completed.receipt.receipt_id,"RECEIPT-20260901-0099"); assert.deepEqual(durable.state.repositories.get(repository),original); assert.equal(github.calls.filter(call => call.method==="inspect" || call.method==="apply").length,remoteCalls);
+  let acceptedRecovery; let confirms=0;
+  const restarted={...firstServices,control:durable.control(),operations:durable.operations(github,() => "2030-01-01T00:00:00.000Z"),clock:() => "2030-01-01T00:00:00.000Z"}; const completed=await runRepositoryCommand(command(["repo","add",repository,"--from","repo.yaml","--apply","--authority","authority.json"]),{...restarted,confirm:async preview => { confirms+=1; acceptedRecovery=preview; return true; }});
+  assert.equal(confirms,1); assert.deepEqual(acceptedRecovery,confirmedRecovery); assert.equal(completed.status,"registered"); assert.equal(completed.receipt.receipt_id,"RECEIPT-20260901-0099"); assert.deepEqual(durable.state.repositories.get(repository),original); assert.equal(github.calls.filter(call => call.method==="inspect" || call.method==="apply").length,remoteCalls);
   for (const argv of [["repo","add",repository,"--from","repo.yaml"],["repo","add",repository,"--from","repo.yaml","--dry-run"],["repo","add",repository,"--from","repo.yaml","--apply","--non-interactive"]]) assert.equal((await runRepositoryCommand(command(argv),restarted)).status,"already-registered");
   const changedHistorical=githubFor({registrations:new Map([[repository,registrationSnapshot(repository,{node:"R_changed"})]])}); await assert.rejects(runRepositoryCommand(command(["repo","add",repository,"--from","repo.yaml"]),{...restarted,github:changedHistorical}),error => error?.exitCode===6);
   const concurrent=durableRegistry({onReceipt(state) { const value={schema_version:"repository-config.v1",repository:other,repository_node_id:"R_other",default_branch:"main",active_release:null,project_item_id:"PVTI_other",project_fields:{status:"S",gate:"G"},registered_at:"2026-09-01T08:00:00.000Z"}; state.repositories.set(other,value); state.organization={...state.organization,repositories:[other]}; state.revision="head-2"; }}); const concurrentGithub=githubFor({registrations}); const concurrentServices={...firstServices,control:concurrent.control(),github:concurrentGithub,operations:concurrent.operations(concurrentGithub,() => "2026-09-01T08:00:00.000Z")}; await runRepositoryCommand(command(["repo","add",repository,"--from","repo.yaml","--apply","--non-interactive","--authority","authority.json"]),concurrentServices); assert.deepEqual(concurrent.state.organization.repositories,[repository,other]);
@@ -120,16 +124,29 @@ test("runtime assembles only explicit own-data services and rejects malicious po
   assert.throws(() => createCoreRuntime({cwd:"/workspace",controlPath:"../control",execFile:async () => ({}),github,clock:() => 0,idGenerator:() => "INTENT-20260901-0001",authorityRegistry:{keys:[]},inputReader:reader,policyRevision:() => "POLICY-0001"}),/safe relative/i);
 });
 
-test("runtime rejects a stable symlinked cwd parent before control operations",async t => {
+test("runtime rejects a stable symlinked control-path parent before control operations",async t => {
   const root=await mkdtemp(join(tmpdir(),"toss-core-runtime-path-"));
   t.after(() => rm(root,{recursive:true,force:true}));
   const physicalRoot=await realpath(root);
-  const real=join(physicalRoot,"real"); const alias=join(physicalRoot,"alias");
-  await mkdir(real); await symlink(real,alias);
+  const real=join(physicalRoot,"real"); const alias=join(real,"alias"); const target=join(real,"target");
+  await mkdir(target,{recursive:true}); await symlink(target,alias);
   const github=Object.freeze({async snapshot() { return {}; },async inspect() { return []; },async apply() { return {status:"completed",observed_revisions:[]}; }});
   const reader=Object.freeze({async readInput() { return {}; },async readAuthority() { return authorityFixture(); }});
-  assert.throws(() => createCoreRuntime({cwd:alias,controlPath:"missing/control",execFile:async () => ({}),github,clock:() => 0,idGenerator:() => "INTENT-20260901-0001",authorityRegistry:{keys:[]},inputReader:reader,policyRevision:() => "POLICY-0001"}),/symbolic|symlink/i);
+  assert.throws(() => createCoreRuntime({cwd:real,controlPath:"alias/control",execFile:async () => ({}),github,clock:() => 0,idGenerator:() => "INTENT-20260901-0001",authorityRegistry:{keys:[]},inputReader:reader,policyRevision:() => "POLICY-0001"}),/symbolic|symlink/i);
   assert.doesNotThrow(() => createCoreRuntime({cwd:real,controlPath:"missing/control",execFile:async () => ({}),github,clock:() => 0,idGenerator:() => "INTENT-20260901-0001",authorityRegistry:{keys:[]},inputReader:reader,policyRevision:() => "POLICY-0001"}));
+});
+test("runtime path walk uses the injected platform path grammar after a missing descendant",() => {
+  const checked=[];
+  const symlink="C:\\workspace\\missing\\alias";
+  assert.throws(() => assertNoSymlinkRelativePath("C:\\workspace",["missing","alias","control"],{
+    pathApi:win32,
+    lstat:value => {
+      checked.push(value);
+      if (value===symlink) return {isSymbolicLink:() => true};
+      const error=new Error("missing"); error.code="ENOENT"; throw error;
+    },
+  }),/symbolic|symlink/i);
+  assert.deepEqual(checked,["C:\\workspace\\missing","C:\\workspace\\missing\\alias"]);
 });
 test("core router dispatches only foundation handlers without importing later families",async () => {
   const {dispatchCoreCommand}=await import("../src/core/commands/router.js");
