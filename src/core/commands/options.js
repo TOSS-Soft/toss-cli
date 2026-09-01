@@ -161,6 +161,12 @@ function parseRemainder(definition,remainder) {
   if (options.apply && options.dryRun) {
     throw new CoreCommandUsageError("Options --apply and --dry-run cannot be combined");
   }
+  if (definition.name==="migrate.rebaseline" &&
+      (options.cutover===null || options.cutover.trim().length===0)) {
+    throw new CoreCommandUsageError(
+      "Option --cutover requires a nonblank version for toss-core migrate rebaseline",
+    );
+  }
   return Object.freeze({args:Object.freeze(args),options:deepFreeze(options)});
 }
 
