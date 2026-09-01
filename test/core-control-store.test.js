@@ -725,19 +725,31 @@ test("all public readers reject a later bootstrap-shaped subset receipt",async t
 });
 
 test("all public readers reject changed immutable root records",async t => {
-  for (const [name,pathFor,changed] of [
-    ["intent",intentPath,bootstrap => ({...bootstrap.intent,created_at:"2026-10-01T08:00:00.000Z"})],
-    ["receipt",receiptPath,bootstrap => ({...bootstrap.receipt,created_at:"2026-10-01T08:01:00.000Z"})],
+  for (const [name,changed] of [
+    ["intent",bootstrap => {
+      const intent={...bootstrap.intent,source:{...bootstrap.intent.source,revision:"r1"}};
+      return {intent,receipt:{...bootstrap.receipt,intent_sha256:sha256Canonical(intent)}};
+    }],
+    ["receipt",bootstrap => ({
+      intent:bootstrap.intent,
+      receipt:{...bootstrap.receipt,observed_revisions:bootstrap.receipt.observed_revisions.map((value,index) =>
+        index===0 ? {...value,revision:"r2"} : value)},
+    })],
   ]) {
     const {repositoryControl,store,bootstrap,head}=await createBootstrappedStore(t);
-    const path=pathFor(bootstrap[name]);
-    const document=changed(bootstrap);
+    const {intent,receipt}=changed(bootstrap);
+    assert.equal(intentPath(intent),intentPath(bootstrap.intent));
+    assert.equal(receiptPath(receipt),receiptPath(bootstrap.receipt));
+    const files=name==="intent"
+      ? {[intentPath(intent)]:intent,[receiptPath(receipt)]:receipt}
+      : {[receiptPath(receipt)]:receipt};
     const committed=await repositoryControl.commitFiles({
       expectedHead:head,
       message:`changed root ${name}`,
-      files:{[path]:document},
+      files,
     });
-    assert.equal(sha256Canonical(await repositoryControl.readDocument(path,{at:committed.commit_sha})),sha256Canonical(document));
+    assert.equal(sha256Canonical(await repositoryControl.readDocument(intentPath(intent),{at:committed.commit_sha})),sha256Canonical(intent));
+    assert.equal(sha256Canonical(await repositoryControl.readDocument(receiptPath(receipt),{at:committed.commit_sha})),sha256Canonical(receipt));
     await assertAllPublicReadersConflict(store,{targetIntent:bootstrap.intent});
   }
 });
