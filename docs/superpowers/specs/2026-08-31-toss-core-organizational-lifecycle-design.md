@@ -1,7 +1,7 @@
 # TOSS Core Organizational Lifecycle Design
 
 - **Date:** 2026-08-31
-- **Status:** Draft for final user review
+- **Status:** Approved for implementation planning
 - **Cutover boundary:** TOSS CLI v2.1.2
 - **Owning package:** `@toss-software/cli`
 - **New executable:** `toss-core`
