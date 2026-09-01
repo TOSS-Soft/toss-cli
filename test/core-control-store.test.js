@@ -163,6 +163,15 @@ function bootstrapFixture({intentId="INTENT-20260901-0099",receiptNumber="0099"}
   return {organization:organizationDocument,lifecycle,release,intent,receipt,files};
 }
 
+async function createBootstrappedStore(t) {
+  const root=await createRepository(t);
+  const repositoryControl=control(root);
+  const store=createCoreControlStore({repository:repositoryControl});
+  const bootstrap=bootstrapFixture();
+  const committed=await store.commitBootstrap({expectedHead:null,files:bootstrap.files});
+  return {root,repositoryControl,store,bootstrap,head:committed.commit_sha};
+}
+
 function repositoryWithRootPort(rootPort) {
   const revision="a".repeat(40);
   return Object.freeze({
@@ -538,22 +547,28 @@ test("public intent and receipt identities cannot be reused in another valid mon
   }),/immutable|identity|conflict/i);
 });
 
-test("organization state reads every document at one resolved revision",async () => {
+test("organization state reads every document at one resolved revision",async t => {
+  const {repositoryControl,store:seed,bootstrap,head:rootRevision}=await createBootstrappedStore(t);
+  const committed=await seed.commitConfiguration({
+    expectedHead:rootRevision,
+    files:{
+      "config/organization.yaml":{...bootstrap.organization,repositories:["TOSS-Soft/toss-cli"]},
+      [repositoryPath("TOSS-Soft/toss-cli")]:repositoryConfig(),
+    },
+  });
   const revisions=[];
-  const snapshot="a".repeat(40);
+  const snapshot=committed.commit_sha;
   const repository={
     head:async () => snapshot,
     readDocument:async (path,{at}) => {
       revisions.push(at);
-      if (path===CONTROL_PATHS.organization) return organization();
-      if (path===repositoryPath("TOSS-Soft/toss-cli")) return repositoryConfig();
-      return null;
+      return repositoryControl.readDocument(path,{at});
     },
-    listDocuments:async (_prefix,{at}) => {
+    listDocuments:async (prefix,{at}) => {
       revisions.push(at);
-      return [];
+      return repositoryControl.listDocuments(prefix,{at});
     },
-    rootSnapshotAt:async ({at}) => ({revision:at,paths:[]}),
+    rootSnapshotAt:async ({at}) => repositoryControl.rootSnapshotAt({at}),
     commitFiles:async () => { throw new Error("not used"); },
   };
   const store=createCoreControlStore({repository});
@@ -563,7 +578,7 @@ test("organization state reads every document at one resolved revision",async ()
   assert.equal(state.organization.organization,"TOSS-Soft");
   assert.deepEqual(state.repositories,[repositoryConfig()]);
   assert.ok(revisions.length>=2);
-  assert.deepEqual([...new Set(revisions)],[snapshot]);
+  assert.deepEqual([...new Set(revisions)].sort(),[rootRevision,snapshot].sort());
 });
 
 test("organization state lists populated programs and receipts at its initially resolved revision",async t => {
@@ -934,9 +949,8 @@ test("organization state rejects duplicated receipt identities across months",as
 });
 
 test("store validates persisted core contracts and exposes exact intent lookup",async t => {
-  const root=await createRepository(t);
-  const store=createCoreControlStore({repository:control(root)});
-  const saved=await store.commitIntent({expectedHead:null,intent:intent()});
+  const {store,head}=await createBootstrappedStore(t);
+  const saved=await store.commitIntent({expectedHead:head,intent:intent()});
 
   assert.equal((await store.findIntent(intent())).intent_id,intent().intent_id);
   await assert.rejects(store.commitIntent({
@@ -957,6 +971,57 @@ test("store exposes a revision-pinned head and exact receipt lookup for operatio
 
   assert.equal(await store.head(),receiptCommit.commit_sha);
   assert.deepEqual(await store.findReceipt(planned),recorded);
+});
+
+test("all public readers reject late or partial control state consistently",async t => {
+  const root=await createRepository(t);
+  await writeFile(join(root,"README.md"),"unrelated root\n","utf8");
+  await git(root,["add","--","README.md"]);
+  await git(root,["commit","-m","unrelated root"]);
+  const repositoryControl=control(root);
+  const store=createCoreControlStore({repository:repositoryControl});
+  const fixture=bootstrapFixture();
+  await repositoryControl.commitFiles({
+    expectedHead:await repositoryControl.head(),
+    message:"late bootstrap",
+    files:fixture.files,
+  });
+  for (const read of [
+    () => store.loadBootstrapState(),
+    () => store.loadOrganizationState(),
+    () => store.loadOrganization(),
+    () => store.loadRepository("TOSS-Soft/toss-cli"),
+    () => store.listRepositories(),
+    () => store.loadRegistryState(),
+    () => store.findReceipt(fixture.intent),
+    () => store.findCompletedRepositoryRegistration("TOSS-Soft/toss-cli"),
+  ]) {
+    await assert.rejects(read(),error => error?.code==="CONTROL_LEDGER_CONFLICT");
+  }
+});
+
+test("validated readers preserve a root bootstrap across ordinary ledger and configuration commits",async t => {
+  const {store,bootstrap,head}=await createBootstrappedStore(t);
+  const ordinaryIntent={...intent(),intent_id:"INTENT-20260901-0001"};
+  const saved=await store.commitIntent({expectedHead:head,intent:ordinaryIntent});
+  const ordinaryReceipt=receiptForIntent(ordinaryIntent,{number:"0001"});
+  const recorded=await store.commitReceipt({expectedHead:saved.commit_sha,receipt:ordinaryReceipt});
+  const config=repositoryConfig();
+  await store.commitConfiguration({
+    expectedHead:recorded.commit_sha,
+    files:{
+      "config/organization.yaml":{...bootstrap.organization,repositories:[config.repository]},
+      [repositoryPath(config.repository)]:config,
+    },
+  });
+  assert.equal((await store.loadBootstrapState()).receipt.receipt_id,bootstrap.receipt.receipt_id);
+  assert.equal((await store.findReceipt(bootstrap.intent)).receipt_id,bootstrap.receipt.receipt_id);
+  assert.equal((await store.findReceipt(ordinaryIntent)).receipt_id,ordinaryReceipt.receipt_id);
+  assert.equal((await store.loadOrganizationState()).receipts.length,2);
+  assert.equal((await store.loadRegistryState()).repositories.length,1);
+  assert.equal((await store.loadOrganization()).organization,"TOSS-Soft");
+  assert.equal((await store.loadRepository(config.repository)).repository,config.repository);
+  assert.equal((await store.listRepositories()).length,1);
 });
 
 test("receipt lookup rejects a persisted incomplete completed receipt but permits failed partial evidence",async t => {

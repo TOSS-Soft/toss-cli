@@ -181,16 +181,6 @@ export function createCoreControlStore({repository}) {
     return readDocument(path,{at:revision});
   }
 
-  async function readRepositoryAt(identity,revision) {
-    const document=await readAt(repositoryPath(identity),revision);
-    if (document===null) throw new Error(`registered repository configuration is missing: ${identity}`);
-    const repository=validateCoreDocument(document,"repository-config.v1");
-    if (repository.repository!==identity) {
-      throw new Error(`repository configuration identity does not match its path: ${identity}`);
-    }
-    return repository;
-  }
-
   async function listedDocuments(prefix,revision) {
     const paths=await listDocuments(prefix,{at:revision});
     if (!Array.isArray(paths)) throw new TypeError("repository.listDocuments must return an array");
@@ -282,10 +272,6 @@ export function createCoreControlStore({repository}) {
     });
   }
 
-  async function bootstrapReceiptException({revision}) {
-    return (await loadValidatedLedgerAt(revision)).bootstrap;
-  }
-
   async function resolveGlobalIdentities({revision,prefix,schemaId,label,idField,pathFor,ledgerRead=false}) {
     if (revision===null) return [];
     const records=[];
@@ -315,46 +301,48 @@ export function createCoreControlStore({repository}) {
     return records;
   }
 
-  async function loadOrganization() {
-    const revision=await head();
-    if (revision===null) return null;
-    const document=await readAt(CONTROL_PATHS.organization,revision);
-    return document===null ? null : validateCoreDocument(document,"organization-config.v1");
-  }
-
-  async function loadRepository(identity) {
-    const revision=await head();
-    if (revision===null) return null;
-    const document=await readAt(repositoryPath(identity),revision);
+  async function loadOrganizationAt(validated) {
+    if (validated.classification==="absent") return null;
+    const document=await readAt(CONTROL_PATHS.organization,validated.revision);
     if (document===null) return null;
-    const repository=validateCoreDocument(document,"repository-config.v1");
-    if (repository.repository!==identity) {
-      throw new Error(`repository configuration identity does not match its path: ${identity}`);
+    try { return validateCoreDocument(document,"organization-config.v1"); }
+    catch (error) { throw ledgerConflict("organization configuration is corrupt",{cause:error}); }
+  }
+
+  async function loadRepositoryAt(identity,validated) {
+    if (validated.classification==="absent") return null;
+    const document=await readAt(repositoryPath(identity),validated.revision);
+    if (document===null) return null;
+    let configuration;
+    try { configuration=validateCoreDocument(document,"repository-config.v1"); }
+    catch (error) { throw ledgerConflict("repository configuration is corrupt",{cause:error}); }
+    if (configuration.repository!==identity) {
+      throw ledgerConflict(`repository configuration identity does not match its path: ${identity}`);
     }
-    return repository;
+    return configuration;
   }
 
-  async function listRepositories() {
-    return (await loadRegistryState()).repositories;
-  }
-
-  async function loadRegistryState() {
-    const revision=await head();
-    if (revision===null) return Object.freeze({revision:null,organization:null,repositories:Object.freeze([])});
+  async function loadRegistryStateAt(validated) {
+    const revision=validated.revision;
+    if (validated.classification==="absent") return Object.freeze({revision,organization:null,repositories:Object.freeze([])});
     const organizationDocument=await readAt(CONTROL_PATHS.organization,revision);
     if (organizationDocument===null) {
       const paths=await listedDocuments(CONTROL_PATHS.repositories,revision);
       if (paths.length!==0) throw ledgerConflict("repository configuration namespace exists without organization configuration");
       return Object.freeze({revision,organization:null,repositories:Object.freeze([])});
     }
-    const organization=validateCoreDocument(organizationDocument,"organization-config.v1");
+    let organization;
+    try { organization=validateCoreDocument(organizationDocument,"organization-config.v1"); }
+    catch (error) { throw ledgerConflict("organization configuration is corrupt",{cause:error}); }
     const paths=[...await listedDocuments(CONTROL_PATHS.repositories,revision)].sort(rawCompare);
     const repositories=[]; const identities=new Set();
     for (const path of paths) {
       if (!path.startsWith(`${CONTROL_PATHS.repositories}/`) || !path.endsWith(".yaml")) throw ledgerConflict(`unexpected repository configuration path: ${path}`);
       const document=await readAt(path,revision);
       if (document===null) throw ledgerConflict(`listed repository configuration is absent: ${path}`);
-      const repository=validateConfiguration(path,document);
+      let repository;
+      try { repository=validateConfiguration(path,document); }
+      catch (error) { throw ledgerConflict(`repository configuration is corrupt: ${path}`,{cause:error}); }
       if (identities.has(repository.repository)) throw ledgerConflict(`repository configuration identity is duplicated: ${repository.repository}`);
       identities.add(repository.repository); repositories.push(repository);
     }
@@ -363,61 +351,75 @@ export function createCoreControlStore({repository}) {
     return Object.freeze({revision,organization,repositories:Object.freeze(repositories.sort((left,right) => rawCompare(left.repository,right.repository)))});
   }
 
+  async function loadOrganization() {
+    return loadOrganizationAt(await loadValidatedLedgerAt(await head()));
+  }
+
+  async function loadRepository(identity) {
+    return loadRepositoryAt(identity,await loadValidatedLedgerAt(await head()));
+  }
+
+  async function listRepositories() {
+    const validated=await loadValidatedLedgerAt(await head());
+    return (await loadRegistryStateAt(validated)).repositories;
+  }
+
+  async function loadRegistryState() {
+    return loadRegistryStateAt(await loadValidatedLedgerAt(await head()));
+  }
+
+  function findReceiptInLedger(intent,validated) {
+    const valid=validateCoreDocument(intent,"operation-intent.v1");
+    const matches=validated.receiptRecords.filter(record =>
+      record.document.intent_id===valid.intent_id);
+    const persisted=validated.intentRecords.filter(record =>
+      record.document.intent_id===valid.intent_id);
+    if (matches.length===0) return null;
+    if (matches.length!==1 || persisted.length!==1 ||
+        matches[0].document.intent_sha256!==sha256Canonical(valid) ||
+        !equivalent(persisted[0].document,valid)) {
+      throw ledgerConflict(`receipt lookup conflicts with intent: ${valid.intent_id}`);
+    }
+    return matches[0].document;
+  }
+
   async function findCompletedRepositoryRegistration(identity) {
-    const state=await loadRegistryState();
-    if (state.revision===null) return null;
-    const intents=await resolveGlobalIdentities({revision:state.revision,prefix:CONTROL_PATHS.intents,schemaId:"operation-intent.v1",label:"intent",idField:"intent_id",pathFor:intentPath,ledgerRead:true});
-    const candidates=intents.filter(record => record.document.command==="repo.add" && record.document.operations.length===1 && record.document.operations[0].payload?.kind==="repository-registration" && record.document.operations[0].repository===identity);
+    const validated=await loadValidatedLedgerAt(await head());
+    const state=await loadRegistryStateAt(validated);
+    if (validated.classification==="absent") return null;
+    const candidates=validated.intentRecords.filter(record => record.document.command==="repo.add" && record.document.operations.length===1 && record.document.operations[0].payload?.kind==="repository-registration" && record.document.operations[0].repository===identity);
     if (candidates.length===0) return null;
     if (candidates.length!==1) throw ledgerConflict(`repository registration intent is ambiguous: ${identity}`);
     const intent=candidates[0].document; const config=intent.operations[0].payload.repository_config;
     let valid;
     try { valid=validateCoreDocument(config,"repository-config.v1"); } catch (error) { throw ledgerConflict("repository registration intent has corrupt configuration",{cause:error}); }
     if (valid.repository!==identity) throw ledgerConflict("repository registration intent does not bind its identity");
-    const receipt=await findReceiptAt(intent,state.revision);
+    const receipt=findReceiptInLedger(intent,validated);
     if (receipt===null || receipt.status!=="completed") return null;
     return Object.freeze({revision:state.revision,intent,receipt,configuration:valid});
   }
 
   async function loadOrganizationState() {
-    const revision=await head();
-    if (revision===null) {
+    const validated=await loadValidatedLedgerAt(await head());
+    const revision=validated.revision;
+    if (validated.classification==="absent") {
       return Object.freeze({organization:null,repositories:[],policies:{},programs:[],receipts:[]});
     }
-    const organizationDocument=await readAt(CONTROL_PATHS.organization,revision);
-    const organization=organizationDocument===null
-      ? null
-      : validateCoreDocument(organizationDocument,"organization-config.v1");
+    const organization=await loadOrganizationAt(validated);
     const repositories=organization===null ? [] : await Promise.all(
-      organization.repositories.map(identity => readRepositoryAt(identity,revision)),
+      organization.repositories.map(async identity => {
+        const configuration=await loadRepositoryAt(identity,validated);
+        if (configuration===null) throw ledgerConflict(`registered repository configuration is missing: ${identity}`);
+        return configuration;
+      }),
     );
     const [lifecycle,release]=await Promise.all([
       readAt(`${CONTROL_PATHS.policies}/lifecycle.yaml`,revision),
       readAt(`${CONTROL_PATHS.policies}/release.yaml`,revision),
     ]);
-    const [programPaths,receiptRecords,intentRecords]=await Promise.all([
+    const [programPaths]=await Promise.all([
       listedDocuments(CONTROL_PATHS.programs,revision),
-      resolveGlobalIdentities({
-        revision,
-        prefix:CONTROL_PATHS.receipts,
-        schemaId:"operation-receipt.v1",
-        label:"receipt",
-        idField:"receipt_id",
-        pathFor:receiptPath,
-        ledgerRead:true,
-      }),
-      resolveGlobalIdentities({
-        revision,
-        prefix:CONTROL_PATHS.intents,
-        schemaId:"operation-intent.v1",
-        label:"intent",
-        idField:"intent_id",
-        pathFor:intentPath,
-        ledgerRead:true,
-      }),
     ]);
-    const bootstrap=await bootstrapReceiptException({revision,intents:intentRecords,receipts:receiptRecords});
-    validatePersistedReceiptRecords(receiptRecords,intentRecords,{bootstrapReceipt:bootstrap?.receipt});
     const programs=await Promise.all([...programPaths].sort().map(async path => {
       if (!/^programs\/[A-Za-z0-9._-]+\/manifest\.yaml$/u.test(path)) {
         throw new Error(`unexpected program manifest path: ${path}`);
@@ -426,7 +428,7 @@ export function createCoreControlStore({repository}) {
       if (document===null) throw new Error(`listed program manifest is absent: ${path}`);
       return document;
     }));
-    const receipts=receiptRecords.map(record => record.document);
+    const receipts=validated.receiptRecords.map(record => record.document);
     return Object.freeze({
       organization,
       repositories:Object.freeze(repositories),
@@ -510,18 +512,8 @@ export function createCoreControlStore({repository}) {
 
   async function findIntent(intent) {
     const valid=validateCoreDocument(intent,"operation-intent.v1");
-    const revision=await head();
-    if (revision===null) return null;
-    const records=await resolveGlobalIdentities({
-      revision,
-      prefix:CONTROL_PATHS.intents,
-      schemaId:"operation-intent.v1",
-      label:"intent",
-      idField:"intent_id",
-      pathFor:intentPath,
-      ledgerRead:true,
-    });
-    const existing=records.find(record => record.document.intent_id===valid.intent_id);
+    const validated=await loadValidatedLedgerAt(await head());
+    const existing=validated.intentRecords.find(record => record.document.intent_id===valid.intent_id);
     if (!existing) return null;
     if (!equivalent(existing.document,valid)) {
       throw ledgerConflict(`intent lookup conflicts with immutable content: ${valid.intent_id}`);
@@ -530,35 +522,7 @@ export function createCoreControlStore({repository}) {
   }
 
   async function findReceiptAt(intent,revision) {
-    const valid=validateCoreDocument(intent,"operation-intent.v1");
-    if (revision===null) return null;
-    const [receiptRecords,intentRecords]=await Promise.all([resolveGlobalIdentities({
-      revision,
-      prefix:CONTROL_PATHS.receipts,
-      schemaId:"operation-receipt.v1",
-      label:"receipt",
-      idField:"receipt_id",
-      pathFor:receiptPath,
-      ledgerRead:true,
-    }),resolveGlobalIdentities({
-      revision,
-      prefix:CONTROL_PATHS.intents,
-      schemaId:"operation-intent.v1",
-      label:"intent",
-      idField:"intent_id",
-      pathFor:intentPath,
-      ledgerRead:true,
-    })]);
-    const bootstrap=await bootstrapReceiptException({revision,intents:intentRecords,receipts:receiptRecords});
-    const matches=receiptRecords.filter(record => record.document.intent_id===valid.intent_id);
-    const persisted=intentRecords.filter(record => record.document.intent_id===valid.intent_id);
-    validatePersistedReceiptRecords(receiptRecords,intentRecords,{bootstrapReceipt:bootstrap?.receipt});
-    if (matches.length===0) return null;
-    if (matches.length!==1 || matches[0].document.intent_sha256!==sha256Canonical(valid)) {
-      throw ledgerConflict(`receipt lookup is ambiguous or conflicts with intent: ${valid.intent_id}`);
-    }
-    if (persisted.length!==1 || !equivalent(persisted[0].document,valid)) throw ledgerConflict(`receipt intent is absent or conflicts with the ledger: ${valid.intent_id}`);
-    return matches[0].document;
+    return findReceiptInLedger(intent,await loadValidatedLedgerAt(revision));
   }
 
   async function findReceipt(intent) {
