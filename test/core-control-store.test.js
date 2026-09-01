@@ -10,6 +10,11 @@ import {sha256Canonical} from "../src/contracts/acp.js";
 import {createOperationIntent} from "../src/core/operations/plan.js";
 import {createGitControlRepository} from "../src/core/control/git-repository.js";
 import {
+  closeDocumentPaths,
+  closeRootSnapshot,
+  hasControlMaterial,
+} from "../src/core/control/root-snapshot.js";
+import {
   CONTROL_PATHS,
   createCoreControlStore,
   intentPath,
@@ -120,6 +125,99 @@ function receiptForIntent(value,{number="0001",observed_revisions=value.operatio
     observed_revisions,
   };
 }
+
+test("root snapshots close own data without invoking hostile values",() => {
+  const sha="a".repeat(40);
+  const source={revision:sha,paths:["README.md","config/organization.yaml"]};
+  const closed=closeRootSnapshot(source);
+  assert.deepEqual(closed,{revision:sha,paths:["README.md","config/organization.yaml"]});
+  assert.equal(Object.isFrozen(closed),true);
+  assert.equal(Object.isFrozen(closed.paths),true);
+  source.paths[0]="CHANGED.md";
+  assert.deepEqual(closed.paths,["README.md","config/organization.yaml"]);
+
+  let getterCalls=0;
+  const accessor={paths:[]};
+  Object.defineProperty(accessor,"revision",{enumerable:true,get() { getterCalls+=1; return sha; }});
+  assert.throws(() => closeRootSnapshot(accessor),/own.*data|snapshot/i);
+  assert.equal(getterCalls,0);
+
+  let trapCalls=0;
+  const proxy=new Proxy({revision:sha,paths:[]},{getPrototypeOf() { trapCalls+=1; return Object.prototype; }});
+  assert.throws(() => closeRootSnapshot(proxy),/proxy|snapshot/i);
+  assert.equal(trapCalls,0);
+
+  const withSymbol={revision:sha,paths:[]};
+  withSymbol[Symbol("hidden")]=true;
+  const extraEnumerable={revision:sha,paths:[],extra:true};
+  const hiddenRoot={revision:sha,paths:[]};
+  Object.defineProperty(hiddenRoot,"hidden",{value:true});
+  const wrongPrototype=Object.assign(Object.create({}),{revision:sha,paths:[]});
+  for (const [name,value] of [
+    ["symbol",withSymbol],
+    ["extra enumerable",extraEnumerable],
+    ["hidden root key",hiddenRoot],
+    ["wrong prototype",wrongPrototype],
+  ]) {
+    assert.throws(() => closeRootSnapshot(value),TypeError,name);
+  }
+
+  const paths=["config/organization.yaml"];
+  Object.defineProperty(paths,"hidden",{value:"receipts/2026/09/hidden.json"});
+  assert.throws(() => closeDocumentPaths(paths,"root snapshot paths"),/own|hidden|path/i);
+
+  let arrayGetterCalls=0;
+  const accessorIndex=[];
+  Object.defineProperty(accessorIndex,"0",{enumerable:true,get() { arrayGetterCalls+=1; return "README.md"; }});
+  const nestedProxy=new Proxy([],{});
+  const symbolicPaths=[];
+  symbolicPaths[Symbol("hidden")]=true;
+  for (const [name,value] of [
+    ["accessor index",accessorIndex],
+    ["nested proxy",nestedProxy],
+    ["symbolic paths",symbolicPaths],
+  ]) {
+    assert.throws(() => closeDocumentPaths(value,name),TypeError,name);
+  }
+  assert.equal(arrayGetterCalls,0);
+
+  const invalidPaths=[
+    ["sparse",Object.assign(Array(2),{0:"README.md"})],
+    ["duplicate",["README.md","README.md"]],
+    ["unsorted",["receipts/R.json","config/organization.yaml"]],
+    ["traversal",["../outside.json"]],
+    ["absolute",["/outside.json"]],
+    ["backslash",["config\\outside.json"]],
+    ["nul",["config/outside\0.json"]],
+    ["drive",["C:/outside.json"]],
+  ];
+  for (const [name,value] of invalidPaths) {
+    assert.throws(() => closeDocumentPaths(value,name),TypeError);
+  }
+  assert.deepEqual(
+    closeDocumentPaths(["config/repositories/toss-soft%2Ftoss-cli.yaml"],"repository path"),
+    ["config/repositories/toss-soft%2Ftoss-cli.yaml"],
+  );
+});
+
+test("control material classification is exact",() => {
+  assert.equal(hasControlMaterial(["README.md"]),false);
+  assert.equal(hasControlMaterial(["config/organization.yaml"]),true);
+  assert.equal(hasControlMaterial(["programs/P1/manifest.yaml"]),true);
+});
+
+test("Git root snapshots accept unrelated safe blobs and retain safe paths",async t => {
+  const root=await createRepository(t);
+  await writeFile(join(root,"README.md"),"unrelated root\n","utf8");
+  await git(root,["add","--","README.md"]);
+  await git(root,["commit","-m","unrelated root"]);
+  const repositoryControl=control(root);
+  const at=await repositoryControl.head();
+  assert.deepEqual(await repositoryControl.rootSnapshotAt({at}),{
+    revision:at,
+    paths:["README.md"],
+  });
+});
 
 test("control repository bootstraps canonical documents and reports its exact head",async t => {
   const root=await createRepository(t);

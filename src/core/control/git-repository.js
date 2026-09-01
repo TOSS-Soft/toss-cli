@@ -15,6 +15,7 @@ import {dirname,join,relative,resolve} from "node:path";
 import YAML from "yaml";
 
 import {canonicalJson} from "../../contracts/acp.js";
+import {assertSafeSnapshotPath} from "./root-snapshot.js";
 
 const SHA=/^[a-f0-9]{40}$/u;
 const ZERO_SHA="0".repeat(40);
@@ -381,7 +382,7 @@ export function createGitControlRepository(options) {
     for (const record of output ? output.slice(0,-1).split("\0") : []) {
       const match=/^(100644) blob [a-f0-9]{40}\t(.+)$/u.exec(record);
       if (!match) throw new Error("root control tree must contain only regular document blobs");
-      assertSafeRelativePath(match[2]);
+      assertSafeSnapshotPath(match[2]);
       paths.push(match[2]);
     }
     paths.sort();
