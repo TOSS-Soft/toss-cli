@@ -126,6 +126,54 @@ function receiptForIntent(value,{number="0001",observed_revisions=value.operatio
   };
 }
 
+function bootstrapFixture({intentId="INTENT-20260901-0099",receiptNumber="0099"}={}) {
+  const organizationDocument={...organization(),repositories:[]};
+  const lifecycle={revision:"POLICY-0001"};
+  const release={revision:"POLICY-0001"};
+  const hashes={
+    organization:sha256Canonical(organizationDocument),
+    lifecycle:sha256Canonical(lifecycle),
+    release:sha256Canonical(release),
+  };
+  const repository=organizationDocument.control_repository;
+  const intent=createOperationIntent({
+    intent_id:intentId,
+    created_at:"2026-09-01T08:00:00.000Z",
+    command:"init",
+    policy_revision:organizationDocument.policy_revision,
+    source:{repository,revision:"r0",sha256:"a".repeat(64)},
+    authority:{record_id:"AUTH-20260901-0001",sha256:"a".repeat(64)},
+    operations:[
+      {resource:"repository",action:"create",repository,expected_revision:null,payload:{kind:"create-private-control-repository",private:true,files:hashes}},
+      {resource:"repository",action:"update",repository,expected_revision:null,payload:{kind:"verify-default-branch-protection"}},
+      {resource:"project",action:"update",repository:null,expected_revision:"project-r1",payload:{kind:"discover-project-fields",project:organizationDocument.project}},
+      ...[["organization-config",hashes.organization],["lifecycle-policy",hashes.lifecycle],["release-policy",hashes.release]].map(([kind,sha256]) => ({resource:"repository",action:"commit",repository,expected_revision:null,payload:{kind,sha256}})),
+      {resource:"repository",action:"commit",repository,expected_revision:null,payload:{kind:"first-control-transaction",files:hashes}},
+    ],
+  });
+  const remoteKinds=new Set(["create-private-control-repository","verify-default-branch-protection","discover-project-fields"]);
+  const receipt=receiptForIntent(intent,{number:receiptNumber,observed_revisions:intent.operations.filter(operation => remoteKinds.has(operation.payload.kind)).map(operation => ({operation_id:operation.operation_id,repository:operation.repository,revision:"r1"}))});
+  const files={
+    "config/organization.yaml":organizationDocument,
+    "policies/lifecycle.yaml":lifecycle,
+    "policies/release.yaml":release,
+    [intentPath(intent)]:intent,
+    [receiptPath(receipt)]:receipt,
+  };
+  return {organization:organizationDocument,lifecycle,release,intent,receipt,files};
+}
+
+function repositoryWithRootPort(rootPort) {
+  const revision="a".repeat(40);
+  return Object.freeze({
+    async head() { return revision; },
+    async readDocument() { return null; },
+    async listDocuments() { return Object.freeze([]); },
+    rootSnapshotAt:rootPort,
+    async commitFiles() { throw new Error("write is not expected"); },
+  });
+}
+
 test("root snapshots close own data without invoking hostile values",() => {
   const sha="a".repeat(40);
   const source={revision:sha,paths:["README.md","config/organization.yaml"]};
@@ -521,12 +569,18 @@ test("organization state reads every document at one resolved revision",async ()
 test("organization state lists populated programs and receipts at its initially resolved revision",async t => {
   const root=await createRepository(t);
   const repositoryControl=control(root);
+  const bootstrap=bootstrapFixture();
+  const bootstrapped=await repositoryControl.commitFiles({
+    expectedHead:null,
+    message:"bootstrap state",
+    files:bootstrap.files,
+  });
   const firstIntent=intent(); const secondIntent={...intent(),intent_id:"INTENT-20260901-0002"};
   const initial=await repositoryControl.commitFiles({
-    expectedHead:null,
+    expectedHead:bootstrapped.commit_sha,
     message:"populated state",
     files:{
-      "config/organization.yaml":organization(),
+      "config/organization.yaml":{...bootstrap.organization,repositories:["TOSS-Soft/toss-cli"]},
       [repositoryPath("TOSS-Soft/toss-cli")]:repositoryConfig(),
       "programs/PROGRAM-A/manifest.yaml":{program_id:"PROGRAM-A"},
       "programs/PROGRAM-B/manifest.yaml":{program_id:"PROGRAM-B"},
@@ -566,8 +620,9 @@ test("organization state lists populated programs and receipts at its initially 
   assert.deepEqual(state.programs,[{program_id:"PROGRAM-A"},{program_id:"PROGRAM-B"}]);
   assert.deepEqual(state.receipts.map(value => value.receipt_id),[
     "RECEIPT-20260901-0001","RECEIPT-20260901-0002",
+    bootstrap.receipt.receipt_id,
   ]);
-  assert.deepEqual([...new Set(revisions)],[initial.commit_sha]);
+  assert.deepEqual([...new Set(revisions)],[initial.commit_sha,bootstrapped.commit_sha]);
   assert.ok(Object.isFrozen(state.programs));
   assert.ok(Object.isFrozen(state.receipts));
 });
@@ -591,9 +646,11 @@ test("organization state validates aggregate receipt coverage against exact pers
   }
   const root=await createRepository(t); const repositoryControl=control(root); const store=createCoreControlStore({repository:repositoryControl});
   const failed={...receiptForIntent(planned),status:"failed",observed_revisions:[]};
-  await repositoryControl.commitFiles({expectedHead:null,message:"aggregate valid",files:{[intentPath(planned)]:planned,[receiptPath(failed)]:failed}});
+  const bootstrap=bootstrapFixture();
+  const bootstrapped=await repositoryControl.commitFiles({expectedHead:null,message:"aggregate bootstrap",files:bootstrap.files});
+  await repositoryControl.commitFiles({expectedHead:bootstrapped.commit_sha,message:"aggregate valid",files:{[intentPath(planned)]:planned,[receiptPath(failed)]:failed}});
   const first=await store.loadOrganizationState(); const second=await store.loadOrganizationState();
-  assert.deepEqual(first.receipts,[failed]); assert.deepEqual(second,first);
+  assert.deepEqual(first.receipts.map(value => value.receipt_id),[failed.receipt_id,bootstrap.receipt.receipt_id]); assert.deepEqual(second,first);
 });
 
 test("all receipt readers reject distinct receipt identities bound to one intent",async t => {
@@ -891,8 +948,10 @@ test("store validates persisted core contracts and exposes exact intent lookup",
 test("store exposes a revision-pinned head and exact receipt lookup for operation retries",async t => {
   const root=await createRepository(t);
   const store=createCoreControlStore({repository:control(root)});
+  const bootstrap=bootstrapFixture();
+  const bootstrapped=await store.commitBootstrap({expectedHead:null,files:bootstrap.files});
   const planned=intent();
-  const saved=await store.commitIntent({expectedHead:null,intent:planned});
+  const saved=await store.commitIntent({expectedHead:bootstrapped.commit_sha,intent:planned});
   const recorded=receiptForIntent(planned);
   const receiptCommit=await store.commitReceipt({expectedHead:saved.commit_sha,receipt:recorded});
 
@@ -1009,4 +1068,88 @@ test("persisted bootstrap corruption never establishes initialized state",async 
     await assert.rejects(store.loadBootstrapState(),error => error?.code==="CONTROL_LEDGER_CONFLICT");
     if (index!==0) await assert.rejects(store.loadOrganizationState(),error => error?.code==="CONTROL_LEDGER_CONFLICT");
   }
+});
+
+test("bootstrap state validates current control material before returning absent",async t => {
+  const root=await createRepository(t);
+  await writeFile(join(root,"README.md"),"unrelated root\n","utf8");
+  await git(root,["add","--","README.md"]);
+  await git(root,["commit","-m","unrelated root"]);
+  const repositoryControl=control(root);
+  const store=createCoreControlStore({repository:repositoryControl});
+  assert.equal(await store.loadBootstrapState(),null);
+
+  const fixture=bootstrapFixture();
+  await repositoryControl.commitFiles({
+    expectedHead:await repositoryControl.head(),
+    message:"late bootstrap-shaped transaction",
+    files:fixture.files,
+  });
+  await assert.rejects(store.loadBootstrapState(),error =>
+    error?.code==="CONTROL_LEDGER_CONFLICT");
+});
+
+test("partial control roots are corruption, never absent bootstrap",async t => {
+  for (const [name,files] of [
+    ["organization",{"config/organization.yaml":{...organization(),repositories:[]}}],
+    ["policy",{"policies/lifecycle.yaml":{revision:"POLICY-0001"}}],
+    ["program",{"programs/P1/manifest.yaml":{id:"P1"}}],
+    ["migration",{"migrations/M1/snapshot.json":{id:"M1"}}],
+  ]) {
+    const root=await createRepository(t);
+    const repositoryControl=control(root);
+    await repositoryControl.commitFiles({expectedHead:null,message:`partial ${name}`,files});
+    const store=createCoreControlStore({repository:repositoryControl});
+    await assert.rejects(store.loadBootstrapState(),error =>
+      error?.code==="CONTROL_LEDGER_CONFLICT");
+  }
+});
+
+test("store wraps malformed root ports without invoking hostile fields",async () => {
+  let getterCalls=0;
+  const accessor={paths:[]};
+  Object.defineProperty(accessor,"revision",{
+    enumerable:true,
+    get() { getterCalls+=1; return "a".repeat(40); },
+  });
+  const hostileProxy=new Proxy({}, {
+    getOwnPropertyDescriptor() { getterCalls+=1; throw new Error("trap"); },
+    ownKeys() { getterCalls+=1; throw new Error("trap"); },
+  });
+  const nestedPathsProxy=new Proxy([], {
+    getOwnPropertyDescriptor() { getterCalls+=1; throw new Error("trap"); },
+    ownKeys() { getterCalls+=1; throw new Error("trap"); },
+  });
+  const hidden={revision:"a".repeat(40),paths:[]};
+  Object.defineProperty(hidden,"hidden",{enumerable:false,value:true});
+  const symbolic={revision:"a".repeat(40),paths:[],[Symbol("hidden")]:true};
+  const cases=[
+    async () => accessor,
+    async () => hostileProxy,
+    async () => ({revision:"a".repeat(40),paths:nestedPathsProxy}),
+    async () => hidden,
+    async () => symbolic,
+    async () => { throw new Error("provider failed"); },
+  ];
+  for (const rootPort of cases) {
+    const store=createCoreControlStore({repository:repositoryWithRootPort(rootPort)});
+    await assert.rejects(store.loadBootstrapState(),error =>
+      error?.code==="CONTROL_LEDGER_CONFLICT");
+  }
+  assert.equal(getterCalls,0);
+});
+
+test("bootstrap state returns a deeply frozen root proof",async t => {
+  const root=await createRepository(t);
+  const store=createCoreControlStore({repository:control(root)});
+  const fixture=bootstrapFixture();
+  await store.commitBootstrap({expectedHead:null,files:fixture.files});
+
+  const state=await store.loadBootstrapState();
+
+  assert.equal(Object.isFrozen(state.organization),true);
+  assert.equal(Object.isFrozen(state.organization.project),true);
+  assert.equal(Object.isFrozen(state.lifecycle),true);
+  assert.equal(Object.isFrozen(state.intent.operations),true);
+  assert.equal(Object.isFrozen(state.receipt.observed_revisions),true);
 });

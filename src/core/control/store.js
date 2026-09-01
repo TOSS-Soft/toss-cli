@@ -3,6 +3,12 @@ import {types} from "node:util";
 import {canonicalJson,sha256Canonical} from "../../contracts/acp.js";
 import {validateCoreDocument} from "../contracts.js";
 import {createOperationIntent} from "../operations/plan.js";
+import {
+  closeDocumentPaths,
+  closeRootSnapshot,
+  CONTROL_ROOTS,
+  hasControlMaterial,
+} from "./root-snapshot.js";
 
 export const CONTROL_PATHS=Object.freeze({
   organization:"config/organization.yaml",
@@ -55,6 +61,18 @@ function ownDataFunction(value,key) {
 
 function equivalent(left,right) {
   return canonicalJson(left)===canonicalJson(right);
+}
+
+function deepFreeze(value) {
+  if (value!==null && typeof value==="object") {
+    for (const child of Object.values(value)) deepFreeze(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+function frozenCanonicalCopy(value) {
+  return deepFreeze(JSON.parse(canonicalJson(value)));
 }
 
 function ledgerConflict(message,{cause}={}) {
@@ -179,41 +197,93 @@ export function createCoreControlStore({repository}) {
     return paths;
   }
 
-  async function rootBootstrapProofAt(revision) {
-    let snapshot;
-    try { snapshot=await rootSnapshotAt({at:revision}); } catch (error) { throw ledgerConflict("bootstrap root revision cannot be resolved",{cause:error}); }
-    if (snapshot===null || typeof snapshot!=="object" || types.isProxy(snapshot) || Object.keys(snapshot).sort(rawCompare).join("|")!=="paths|revision" ||
-        typeof snapshot.revision!=="string" || !/^[a-f0-9]{40}$/u.test(snapshot.revision) || !Array.isArray(snapshot.paths) || snapshot.paths.some(path => typeof path!=="string")) {
-      throw ledgerConflict("bootstrap root snapshot is malformed");
+  async function currentControlPathsAt(revision) {
+    try {
+      const groups=await Promise.all(CONTROL_ROOTS.map(async root =>
+        closeDocumentPaths(await listDocuments(root,{at:revision}),`repository.${root} paths`)));
+      return closeDocumentPaths(groups.flat().sort(rawCompare),"current control paths");
+    } catch (error) {
+      throw ledgerConflict("current control paths are malformed",{cause:error});
     }
+  }
+
+  async function rootBootstrapProofFrom(snapshot) {
+    if (!hasControlMaterial(snapshot.paths)) return null;
     const root=snapshot.revision;
-    const organizationDocument=await readAt(CONTROL_PATHS.organization,root);
-    if (organizationDocument===null) return null;
-    const [organization,lifecycle,release,intents,receipts]=await Promise.all([
-      Promise.resolve(validateCoreDocument(organizationDocument,"organization-config.v1")),
+    const [organizationDocument,lifecycle,release,intents,receipts]=await Promise.all([
+      readAt(CONTROL_PATHS.organization,root),
       readAt(`${CONTROL_PATHS.policies}/lifecycle.yaml`,root),
       readAt(`${CONTROL_PATHS.policies}/release.yaml`,root),
       resolveGlobalIdentities({revision:root,prefix:CONTROL_PATHS.intents,schemaId:"operation-intent.v1",label:"intent",idField:"intent_id",pathFor:intentPath,ledgerRead:true}),
       resolveGlobalIdentities({revision:root,prefix:CONTROL_PATHS.receipts,schemaId:"operation-receipt.v1",label:"receipt",idField:"receipt_id",pathFor:receiptPath,ledgerRead:true}),
     ]);
-    if (!intents.some(record => record.document.command==="init")) return null;
-    if (intents.length!==1 || receipts.length!==1) throw ledgerConflict("bootstrap root must contain exactly one intent and receipt");
-    const intent=intents[0].document; const receipt=receipts[0].document;
+    if (organizationDocument===null || lifecycle===null || release===null ||
+        intents.length!==1 || receipts.length!==1) {
+      throw ledgerConflict("bootstrap root is incomplete");
+    }
+    const organization=validateCoreDocument(organizationDocument,"organization-config.v1");
+    const intent=intents[0].document;
+    const receipt=receipts[0].document;
     const expected=[CONTROL_PATHS.organization,`${CONTROL_PATHS.policies}/lifecycle.yaml`,`${CONTROL_PATHS.policies}/release.yaml`,intentPath(intent),receiptPath(receipt)].sort(rawCompare);
-    if (canonicalJson([...snapshot.paths].sort(rawCompare))!==canonicalJson(expected)) throw ledgerConflict("bootstrap root tree is not exact");
-    try { bootstrapProof({organization,lifecycle,release,intent,receipt}); } catch (error) { throw ledgerConflict("bootstrap root proof is corrupt",{cause:error}); }
-    return Object.freeze({root,organization,lifecycle,release,intent,receipt});
+    if (!equivalent(snapshot.paths,expected)) throw ledgerConflict("bootstrap root tree is not exact");
+    bootstrapProof({organization,lifecycle,release,intent,receipt});
+    return Object.freeze({
+      root,
+      organization:frozenCanonicalCopy(organization),
+      lifecycle:frozenCanonicalCopy(lifecycle),
+      release:frozenCanonicalCopy(release),
+      intent:frozenCanonicalCopy(intent),
+      receipt:frozenCanonicalCopy(receipt),
+    });
   }
 
-  async function bootstrapReceiptException({revision,intents,receipts}) {
-    const proof=await rootBootstrapProofAt(revision);
-    if (proof===null) return null;
-    const persistedIntent=intents.filter(record => record.document.intent_id===proof.intent.intent_id);
-    const persistedReceipt=receipts.filter(record => record.document.receipt_id===proof.receipt.receipt_id);
-    if (persistedIntent.length!==1 || persistedReceipt.length!==1 || !equivalent(persistedIntent[0].document,proof.intent) || !equivalent(persistedReceipt[0].document,proof.receipt)) {
-      throw ledgerConflict("immutable bootstrap records are absent or changed from the root transaction");
+  async function loadValidatedLedgerAt(revision) {
+    if (revision===null) return Object.freeze({
+      revision:null,classification:"absent",bootstrap:null,
+      intentRecords:Object.freeze([]),receiptRecords:Object.freeze([]),
+      currentPaths:Object.freeze([]),
+    });
+    let snapshot;
+    try { snapshot=closeRootSnapshot(await rootSnapshotAt({at:revision})); }
+    catch (error) { throw ledgerConflict("bootstrap root snapshot is malformed",{cause:error}); }
+    let currentPaths; let intentRecords; let receiptRecords;
+    try {
+      [currentPaths,intentRecords,receiptRecords]=await Promise.all([
+        currentControlPathsAt(revision),
+        resolveGlobalIdentities({revision,prefix:CONTROL_PATHS.intents,schemaId:"operation-intent.v1",label:"intent",idField:"intent_id",pathFor:intentPath,ledgerRead:true}),
+        resolveGlobalIdentities({revision,prefix:CONTROL_PATHS.receipts,schemaId:"operation-receipt.v1",label:"receipt",idField:"receipt_id",pathFor:receiptPath,ledgerRead:true}),
+      ]);
+    } catch (error) {
+      throw error?.code==="CONTROL_LEDGER_CONFLICT" ? error : ledgerConflict("current control ledger is corrupt",{cause:error});
     }
-    return proof;
+    let bootstrap;
+    try { bootstrap=await rootBootstrapProofFrom(snapshot); }
+    catch (error) { throw error?.code==="CONTROL_LEDGER_CONFLICT" ? error : ledgerConflict("bootstrap root proof is corrupt",{cause:error}); }
+    if (bootstrap===null && hasControlMaterial(currentPaths)) {
+      throw ledgerConflict("control material exists without an exact root bootstrap");
+    }
+    if (bootstrap!==null) {
+      const persistedIntent=intentRecords.filter(record => record.document.intent_id===bootstrap.intent.intent_id);
+      const persistedReceipt=receiptRecords.filter(record => record.document.receipt_id===bootstrap.receipt.receipt_id);
+      if (persistedIntent.length!==1 || persistedReceipt.length!==1 ||
+          !equivalent(persistedIntent[0].document,bootstrap.intent) ||
+          !equivalent(persistedReceipt[0].document,bootstrap.receipt)) {
+        throw ledgerConflict("immutable bootstrap records differ from the root transaction");
+      }
+    }
+    validatePersistedReceiptRecords(receiptRecords,intentRecords,{bootstrapReceipt:bootstrap?.receipt});
+    return Object.freeze({
+      revision,
+      classification:bootstrap===null ? "absent" : "verified",
+      bootstrap,
+      intentRecords:Object.freeze(intentRecords),
+      receiptRecords:Object.freeze(receiptRecords),
+      currentPaths,
+    });
+  }
+
+  async function bootstrapReceiptException({revision}) {
+    return (await loadValidatedLedgerAt(revision)).bootstrap;
   }
 
   async function resolveGlobalIdentities({revision,prefix,schemaId,label,idField,pathFor,ledgerRead=false}) {
@@ -368,12 +438,9 @@ export function createCoreControlStore({repository}) {
 
   async function loadBootstrapState() {
     const revision=await head();
-    if (revision===null) return null;
-    const intents=await resolveGlobalIdentities({revision,prefix:CONTROL_PATHS.intents,schemaId:"operation-intent.v1",label:"intent",idField:"intent_id",pathFor:intentPath,ledgerRead:true});
-    const receipts=await resolveGlobalIdentities({revision,prefix:CONTROL_PATHS.receipts,schemaId:"operation-receipt.v1",label:"receipt",idField:"receipt_id",pathFor:receiptPath,ledgerRead:true});
-    const bootstrap=await bootstrapReceiptException({revision,intents,receipts});
-    if (bootstrap===null) return null;
-    validatePersistedReceiptRecords(receipts,intents,{bootstrapReceipt:bootstrap.receipt});
+    const validated=await loadValidatedLedgerAt(revision);
+    if (validated.classification==="absent") return null;
+    const bootstrap=validated.bootstrap;
     return Object.freeze({organization:bootstrap.organization,lifecycle:bootstrap.lifecycle,release:bootstrap.release,intent:bootstrap.intent,receipt:bootstrap.receipt,revision,root_revision:bootstrap.root});
   }
 
