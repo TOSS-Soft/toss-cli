@@ -270,6 +270,25 @@ export function createCoreControlStore({repository}) {
     return existing && equivalent(existing.document,valid) ? existing.document : null;
   }
 
+  async function findReceipt(intent) {
+    const valid=validateCoreDocument(intent,"operation-intent.v1");
+    const revision=await head();
+    if (revision===null) return null;
+    const matches=(await resolveGlobalIdentities({
+      revision,
+      prefix:CONTROL_PATHS.receipts,
+      schemaId:"operation-receipt.v1",
+      label:"receipt",
+      idField:"receipt_id",
+      pathFor:receiptPath,
+    })).filter(record => record.document.intent_id===valid.intent_id);
+    if (matches.length===0) return null;
+    if (matches.length!==1 || matches[0].document.intent_sha256!==sha256Canonical(valid)) {
+      throw new Error(`receipt lookup is ambiguous or conflicts with intent: ${valid.intent_id}`);
+    }
+    return matches[0].document;
+  }
+
   async function commitReceipt({expectedHead,receipt}) {
     const valid=validateCoreDocument(receipt,"operation-receipt.v1");
     return commitGlobalImmutable({
@@ -301,6 +320,8 @@ export function createCoreControlStore({repository}) {
     commitIntent,
     commitReceipt,
     commitConfiguration,
+    head,
     findIntent,
+    findReceipt,
   });
 }

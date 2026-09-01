@@ -669,3 +669,15 @@ test("store validates persisted core contracts and exposes exact intent lookup",
     intent:{...intent(),command:"repo.remove"},
   }),/immutable|different content|intent/i);
 });
+
+test("store exposes a revision-pinned head and exact receipt lookup for operation retries",async t => {
+  const root=await createRepository(t);
+  const store=createCoreControlStore({repository:control(root)});
+  const planned=intent();
+  const saved=await store.commitIntent({expectedHead:null,intent:planned});
+  const recorded=receiptForIntent(planned);
+  const receiptCommit=await store.commitReceipt({expectedHead:saved.commit_sha,receipt:recorded});
+
+  assert.equal(await store.head(),receiptCommit.commit_sha);
+  assert.deepEqual(await store.findReceipt(planned),recorded);
+});
