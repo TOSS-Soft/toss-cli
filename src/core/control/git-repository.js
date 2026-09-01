@@ -252,11 +252,8 @@ export function createGitControlRepository(options) {
 
   async function runHook(name,args=[],{nonVeto=false}={}) {
     try {
-      await runGit(["hook","run",name,"--",...args]);
+      await runGit(["hook","run","--ignore-missing",name,"--",...args]);
     } catch (error) {
-      if (error?.code===1 && new RegExp(`cannot find a hook named ${name}`,"iu").test(String(error?.stderr ?? ""))) {
-        return false;
-      }
       if (nonVeto) return false;
       throw error;
     }

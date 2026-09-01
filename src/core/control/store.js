@@ -94,6 +94,29 @@ export function createCoreControlStore({repository}) {
     return paths;
   }
 
+  async function resolveGlobalIdentities({revision,prefix,schemaId,label,idField,pathFor}) {
+    if (revision===null) return [];
+    const records=[];
+    const identities=new Map();
+    const paths=[...await listedDocuments(prefix,revision)].sort();
+    for (const path of paths) {
+      const document=await readAt(path,revision);
+      if (document===null) throw new Error(`listed ${label} is absent: ${path}`);
+      const valid=validateCoreDocument(document,schemaId);
+      if (pathFor(valid)!==path) {
+        throw new Error(`${label} identity does not match its path: ${path}`);
+      }
+      const existing=identities.get(valid[idField]);
+      if (existing) {
+        throw new Error(`${label} identity is globally duplicated: ${valid[idField]}`);
+      }
+      const record=Object.freeze({path,document:valid});
+      identities.set(valid[idField],record);
+      records.push(record);
+    }
+    return records;
+  }
+
   async function loadOrganization() {
     const revision=await head();
     if (revision===null) return null;
@@ -138,11 +161,18 @@ export function createCoreControlStore({repository}) {
       readAt(`${CONTROL_PATHS.policies}/lifecycle.yaml`,revision),
       readAt(`${CONTROL_PATHS.policies}/release.yaml`,revision),
     ]);
-    const [programPaths,receiptPaths]=await Promise.all([
+    const [programPaths,receiptRecords]=await Promise.all([
       listedDocuments(CONTROL_PATHS.programs,revision),
-      listedDocuments(CONTROL_PATHS.receipts,revision),
+      resolveGlobalIdentities({
+        revision,
+        prefix:CONTROL_PATHS.receipts,
+        schemaId:"operation-receipt.v1",
+        label:"receipt",
+        idField:"receipt_id",
+        pathFor:receiptPath,
+      }),
     ]);
-    const programs=await Promise.all(programPaths.map(async path => {
+    const programs=await Promise.all([...programPaths].sort().map(async path => {
       if (!/^programs\/[A-Za-z0-9._-]+\/manifest\.yaml$/u.test(path)) {
         throw new Error(`unexpected program manifest path: ${path}`);
       }
@@ -150,16 +180,7 @@ export function createCoreControlStore({repository}) {
       if (document===null) throw new Error(`listed program manifest is absent: ${path}`);
       return document;
     }));
-    const receipts=await Promise.all(receiptPaths.map(async path => {
-      if (!/^receipts\/[0-9]{4}\/[0-9]{2}\/[A-Za-z0-9._-]+\.json$/u.test(path)) {
-        throw new Error(`unexpected receipt path: ${path}`);
-      }
-      const document=await readAt(path,revision);
-      if (document===null) throw new Error(`listed receipt is absent: ${path}`);
-      const receipt=validateCoreDocument(document,"operation-receipt.v1");
-      if (receiptPath(receipt)!==path) throw new Error(`receipt identity does not match its path: ${path}`);
-      return receipt;
-    }));
+    const receipts=receiptRecords.map(record => record.document);
     return Object.freeze({
       organization,
       repositories:Object.freeze(repositories),
@@ -178,22 +199,9 @@ export function createCoreControlStore({repository}) {
     if (current!==expectedHead) {
       throw new Error(`control repository expected head conflict: expected ${String(expectedHead)}, found ${String(current)}`);
     }
-    const matches=[];
-    if (current!==null) {
-      const paths=await listedDocuments(prefix,current);
-      for (const existingPath of paths) {
-        const existingDocument=await readAt(existingPath,current);
-        if (existingDocument===null) throw new Error(`listed ${label} is absent: ${existingPath}`);
-        const existing=validateCoreDocument(existingDocument,schemaId);
-        if (pathFor(existing)!==existingPath) {
-          throw new Error(`${label} identity does not match its path: ${existingPath}`);
-        }
-        if (existing[idField]===valid[idField]) matches.push({path:existingPath,document:existing});
-      }
-    }
-    if (matches.length>1) {
-      throw new Error(`${label} identity is globally duplicated: ${valid[idField]}`);
-    }
+    const matches=(await resolveGlobalIdentities({
+      revision:current,prefix,schemaId,label,idField,pathFor,
+    })).filter(existing => existing.document[idField]===valid[idField]);
     if (matches.length===1) {
       const existing=matches[0];
       if (existing.path===path && equivalent(existing.document,valid)) {
@@ -222,18 +230,14 @@ export function createCoreControlStore({repository}) {
     if (revision===null) {
       throw new Error("receipt intent must already be persisted");
     }
-    const paths=await listedDocuments(CONTROL_PATHS.intents,revision);
-    const matches=[];
-    for (const path of paths) {
-      if (!/^intents\/[0-9]{4}\/[0-9]{2}\/[A-Za-z0-9._-]+\.json$/u.test(path)) {
-        throw new Error(`unexpected intent path: ${path}`);
-      }
-      const document=await readAt(path,revision);
-      if (document===null) throw new Error(`listed intent is absent: ${path}`);
-      const intent=validateCoreDocument(document,"operation-intent.v1");
-      if (intentPath(intent)!==path) throw new Error(`intent identity does not match its path: ${path}`);
-      if (intent.intent_id===receipt.intent_id) matches.push(intent);
-    }
+    const matches=(await resolveGlobalIdentities({
+      revision,
+      prefix:CONTROL_PATHS.intents,
+      schemaId:"operation-intent.v1",
+      label:"intent",
+      idField:"intent_id",
+      pathFor:intentPath,
+    })).filter(record => record.document.intent_id===receipt.intent_id).map(record => record.document);
     if (matches.length!==1) {
       throw new Error(`receipt intent must resolve to exactly one persisted intent: ${receipt.intent_id}`);
     }
@@ -254,10 +258,16 @@ export function createCoreControlStore({repository}) {
     const valid=validateCoreDocument(intent,"operation-intent.v1");
     const revision=await head();
     if (revision===null) return null;
-    const existing=await readAt(intentPath(valid),revision);
-    if (existing===null) return null;
-    const exact=validateCoreDocument(existing,"operation-intent.v1");
-    return equivalent(exact,valid) ? exact : null;
+    const records=await resolveGlobalIdentities({
+      revision,
+      prefix:CONTROL_PATHS.intents,
+      schemaId:"operation-intent.v1",
+      label:"intent",
+      idField:"intent_id",
+      pathFor:intentPath,
+    });
+    const existing=records.find(record => record.document.intent_id===valid.intent_id);
+    return existing && equivalent(existing.document,valid) ? existing.document : null;
   }
 
   async function commitReceipt({expectedHead,receipt}) {

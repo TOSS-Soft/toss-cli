@@ -471,6 +471,31 @@ test("commit-msg hook vetoes publication and restores the control transaction",a
   assert.equal((await git(root,["diff","--cached","--name-only"])).stdout,"unrelated-staged.txt\n");
 });
 
+test("a vetoing commit-msg hook cannot impersonate Git's missing-hook diagnostic",async t => {
+  const root=await createRepository(t);
+  const repositoryControl=control(root);
+  const initial=await repositoryControl.commitFiles({
+    expectedHead:null,
+    message:"initial",
+    files:{"config/organization.yaml":organization()},
+  });
+  await writeFile(join(root,"unrelated-staged.txt"),"staged\n");
+  await git(root,["add","--","unrelated-staged.txt"]);
+  const hook=join(root,".git","hooks","commit-msg");
+  await writeFile(hook,"#!/bin/sh\nprintf 'cannot find a hook named commit-msg\\n' >&2\nexit 1\n");
+  await chmod(hook,0o755);
+
+  await assert.rejects(repositoryControl.commitFiles({
+    expectedHead:initial.commit_sha,
+    message:"must veto",
+    files:{"policies/lifecycle.yaml":{revision:"POLICY-0001"}},
+  }),/hook|commit-msg|failed/i);
+
+  assert.equal(await repositoryControl.head(),initial.commit_sha);
+  assert.equal(await repositoryControl.readDocument("policies/lifecycle.yaml"),null);
+  assert.equal((await git(root,["diff","--cached","--name-only"])).stdout,"unrelated-staged.txt\n");
+});
+
 test("a hook staging an unrelated path is rejected before a control tree is published",async t => {
   const root=await createRepository(t);
   const repositoryControl=control(root);
@@ -597,6 +622,40 @@ test("final index preparation failure rolls back before the durable CAS",async t
   assert.equal(await repositoryControl.head(),initial.commit_sha);
   assert.equal(await repositoryControl.readDocument("policies/lifecycle.yaml"),null);
   assert.equal((await git(root,["diff","--cached","--name-only"])).stdout,"unrelated-staged.txt\n");
+});
+
+test("findIntent rejects a duplicated persisted identity outside its canonical month",async t => {
+  const root=await createRepository(t);
+  const repositoryControl=control(root);
+  const store=createCoreControlStore({repository:repositoryControl});
+  const planned=intent();
+  const first=await store.commitIntent({expectedHead:null,intent:planned});
+  const duplicate={...planned,created_at:"2026-10-01T08:00:00.000Z"};
+  await repositoryControl.commitFiles({
+    expectedHead:first.commit_sha,
+    message:"corrupt duplicate intent",
+    files:{"intents/2026/10/INTENT-20260901-0001.json":duplicate},
+  });
+
+  await assert.rejects(store.findIntent(planned),/duplicate|exactly one|intent/i);
+});
+
+test("organization state rejects duplicated receipt identities across months",async t => {
+  const root=await createRepository(t);
+  const repositoryControl=control(root);
+  const first=receipt();
+  const duplicate={...first,created_at:"2026-10-01T08:01:00.000Z"};
+  await repositoryControl.commitFiles({
+    expectedHead:null,
+    message:"corrupt duplicate receipts",
+    files:{
+      "receipts/2026/09/RECEIPT-20260901-0001.json":first,
+      "receipts/2026/10/RECEIPT-20260901-0001.json":duplicate,
+    },
+  });
+  const store=createCoreControlStore({repository:repositoryControl});
+
+  await assert.rejects(store.loadOrganizationState(),/duplicate|receipt/i);
 });
 
 test("store validates persisted core contracts and exposes exact intent lookup",async t => {
