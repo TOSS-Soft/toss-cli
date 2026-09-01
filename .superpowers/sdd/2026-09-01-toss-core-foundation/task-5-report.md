@@ -29,3 +29,28 @@ All commands passed on 2026-09-01.
 - The approved bootstrap requirement cannot use the ordinary runner sequence because it would persist intent and receipt separately. `commitBootstrap` is limited to an unborn control repository, exactly five closed files, one `init` intent, and one bound receipt.
 - Runtime requires an explicit `policyRevision` function. This avoids embedding a production policy constant; callers must supply the explicit configured policy revision.
 - Live GitHub provisioning remains adapter-injected by design. The new command tests use closed fake adapters and make no network or GitHub mutations.
+
+## Fix round 1/5 — integrity and consistency hardening
+
+### RED / GREEN
+
+- RED: focused input tests accepted contained dot traversal and a symlinked cwd; the original bootstrap store accepted a planned/non-exact receipt; configuration commits accepted arbitrary paths and list/add could observe different control revisions.
+- GREEN: input, bootstrap proof, configuration registry, runtime path grammar, and focused foundation/store suites pass. `npm run test:fast` also passed.
+
+### Changes
+
+- Input reads now reject dot/empty path segments, symlink/non-directory roots and parents, invalid UTF-8, and descriptor/parent identity changes before or during a bounded read.
+- Bootstrap intent payloads authorize canonical hashes for organization and policy files. The store accepts only a completed receipt with the exact bootstrap operation set, remote observations, authority binding, project binding, and matching policy revisions; startup rechecks pinned policy and project data.
+- The store exposes a one-revision registry snapshot, validates the namespace exactly against `organization.repositories`, restricts configuration commits to organization/repository documents, and rejects arbitrary configuration paths.
+- Repository additions re-read the registry snapshot immediately before their atomic CAS and map only tagged ledger conflicts to exit-6 conflicts. A completed persisted registration can finish the local configuration transaction without remote reapply.
+- Runtime control paths are explicit, safe relative segments under the supplied cwd; raw locale collation was removed from repository ordering.
+
+### Verification
+
+- `node --test test/core-foundation-commands.test.js test/core-control-store.test.js`
+- `npm run test:fast`
+- `git diff --check`
+
+### Remaining risk
+
+- The retry seam identifies a completed `repo.add` ledger operation by its exact repository-registration operation and validates the embedded repository config; the existing fake command tests exercise the normal path. Production persistence remains covered by the Git-backed control-store tests.

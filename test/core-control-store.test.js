@@ -7,6 +7,7 @@ import {promisify} from "node:util";
 import test from "node:test";
 
 import {sha256Canonical} from "../src/contracts/acp.js";
+import {createOperationIntent} from "../src/core/operations/plan.js";
 import {createGitControlRepository} from "../src/core/control/git-repository.js";
 import {
   CONTROL_PATHS,
@@ -248,7 +249,7 @@ test("repository configuration uses the approved reversible percent filename exc
   assert.equal(decodeURIComponent(repositoryFilename("TOSS-Soft/toss-cli").slice(0,-5)),"toss-soft/toss-cli");
   await store.commitConfiguration({
     expectedHead:null,
-    files:{[path]:repositoryConfig()},
+    files:{"config/organization.yaml":organization(),[path]:repositoryConfig()},
   });
   assert.deepEqual(await repositoryControl.readDocument(path),repositoryConfig());
   await assert.rejects(repositoryControl.readDocument("config/repositories/toss-soft%2ftoss-cli.yaml"),/unsafe relative path/i);
@@ -723,12 +724,22 @@ test("intent commit tags stale head and immutable identity conflicts",async t =>
 test("bootstrap commits its closed configuration, intent, and receipt in one unborn-repository CAS",async t => {
   const root=await createRepository(t);
   const store=createCoreControlStore({repository:control(root)});
-  const planned={...intent(),command:"init",source:{...intent().source,repository:"TOSS-Soft/toss-os-control"},authority:{record_id:"AUTH-20260901-0001",sha256:"a".repeat(64)},operations:[{...intent().operations[0],repository:"TOSS-Soft/toss-os-control"}]};
+  const bootOrganization={...organization(),repositories:[]}; const lifecycle={revision:"POLICY-0001"}; const release={revision:"POLICY-0001"};
+  const hashes={organization:sha256Canonical(bootOrganization),lifecycle:sha256Canonical(lifecycle),release:sha256Canonical(release)};
+  const controlRepository="TOSS-Soft/toss-os-control";
+  const planned=createOperationIntent({intent_id:"INTENT-20260901-0001",created_at:"2026-09-01T08:00:00.000Z",command:"init",policy_revision:"POLICY-0001",source:{repository:controlRepository,revision:"abc123",sha256:"a".repeat(64)},authority:{record_id:"AUTH-20260901-0001",sha256:"a".repeat(64)},operations:[
+    {resource:"repository",action:"create",repository:controlRepository,expected_revision:null,payload:{kind:"create-private-control-repository",private:true,files:hashes}},
+    {resource:"repository",action:"update",repository:controlRepository,expected_revision:null,payload:{kind:"verify-default-branch-protection"}},
+    {resource:"project",action:"update",repository:null,expected_revision:null,payload:{kind:"discover-project-fields",project:bootOrganization.project}},
+    ...[["organization-config",hashes.organization],["lifecycle-policy",hashes.lifecycle],["release-policy",hashes.release]].map(([kind,sha256]) => ({resource:"repository",action:"commit",repository:controlRepository,expected_revision:null,payload:{kind,sha256}})),
+    {resource:"repository",action:"commit",repository:controlRepository,expected_revision:null,payload:{kind:"first-control-transaction",files:hashes}},
+  ]});
   const recorded=receiptForIntent(planned);
+  recorded.status="completed"; recorded.observed_revisions=planned.operations.filter(operation => !["organization-config","lifecycle-policy","release-policy","first-control-transaction"].includes(operation.payload.kind)).map(operation => ({operation_id:operation.operation_id,repository:operation.repository,revision:"abc123"}));
   const committed=await store.commitBootstrap({expectedHead:null,files:{
-    "config/organization.yaml":{...organization(),repositories:[]},
-    "policies/lifecycle.yaml":{revision:"POLICY-0001"},
-    "policies/release.yaml":{revision:"POLICY-0001"},
+    "config/organization.yaml":bootOrganization,
+    "policies/lifecycle.yaml":lifecycle,
+    "policies/release.yaml":release,
     "intents/2026/09/INTENT-20260901-0001.json":planned,
     "receipts/2026/09/RECEIPT-20260901-0001.json":recorded,
   }});

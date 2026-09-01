@@ -1,5 +1,5 @@
 import {repositoryPath} from "../control/store.js";
-import {CoreBlockedError,CoreConflictError,CoreValidationError} from "../errors.js";
+import {CoreBlockedError,CoreConflictError,CoreInternalError,CoreValidationError} from "../errors.js";
 import {closedData,exact,ownDataFunction,requireAuthority} from "./common.js";
 
 function canonicalRepository(value) {
@@ -42,33 +42,55 @@ async function add(command,services) {
   const repository=canonicalRepository(command.args[0]);
   if (command.options.from===null) throw new CoreValidationError("repo add requires --from <FILE>");
   const input=repositoryInput(await ownDataFunction(services,"readInput","services")(command.options.from));
-  const organization=await ownDataFunction(services.control,"loadOrganization","control")();
+  const registry=await ownDataFunction(services.control,"loadRegistryState","control")();
+  const organization=registry.organization;
   if (organization===null) throw new CoreBlockedError("Organization initialization or reconciliation is required before repository mutation");
   if (input.project_owner!==organization.organization || input.project_number!==organization.project.number) throw new CoreValidationError("Repository input does not bind the configured organization Project");
   const snapshot=registration(await ownDataFunction(services.github,"snapshot","github")({kind:"repository-registration",repository,project:organization.project}),repository);
   if (snapshot.project.node_id!==organization.project.node_id || snapshot.project.number!==organization.project.number || snapshot.repository.default_branch!==input.default_branch) throw new CoreConflictError("Repository registration snapshot does not match the requested Project or default branch");
   const desired=desiredConfig(repository,input,snapshot,services.clock);
-  const existing=await ownDataFunction(services.control,"loadRepository","control")(repository);
+  const existing=registry.repositories.find(value => value.repository===repository) ?? null;
   if (existing!==null) {
     if (!sameRegistration(existing,desired)) throw new CoreConflictError("Repository identity is already registered with different node or configuration");
     return Object.freeze({status:"already-registered",repository,control_revision:await ownDataFunction(services.control,"head","control")()});
+  }
+  const pending=await ownDataFunction(services.control,"findCompletedRepositoryRegistration","control")(repository);
+  if (pending!==null) {
+    if (!sameRegistration(pending.configuration,desired)) throw new CoreConflictError("Completed repository registration does not match current repository snapshot");
+    const latest=await ownDataFunction(services.control,"loadRegistryState","control")();
+    const present=latest.repositories.find(value => value.repository===repository);
+    if (present!==undefined) return Object.freeze({status:"already-registered",repository,control_revision:latest.revision});
+    const next=Object.freeze({...latest.organization,repositories:Object.freeze([...latest.organization.repositories,repository].sort((left,right) => left===right ? 0 : left<right ? -1 : 1))});
+    try { const committed=await ownDataFunction(services.control,"commitConfiguration","control")({expectedHead:latest.revision,files:Object.freeze({"config/organization.yaml":next,[repositoryPath(repository)]:pending.configuration})}); return Object.freeze({status:"registered",repository,control_revision:committed.commit_sha,receipt:pending.receipt}); } catch (error) {
+      if (error?.code==="CONTROL_LEDGER_CONFLICT") throw new CoreConflictError("Repository registration configuration commit conflicted",{cause:error});
+      throw new CoreInternalError("Repository registration configuration commit failed",{cause:error});
+    }
   }
   const authority=await requireAuthority(command,services);
   const operation=Object.freeze({resource:"repository",action:"register",repository,expected_revision:snapshot.repository.revision,payload:Object.freeze({kind:"repository-registration",repository_config:desired,access:snapshot.repository.access,rules:snapshot.repository.rules,project:snapshot.project})});
   const outcome=await ownDataFunction(services.operations,"execute","operations")({command,source:snapshot.source,operations:[operation],authority});
   if (!command.options.apply || command.options.dryRun) return outcome;
-  const head=await ownDataFunction(services.control,"head","control")();
-  const nextOrganization=Object.freeze({...organization,repositories:Object.freeze([...organization.repositories,repository].sort())});
-  const committed=await ownDataFunction(services.control,"commitConfiguration","control")({expectedHead:head,files:Object.freeze({"config/organization.yaml":nextOrganization,[repositoryPath(repository)]:desired})});
+  const latest=await ownDataFunction(services.control,"loadRegistryState","control")();
+  const present=latest.repositories.find(value => value.repository===repository);
+  if (present!==undefined) {
+    if (!sameRegistration(present,desired)) throw new CoreConflictError("Repository identity is already registered with different node or configuration");
+    return Object.freeze({status:"already-registered",repository,control_revision:latest.revision,receipt:outcome});
+  }
+  const nextOrganization=Object.freeze({...latest.organization,repositories:Object.freeze([...latest.organization.repositories,repository].sort((left,right) => left===right ? 0 : left<right ? -1 : 1))});
+  let committed;
+  try { committed=await ownDataFunction(services.control,"commitConfiguration","control")({expectedHead:latest.revision,files:Object.freeze({"config/organization.yaml":nextOrganization,[repositoryPath(repository)]:desired})}); } catch (error) {
+    if (error?.code==="CONTROL_LEDGER_CONFLICT") throw new CoreConflictError("Repository registration configuration commit conflicted",{cause:error});
+    throw new CoreInternalError("Repository registration configuration commit failed",{cause:error});
+  }
   return Object.freeze({status:"registered",repository,control_revision:committed.commit_sha,receipt:outcome});
 }
 
 async function list(services) {
   const control=services.control;
-  const [repositories,revision]=await Promise.all([ownDataFunction(control,"listRepositories","control")(),ownDataFunction(control,"head","control")()]);
-  const values=closedData(repositories,"registered repositories");
+  const state=await ownDataFunction(control,"loadRegistryState","control")();
+  const values=closedData(state.repositories,"registered repositories"); const revision=state.revision;
   if (!Array.isArray(values)) throw new CoreValidationError("Registered repositories must be an array");
-  const ordered=Object.freeze([...values].sort((left,right) => left.repository.localeCompare(right.repository,"en",{sensitivity:"variant"})));
+  const ordered=Object.freeze([...values].sort((left,right) => left.repository===right.repository ? 0 : left.repository<right.repository ? -1 : 1));
   const remote=closedData(await ownDataFunction(services.github,"snapshot","github")({kind:"repository-list",repositories:ordered.map(value => value.repository)}),"repository list snapshot");
   exact(remote,["kind","revisions"],"repository list snapshot");
   if (remote.kind!=="repository-list" || !Array.isArray(remote.revisions) || remote.revisions.length!==ordered.length) throw new CoreValidationError("Repository list snapshot is malformed");

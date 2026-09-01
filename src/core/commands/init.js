@@ -28,24 +28,30 @@ function bootstrap(value) {
   return snapshot;
 }
 
-function operationsFor(snapshot) {
+function organizationFor(snapshot) {
+  const organization=Object.freeze({schema_version:"organization-config.v1",organization:snapshot.organization.organization,project:snapshot.organization.project,control_repository:DEFAULT_CONTROL_REPOSITORY,policy_revision:snapshot.organization.policy_revision,repositories:[]});
+  validateCoreDocument(organization,"organization-config.v1");
+  return organization;
+}
+
+function operationsFor(snapshot,organization) {
   const revision=snapshot.control_repository.revision;
   const repository=DEFAULT_CONTROL_REPOSITORY;
   const project=snapshot.organization.project;
+  const hashes=Object.freeze({organization:sha256Canonical(organization),lifecycle:sha256Canonical(snapshot.organization.lifecycle_policy),release:sha256Canonical(snapshot.organization.release_policy)});
   return Object.freeze([
-    {resource:"repository",action:"create",repository,expected_revision:revision,payload:{kind:"create-private-control-repository",private:true}},
+    {resource:"repository",action:"create",repository,expected_revision:revision,payload:{kind:"create-private-control-repository",private:true,files:hashes}},
     {resource:"repository",action:"update",repository,expected_revision:revision,payload:{kind:"verify-default-branch-protection"}},
     {resource:"project",action:"update",repository:null,expected_revision:null,payload:{kind:"discover-project-fields",project}},
-    {resource:"repository",action:"commit",repository,expected_revision:revision,payload:{kind:"organization-config"}},
-    {resource:"repository",action:"commit",repository,expected_revision:revision,payload:{kind:"lifecycle-policy"}},
-    {resource:"repository",action:"commit",repository,expected_revision:revision,payload:{kind:"release-policy"}},
-    {resource:"repository",action:"commit",repository,expected_revision:revision,payload:{kind:"first-control-transaction"}},
+    {resource:"repository",action:"commit",repository,expected_revision:revision,payload:{kind:"organization-config",sha256:hashes.organization}},
+    {resource:"repository",action:"commit",repository,expected_revision:revision,payload:{kind:"lifecycle-policy",sha256:hashes.lifecycle}},
+    {resource:"repository",action:"commit",repository,expected_revision:revision,payload:{kind:"release-policy",sha256:hashes.release}},
+    {resource:"repository",action:"commit",repository,expected_revision:revision,payload:{kind:"first-control-transaction",files:hashes}},
   ]);
 }
 
 function configurationFiles(snapshot,intent,receipt) {
-  const organization=Object.freeze({schema_version:"organization-config.v1",organization:snapshot.organization.organization,project:snapshot.organization.project,control_repository:DEFAULT_CONTROL_REPOSITORY,policy_revision:snapshot.organization.policy_revision,repositories:[]});
-  validateCoreDocument(organization,"organization-config.v1");
+  const organization=organizationFor(snapshot);
   return Object.freeze({
     "config/organization.yaml":organization,
     "policies/lifecycle.yaml":snapshot.organization.lifecycle_policy,
@@ -86,7 +92,9 @@ export async function runInitCommand(command,services) {
     if (head===null || organization===null) throw new CoreBlockedError("Initialization is incomplete; reconciliation is required");
     const bootstrapState=await ownDataFunction(services.control,"loadBootstrapState","control")();
     if (bootstrapState===null) throw new CoreConflictError("Existing control repository has no immutable bootstrap transaction");
-    if (organization.control_repository!==DEFAULT_CONTROL_REPOSITORY || organization.organization!==snapshot.organization.organization || organization.policy_revision!==snapshot.organization.policy_revision) {
+    if (bootstrapState.revision!==head || organization.control_repository!==DEFAULT_CONTROL_REPOSITORY || organization.organization!==snapshot.organization.organization || organization.policy_revision!==snapshot.organization.policy_revision ||
+        organization.project.node_id!==snapshot.organization.project.node_id || organization.project.number!==snapshot.organization.project.number ||
+        sha256Canonical(bootstrapState.lifecycle)!==sha256Canonical(snapshot.organization.lifecycle_policy) || sha256Canonical(bootstrapState.release)!==sha256Canonical(snapshot.organization.release_policy)) {
       throw new CoreConflictError("Existing control repository does not match the desired bootstrap configuration");
     }
     const created=bootstrapState.intent.operations.find(operation => operation.payload?.kind==="create-private-control-repository");
@@ -96,7 +104,8 @@ export async function runInitCommand(command,services) {
   }
   if (head!==null || await loadOrganization()!==null) throw new CoreConflictError("Control repository already has a divergent local revision");
   const authority=await requireAuthority(command,services);
-  const intent=createOperationIntent({intent_id:services.idGenerator("intent"),created_at:services.clock(),command:"init",policy_revision:snapshot.organization.policy_revision,source:snapshot.source,authority:authority===null ? null : authorityReference(authority),operations:operationsFor(snapshot)});
+  const organization=organizationFor(snapshot);
+  const intent=createOperationIntent({intent_id:services.idGenerator("intent"),created_at:services.clock(),command:"init",policy_revision:snapshot.organization.policy_revision,source:snapshot.source,authority:authority===null ? null : authorityReference(authority),operations:operationsFor(snapshot,organization)});
   const preview=operationPreview(intent);
   if (!command.options.apply || command.options.dryRun) return preview;
   if (typeof services.operations.verifyAuthorityFor!=="function") throw new CoreValidationError("Operation runner does not expose bootstrap authority verification");

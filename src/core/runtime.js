@@ -1,4 +1,4 @@
-import {resolve} from "node:path";
+import {isAbsolute,relative,resolve,sep} from "node:path";
 import {types} from "node:util";
 
 import {createCoreInputReader} from "./input.js";
@@ -39,6 +39,12 @@ function port(value,label,methods) {
   }
   return value;
 }
+function safeControlPath(cwd,value) {
+  if (typeof value!=="string" || !value || value.includes("\0") || value.includes("\\") || isAbsolute(value) || /^[A-Za-z]:/u.test(value) || value.split("/").some(segment => !segment || segment==="." || segment==="..")) throw new TypeError("core runtime controlPath must use safe relative segments");
+  const root=resolve(cwd); const target=resolve(root,value); const rel=relative(root,target);
+  if (!rel || rel===".." || rel.startsWith(`..${sep}`)) throw new TypeError("core runtime controlPath must remain within cwd");
+  return target;
+}
 
 export function createCoreRuntime(options) {
   const value=ownOptions(options);
@@ -50,7 +56,7 @@ export function createCoreRuntime(options) {
   const policyRevision=functionValue(value.policyRevision,"core runtime policyRevision");
   if (!value.authorityRegistry || typeof value.authorityRegistry!=="object" || types.isProxy(value.authorityRegistry)) throw new TypeError("core runtime authorityRegistry must be explicit non-proxy data");
   const reader=value.inputReader===undefined ? createCoreInputReader({cwd:value.cwd}) : port(value.inputReader,"inputReader",["readInput","readAuthority"]);
-  const repository=createGitControlRepository({root:resolve(value.cwd,value.controlPath),execFile,clock});
+  const repository=createGitControlRepository({root:safeControlPath(value.cwd,value.controlPath),execFile,clock});
   const control=createCoreControlStore({repository});
   const operations=createOperationRunner({control,github,authorityRegistry:value.authorityRegistry,clock,idGenerator,policyRevision});
   return Object.freeze({control,github,operations,clock,idGenerator,readInput:reader.readInput,readAuthority:reader.readAuthority});

@@ -38,6 +38,9 @@ function safePath(root,value) {
       value.startsWith("/") || /^[A-Za-z]:/u.test(value)) {
     throw new CoreValidationError("Input path must be a safe relative path");
   }
+  if (value.split("/").some(segment => !segment || segment==="." || segment==="..")) {
+    throw new CoreValidationError("Input path must be a safe relative path with non-dot segments");
+  }
   const target=resolve(root,value);
   const rel=relative(root,target);
   if (!rel || rel===".." || rel.startsWith(`..${sep}`) || resolve(root,rel)!==target) {
@@ -48,18 +51,43 @@ function safePath(root,value) {
   return {target,extension};
 }
 
-async function rejectSymlinkParents(root,target) {
+function statIdentity(stat) {
+  return Object.freeze({dev:stat.dev,ino:stat.ino,size:stat.size,mtimeMs:stat.mtimeMs,ctimeMs:stat.ctimeMs});
+}
+
+function sameIdentity(before,after) {
+  return before.dev===after.dev && before.ino===after.ino && before.size===after.size &&
+    before.mtimeMs===after.mtimeMs && before.ctimeMs===after.ctimeMs;
+}
+
+async function checkedParents(root,target) {
   let current=root;
+  const rootStat=await lstat(current);
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) throw new CoreValidationError("Input cwd must be a real directory, not a symbolic link");
+  const snapshots=[[current,statIdentity(rootStat)]];
   const parts=relative(root,target).split(sep);
-  for (const part of parts) {
+  for (const part of parts.slice(0,-1)) {
     current=resolve(current,part);
     const stat=await lstat(current);
-    if (stat.isSymbolicLink()) throw new CoreValidationError("Input path may not traverse a symbolic link");
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new CoreValidationError("Input path may not traverse a symbolic link");
+    snapshots.push([current,statIdentity(stat)]);
+  }
+  const finalStat=await lstat(target);
+  if (finalStat.isSymbolicLink()) throw new CoreValidationError("Input path may not traverse a symbolic link");
+  return snapshots;
+}
+
+async function revalidateParents(snapshots) {
+  for (const [path,before] of snapshots) {
+    const after=await lstat(path);
+    if (after.isSymbolicLink() || !after.isDirectory() || !sameIdentity(before,statIdentity(after))) {
+      throw new CoreValidationError("Input path changed while it was being opened");
+    }
   }
 }
 
 async function readFixed(handle,maxBytes) {
-  const stat=await handle.stat();
+  const stat=await handle.stat(); const before=statIdentity(stat);
   if (!stat.isFile()) throw new CoreValidationError("Input must be a regular file");
   if (stat.size>maxBytes) throw new CoreValidationError("Input exceeds the fixed maximum size");
   const chunks=[]; let total=0; const buffer=Buffer.allocUnsafe(Math.min(65536,maxBytes+1));
@@ -70,7 +98,11 @@ async function readFixed(handle,maxBytes) {
     if (total>maxBytes) throw new CoreValidationError("Input exceeds the fixed maximum size");
     chunks.push(Buffer.from(buffer.subarray(0,bytesRead)));
   }
-  return Buffer.concat(chunks).toString("utf8");
+  const after=statIdentity(await handle.stat());
+  if (!sameIdentity(before,after)) throw new CoreValidationError("Input changed while it was being read");
+  try { return new TextDecoder("utf-8",{fatal:true}).decode(Buffer.concat(chunks)); } catch (error) {
+    throw new CoreValidationError("Input must be valid UTF-8",{cause:error});
+  }
 }
 
 function noMerge(value,path="$") {
@@ -99,11 +131,15 @@ export function createCoreInputReader(options) {
 
   async function readInput(path) {
     const {target,extension}=safePath(root,path);
-    await rejectSymlinkParents(root,target);
+    let parents;
     let handle;
     try {
+      parents=await checkedParents(root,target);
       handle=await open(target,constants.O_RDONLY|constants.O_NOFOLLOW);
-      return parse(await readFixed(handle,maxBytes),extension);
+      await revalidateParents(parents);
+      const value=await readFixed(handle,maxBytes);
+      await revalidateParents(parents);
+      return parse(value,extension);
     } catch (error) {
       if (error instanceof CoreValidationError) throw error;
       throw new CoreValidationError("Input file could not be read safely",{cause:error});

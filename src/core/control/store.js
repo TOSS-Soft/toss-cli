@@ -71,7 +71,40 @@ function validateConfiguration(path,value) {
     }
     return repository;
   }
-  return value;
+  throw new TypeError(`configuration path is not permitted: ${path}`);
+}
+
+function rawCompare(left,right) { return left===right ? 0 : left<right ? -1 : 1; }
+
+function bootstrapProof({organization,lifecycle,release,intent,receipt}) {
+  if (intent.command!=="init" || intent.authority===null || intent.source.repository!==organization.control_repository) throw ledgerConflict("bootstrap intent must bind explicit authority and control repository");
+  if (receipt.status!=="completed" || receipt.intent_id!==intent.intent_id || receipt.intent_sha256!==sha256Canonical(intent)) throw ledgerConflict("bootstrap receipt must be completed and bind the bootstrap intent");
+  if (!lifecycle || !release || lifecycle.revision!==organization.policy_revision || release.revision!==organization.policy_revision) throw ledgerConflict("bootstrap policies must bind organization policy revision");
+  const hashes=Object.freeze({organization:sha256Canonical(organization),lifecycle:sha256Canonical(lifecycle),release:sha256Canonical(release)});
+  const byKind=new Map();
+  for (const operation of intent.operations) {
+    if (byKind.has(operation.payload?.kind)) throw ledgerConflict("bootstrap operation kinds must be unique");
+    byKind.set(operation.payload?.kind,operation);
+  }
+  const required=["create-private-control-repository","verify-default-branch-protection","discover-project-fields","organization-config","lifecycle-policy","release-policy","first-control-transaction"];
+  if (intent.operations.length!==required.length || [...byKind.keys()].sort(rawCompare).join("|")!==[...required].sort(rawCompare).join("|")) throw ledgerConflict("bootstrap operation set is not exact");
+  const create=byKind.get("create-private-control-repository"); const discover=byKind.get("discover-project-fields");
+  if (create.repository!==organization.control_repository || create.action!=="create" || create.payload.private!==true || !equivalent(create.payload.files,hashes) ||
+      discover.repository!==null || discover.action!=="update" || !equivalent(discover.payload.project,organization.project)) throw ledgerConflict("bootstrap operation bindings are invalid");
+  for (const [kind,hash] of [["organization-config",hashes.organization],["lifecycle-policy",hashes.lifecycle],["release-policy",hashes.release]]) {
+    const operation=byKind.get(kind);
+    if (operation.repository!==organization.control_repository || operation.action!=="commit" || operation.payload.sha256!==hash) throw ledgerConflict("bootstrap document digest is not authorized");
+  }
+  const transaction=byKind.get("first-control-transaction");
+  if (transaction.repository!==organization.control_repository || transaction.action!=="commit" || !equivalent(transaction.payload.files,hashes)) throw ledgerConflict("bootstrap transaction digest is not authorized");
+  const remote=[create,byKind.get("verify-default-branch-protection"),discover];
+  const observed=new Map();
+  for (const value of receipt.observed_revisions) {
+    if (observed.has(value.operation_id)) throw ledgerConflict("bootstrap receipt observes an operation more than once");
+    observed.set(value.operation_id,value);
+  }
+  if (observed.size!==remote.length || remote.some(operation => !observed.has(operation.operation_id) || observed.get(operation.operation_id).repository!==operation.repository)) throw ledgerConflict("bootstrap receipt must observe every remote bootstrap operation exactly once");
+  return Object.freeze({hashes,operations:byKind});
 }
 
 export function createCoreControlStore({repository}) {
@@ -149,12 +182,44 @@ export function createCoreControlStore({repository}) {
   }
 
   async function listRepositories() {
+    return (await loadRegistryState()).repositories;
+  }
+
+  async function loadRegistryState() {
     const revision=await head();
-    if (revision===null) return [];
+    if (revision===null) return Object.freeze({revision:null,organization:null,repositories:Object.freeze([])});
     const organizationDocument=await readAt(CONTROL_PATHS.organization,revision);
-    if (organizationDocument===null) return [];
+    if (organizationDocument===null) return Object.freeze({revision,organization:null,repositories:Object.freeze([])});
     const organization=validateCoreDocument(organizationDocument,"organization-config.v1");
-    return Promise.all(organization.repositories.map(identity => readRepositoryAt(identity,revision)));
+    const paths=[...await listedDocuments(CONTROL_PATHS.repositories,revision)].sort(rawCompare);
+    const repositories=[]; const identities=new Set();
+    for (const path of paths) {
+      if (!path.startsWith(`${CONTROL_PATHS.repositories}/`) || !path.endsWith(".yaml")) throw ledgerConflict(`unexpected repository configuration path: ${path}`);
+      const document=await readAt(path,revision);
+      if (document===null) throw ledgerConflict(`listed repository configuration is absent: ${path}`);
+      const repository=validateConfiguration(path,document);
+      if (identities.has(repository.repository)) throw ledgerConflict(`repository configuration identity is duplicated: ${repository.repository}`);
+      identities.add(repository.repository); repositories.push(repository);
+    }
+    const names=repositories.map(value => value.repository).sort(rawCompare);
+    if (canonicalJson(organization.repositories)!==canonicalJson(names)) throw ledgerConflict("organization repository registry does not exactly match repository configuration namespace");
+    return Object.freeze({revision,organization,repositories:Object.freeze(repositories.sort((left,right) => rawCompare(left.repository,right.repository)))});
+  }
+
+  async function findCompletedRepositoryRegistration(identity) {
+    const state=await loadRegistryState();
+    if (state.revision===null) return null;
+    const intents=await resolveGlobalIdentities({revision:state.revision,prefix:CONTROL_PATHS.intents,schemaId:"operation-intent.v1",label:"intent",idField:"intent_id",pathFor:intentPath,ledgerRead:true});
+    const candidates=intents.filter(record => record.document.command==="repo.add" && record.document.operations.length===1 && record.document.operations[0].payload?.kind==="repository-registration" && record.document.operations[0].repository===identity);
+    if (candidates.length===0) return null;
+    if (candidates.length!==1) throw ledgerConflict(`repository registration intent is ambiguous: ${identity}`);
+    const intent=candidates[0].document; const config=intent.operations[0].payload.repository_config;
+    let valid;
+    try { valid=validateCoreDocument(config,"repository-config.v1"); } catch (error) { throw ledgerConflict("repository registration intent has corrupt configuration",{cause:error}); }
+    if (valid.repository!==identity) throw ledgerConflict("repository registration intent does not bind its identity");
+    const receipt=await findReceipt(intent);
+    if (receipt===null || receipt.status!=="completed") return null;
+    return Object.freeze({revision:state.revision,intent,receipt,configuration:valid});
   }
 
   async function loadOrganizationState() {
@@ -208,6 +273,7 @@ export function createCoreControlStore({repository}) {
     const organizationDocument=await readAt(CONTROL_PATHS.organization,revision);
     if (organizationDocument===null) return null;
     const organization=validateCoreDocument(organizationDocument,"organization-config.v1");
+    const [lifecycle,release]=await Promise.all([readAt(`${CONTROL_PATHS.policies}/lifecycle.yaml`,revision),readAt(`${CONTROL_PATHS.policies}/release.yaml`,revision)]);
     const intents=await resolveGlobalIdentities({revision,prefix:CONTROL_PATHS.intents,schemaId:"operation-intent.v1",label:"intent",idField:"intent_id",pathFor:intentPath,ledgerRead:true});
     const bootstrapIntents=intents.filter(record => record.document.command==="init");
     if (bootstrapIntents.length!==1) throw ledgerConflict("control repository must contain exactly one bootstrap intent");
@@ -215,7 +281,8 @@ export function createCoreControlStore({repository}) {
     const receipts=await resolveGlobalIdentities({revision,prefix:CONTROL_PATHS.receipts,schemaId:"operation-receipt.v1",label:"receipt",idField:"receipt_id",pathFor:receiptPath,ledgerRead:true});
     const matching=receipts.filter(record => record.document.intent_id===intent.intent_id && record.document.intent_sha256===sha256Canonical(intent));
     if (matching.length!==1) throw ledgerConflict("bootstrap intent must have exactly one matching receipt");
-    return Object.freeze({organization,intent,receipt:matching[0].document,revision});
+    bootstrapProof({organization,lifecycle,release,intent,receipt:matching[0].document});
+    return Object.freeze({organization,lifecycle,release,intent,receipt:matching[0].document,revision});
   }
 
   async function commitGlobalImmutable({
@@ -354,12 +421,8 @@ export function createCoreControlStore({repository}) {
     canonicalJson(lifecycleEntry[1]); canonicalJson(releaseEntry[1]);
     const intent=validateCoreDocument(intentEntries[0][1],"operation-intent.v1");
     const receipt=validateCoreDocument(receiptEntries[0][1],"operation-receipt.v1");
-    if (intent.command!=="init" || intent.authority===null || intent.source.repository!==organization.control_repository || intentPath(intent)!==intentEntries[0][0] || receiptPath(receipt)!==receiptEntries[0][0]) throw new TypeError("bootstrap intent and receipt must use canonical bootstrap identities");
-    if (receipt.intent_id!==intent.intent_id || receipt.intent_sha256!==sha256Canonical(intent)) throw new TypeError("bootstrap receipt must bind the bootstrap intent");
-    const operations=new Map(intent.operations.map(operation => [operation.operation_id,operation]));
-    for (const observed of receipt.observed_revisions) {
-      if (!operations.has(observed.operation_id) || operations.get(observed.operation_id).repository!==observed.repository) throw new TypeError("bootstrap receipt observed revision is incompatible with bootstrap intent");
-    }
+    if (intentPath(intent)!==intentEntries[0][0] || receiptPath(receipt)!==receiptEntries[0][0]) throw new TypeError("bootstrap intent and receipt must use canonical bootstrap identities");
+    try { bootstrapProof({organization,lifecycle:lifecycleEntry[1],release:releaseEntry[1],intent,receipt}); } catch (error) { throw new TypeError("bootstrap proof is not exact",{cause:error}); }
     return commitFiles({expectedHead:null,message:"core: bootstrap control repository",files});
   }
 
@@ -367,8 +430,15 @@ export function createCoreControlStore({repository}) {
     if (files===null || typeof files!=="object" || Array.isArray(files) || types.isProxy(files)) {
       throw new TypeError("configuration files must be a non-proxy object map");
     }
+    const current=await loadRegistryState();
+    if (current.revision!==expectedHead) throw ledgerConflict(`control repository expected head conflict: expected ${String(expectedHead)}, found ${String(current.revision)}`);
     const normalized={};
     for (const [path,value] of Object.entries(files)) normalized[path]=validateConfiguration(path,value);
+    if (!Object.hasOwn(normalized,CONTROL_PATHS.organization)) throw new TypeError("configuration commit must include organization configuration");
+    const resulting=new Map(current.repositories.map(value => [value.repository,value]));
+    for (const [path,value] of Object.entries(normalized)) if (path!==CONTROL_PATHS.organization) resulting.set(value.repository,value);
+    const names=[...resulting.keys()].sort(rawCompare);
+    if (canonicalJson(normalized[CONTROL_PATHS.organization].repositories)!==canonicalJson(names)) throw new TypeError("organization repository registry must exactly equal the resulting repository configuration namespace");
     return commitFiles({expectedHead,message:"core: update control configuration",files:normalized});
   }
 
@@ -378,6 +448,8 @@ export function createCoreControlStore({repository}) {
     loadBootstrapState,
     loadRepository,
     listRepositories,
+    loadRegistryState,
+    findCompletedRepositoryRegistration,
     commitIntent,
     commitReceipt,
     commitBootstrap,
