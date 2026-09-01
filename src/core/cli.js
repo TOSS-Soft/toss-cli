@@ -1,6 +1,7 @@
 import {types as utilTypes} from "node:util";
 
 import {failureResult,renderCommandHuman,renderCommandJson} from "../output/command-result.js";
+import {CORE_PACKAGE_VERSION} from "./metadata.js";
 import {
   CORE_EXIT_CODES,
   CoreCommandUsageError,
@@ -16,6 +17,19 @@ class CoreCliError extends Error {
     this.exitCode=exitCode;
   }
 }
+
+export const CORE_HELP=`Usage: toss-core <command> [options]
+
+Commands:
+  init
+  repo add <OWNER/REPO> --from <FILE>
+  repo list
+
+Common options:
+  --json
+  --control <PATH>  Local control repository (default: .toss-core-control)
+  --apply --non-interactive
+  --dry-run`;
 
 function isPlainRecord(value) {
   return Boolean(value) && typeof value==="object" && !Array.isArray(value) &&
@@ -80,6 +94,13 @@ function wantsJson(argv) {
   return Array.isArray(argv) && argv.some(value => value==="--json");
 }
 
+function topLevelOutput(argv) {
+  if (!Array.isArray(argv) || argv.length!==1 || typeof argv[0]!=="string") return null;
+  if (argv[0]==="--help" || argv[0]==="-h") return CORE_HELP;
+  if (argv[0]==="--version" || argv[0]==="-v") return CORE_PACKAGE_VERSION;
+  return null;
+}
+
 export async function runCoreCli(argv,{cwd,stdin,stdout,stderr,runtimeProvider}={}) {
   let json=wantsJson(argv);
   let dispatched;
@@ -89,6 +110,11 @@ export async function runCoreCli(argv,{cwd,stdin,stdout,stderr,runtimeProvider}=
     }
     assertWriter(stdout,"core CLI stdout");
     assertWriter(stderr,"core CLI stderr");
+    const topLevel=topLevelOutput(argv);
+    if (topLevel!==null) {
+      stdout.write(topLevel+"\n");
+      return CORE_EXIT_CODES.SUCCESS;
+    }
     const command=parseCoreCommand(argv);
     json=command.options.json;
     const request=Object.freeze({cwd,stdin,command});

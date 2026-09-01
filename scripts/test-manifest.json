@@ -59,6 +59,7 @@
       "scripts/reference-integrity-test.js",
       "scripts/smoke-test.js",
       "test/cli-contract.test.js",
+      "test/core-cli-boundary.test.js",
       "test/design-cli-runtime.test.js",
       "test/gate-cli-round1.test.js",
       "test/performance-cli.test.js",

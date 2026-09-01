@@ -229,8 +229,9 @@ test("checked-in boundary inventory binds the exact current memory-backed entrie
     "test/gate-commands.test.js",
     "test/project-commands.test.js",
   ]);
-  assert.equal(inventory.guarantees.length,26);
+  assert.equal(inventory.guarantees.length,27);
   assert.deepEqual(inventory.guarantees.filter(row => row.id.startsWith("core.")).map(row => row.id),[
+    "core.cli-process-boundary",
     "core.control-atomic-commit",
     "core.control-immutable-receipt",
   ]);
