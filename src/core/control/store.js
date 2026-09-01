@@ -209,17 +209,17 @@ export function createCoreControlStore({repository}) {
     const path=pathFor(valid);
     const current=await head();
     if (current!==expectedHead) {
-      throw new Error(`control repository expected head conflict: expected ${String(expectedHead)}, found ${String(current)}`);
+      throw ledgerConflict(`control repository expected head conflict: expected ${String(expectedHead)}, found ${String(current)}`);
     }
     const matches=(await resolveGlobalIdentities({
-      revision:current,prefix,schemaId,label,idField,pathFor,
+      revision:current,prefix,schemaId,label,idField,pathFor,ledgerRead:true,
     })).filter(existing => existing.document[idField]===valid[idField]);
     if (matches.length===1) {
       const existing=matches[0];
       if (existing.path===path && equivalent(existing.document,valid)) {
         return Object.freeze({commit_sha:current});
       }
-      throw new Error(`${label} identity is immutable and already has different content or path`);
+      throw ledgerConflict(`${label} identity is immutable and already has different content or path`);
     }
     if (beforeWrite) await beforeWrite(valid,current);
     return commitFiles({expectedHead,message:`core: record ${label} ${path}`,files:{[path]:valid}});

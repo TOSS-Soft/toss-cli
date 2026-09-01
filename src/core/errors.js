@@ -33,3 +33,10 @@ export class CoreRemoteError extends CoreError {
     this.exitCode=70;
   }
 }
+
+export class CoreInternalError extends CoreError {
+  constructor(message,options={}) {
+    super(message,{code:"CORE_INTERNAL_FAILURE",...options});
+    this.exitCode=70;
+  }
+}

@@ -3,6 +3,7 @@ import {types} from "node:util";
 import {canonicalJson,sha256Canonical} from "../../contracts/acp.js";
 import {validateCoreDocument} from "../contracts.js";
 import {CoreValidationError} from "../errors.js";
+import {compareCanonicalText} from "../canonical-order.js";
 
 function fail(message) {
   throw new CoreValidationError(message);
@@ -55,11 +56,6 @@ function nullFirst(left,right) {
   return left<right ? -1 : 1;
 }
 
-function compareText(left,right) {
-  if (left===right) return 0;
-  return left<right ? -1 : 1;
-}
-
 function normalizeOperation(value) {
   exactKeys(value,["resource","action","repository","expected_revision","payload"],"operation");
   return Object.freeze({
@@ -76,11 +72,11 @@ function compareOperations(left,right) {
     const comparison=nullFirst(a,b);
     if (comparison!==0) return comparison;
   }
-  const payload=compareText(canonicalJson(left.payload),canonicalJson(right.payload));
+  const payload=compareCanonicalText(canonicalJson(left.payload),canonicalJson(right.payload));
   if (payload!==0) return payload;
   const revision=nullFirst(left.expected_revision,right.expected_revision);
   if (revision!==0) return revision;
-  return compareText(canonicalJson(left),canonicalJson(right));
+  return compareCanonicalText(canonicalJson(left),canonicalJson(right));
 }
 
 export function createOperationIntent(input) {

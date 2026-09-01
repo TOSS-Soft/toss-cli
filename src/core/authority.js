@@ -2,6 +2,7 @@ import {createPublicKey,verify as verifyDetached} from "node:crypto";
 import {types} from "node:util";
 
 import {canonicalJson,sha256Canonical} from "../contracts/acp.js";
+import {compareCanonicalText} from "./canonical-order.js";
 import {validateCoreDocument} from "./contracts.js";
 import {CoreBlockedError,CoreValidationError} from "./errors.js";
 
@@ -50,7 +51,7 @@ function sortedRevisions(values,label) {
     if (repositories.has(value.repository)) blocked(`${label} must not repeat a repository`);
     repositories.add(value.repository);
     const encoded=canonicalJson(value);
-    if (previous!==undefined && previous>=encoded) blocked(`${label} must be sorted, unique, and unambiguous`);
+    if (previous!==undefined && compareCanonicalText(previous,encoded)>=0) blocked(`${label} must be sorted, unique, and unambiguous`);
     previous=encoded;
   }
 }

@@ -1,10 +1,11 @@
 import {types} from "node:util";
 
 import {canonicalJson,sha256Canonical} from "../../contracts/acp.js";
+import {compareCanonicalText,compareCanonicalValue} from "../canonical-order.js";
 import {validateCoreDocument} from "../contracts.js";
 import {authorityReference,verifyAuthority} from "../authority.js";
 import {validateParsedCoreCommand} from "../commands/router.js";
-import {CoreBlockedError,CoreConflictError,CoreRemoteError,CoreValidationError} from "../errors.js";
+import {CoreBlockedError,CoreConflictError,CoreInternalError,CoreRemoteError,CoreValidationError} from "../errors.js";
 import {createOperationIntent,operationPreview} from "./plan.js";
 
 function ownFunction(value,key,label) {
@@ -59,10 +60,10 @@ function expectedAuthorityBinding(intent,now,implementationActor) {
     if (revisions.has(operation.repository) && revisions.get(operation.repository)!==operation.expected_revision) throw new CoreBlockedError("Authority cannot bind conflicting expected revisions for one repository");
     revisions.set(operation.repository,operation.expected_revision);
   }
-  const expected_revisions=[...revisions].map(([repository,revision]) => Object.freeze({repository,revision})).sort((a,b) => canonicalJson(a).localeCompare(canonicalJson(b)));
+  const expected_revisions=[...revisions].map(([repository,revision]) => Object.freeze({repository,revision})).sort(compareCanonicalValue);
   return Object.freeze({
     command:intent.command,
-    targets:[...revisions.keys()].sort(),
+    targets:[...revisions.keys()].sort(compareCanonicalText),
     expected_revisions:Object.freeze(expected_revisions),
     policy_revision:intent.policy_revision,
     now,
@@ -116,7 +117,7 @@ function exactReceipt(value,intent) {
 
 function ledgerConflict(error,operation) {
   if (error instanceof CoreConflictError) return error;
-  if (error?.code==="CONTROL_LEDGER_CONFLICT") {
+  if (["CONTROL_LEDGER_CONFLICT","CORE_CONTROL_CONFLICT"].includes(error?.code)) {
     return new CoreConflictError(`Control ledger ${operation} conflict`,{cause:error});
   }
   return null;
@@ -131,6 +132,7 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
   ownFunction(github,"snapshot","github");
   const inspect=ownFunction(github,"inspect","github");
   const applyRemote=ownFunction(github,"apply","github");
+  const persistedFailureErrors=new WeakSet();
   if (typeof clock!=="function" || types.isProxy(clock) || typeof idGenerator!=="function" || types.isProxy(idGenerator) || typeof policyRevision!=="function" || types.isProxy(policyRevision) || typeof implementationActor!=="string" || !/\S/u.test(implementationActor)) throw new CoreValidationError("Operation runner providers must be explicit non-proxy functions");
 
   async function preview(intent) { return operationPreview(intent); }
@@ -180,8 +182,10 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
     try {
       if (prior===null) revision=(await commitIntent({expectedHead:revision,intent:valid})).commit_sha;
     } catch (error) {
-      if (error instanceof CoreValidationError || error instanceof CoreBlockedError || error instanceof CoreConflictError) throw error;
-      throw new CoreConflictError("Control ledger changed while recording intent",{cause:error});
+      const conflict=ledgerConflict(error,"intent commit");
+      if (conflict) throw conflict;
+      if (error instanceof CoreValidationError || error instanceof CoreBlockedError) throw error;
+      throw new CoreInternalError("Control ledger intent commit failed",{cause:error});
     }
     let inspected=[];
     try {
@@ -197,11 +201,16 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
       const result=remoteResult(await applyRemote(valid.operations,{idempotencyKey:sha256Canonical(valid)}),valid);
       const receipt=receiptFor(valid,{receipt_id:idGenerator("receipt"),created_at:clock(),status:result.status,observed_revisions:result.observed_revisions});
       await commitReceipt({expectedHead:revision,receipt});
-      if (result.status==="failed") throw new CoreRemoteError("GitHub apply reported an incomplete or failed outcome");
+      if (result.status==="failed") {
+        const error=new CoreRemoteError("GitHub apply reported an incomplete or failed outcome");
+        persistedFailureErrors.add(error);
+        throw error;
+      }
       return receipt;
     } catch (error) {
-      if (error instanceof CoreRemoteError) throw error;
+      if (error && typeof error==="object" && persistedFailureErrors.has(error)) throw error;
       try { await persistFailed(valid,revision,inspected); } catch (persistenceError) { throw new CoreRemoteError("GitHub apply failed and failed receipt could not be persisted",{cause:persistenceError}); }
+      if (error instanceof CoreRemoteError) throw error;
       if (error instanceof CoreValidationError || error instanceof CoreConflictError) throw error;
       throw new CoreRemoteError("GitHub apply failed",{cause:error});
     }

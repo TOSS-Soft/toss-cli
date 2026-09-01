@@ -3,9 +3,9 @@ import {generateKeyPairSync,sign} from "node:crypto";
 import test from "node:test";
 
 import {canonicalJson,sha256Canonical} from "../src/contracts/acp.js";
-import {verifyAuthority} from "../src/core/authority.js";
+import {authorityReference,verifyAuthority} from "../src/core/authority.js";
 import {parseCoreCommand} from "../src/core/commands/router.js";
-import {CoreBlockedError,CoreConflictError} from "../src/core/errors.js";
+import {CoreBlockedError,CoreConflictError,CoreRemoteError} from "../src/core/errors.js";
 import {createOperationIntent,operationPreview} from "../src/core/operations/plan.js";
 import {createOperationRunner} from "../src/core/operations/runner.js";
 
@@ -154,6 +154,32 @@ test("a tagged divergent intent ledger lookup is a conflict before GitHub apply"
   assert.deepEqual(events,[]);
 });
 
+test("a generic intent commit failure is internal and cannot reach GitHub",async () => {
+  const events=[];
+  const control=memoryControl(events);
+  const runner=createOperationRunner({
+    control:{...control,async commitIntent() { throw new Error("disk I/O unavailable"); }},
+    github:{async snapshot() { return {}; },async inspect() { events.push("inspect"); return []; },async apply() { events.push("apply"); return {status:"completed",observed_revisions:[]}; }},
+    authorityRegistry:null,clock:() => "2026-09-01T08:01:00.000Z",idGenerator:() => "RECEIPT-20260901-0001",policyRevision:() => "POLICY-0001",
+  });
+  await assert.rejects(runner.apply(createOperationIntent(operationInput()),{authority:null}),error => error.code==="CORE_INTERNAL_FAILURE" && error.exitCode===70);
+  assert.deepEqual(events,[]);
+});
+
+test("a tagged intent CAS conflict exits six before GitHub apply",async () => {
+  const events=[];
+  const control=memoryControl(events);
+  const conflict=new Error("expected head changed");
+  conflict.code="CORE_CONTROL_CONFLICT";
+  const runner=createOperationRunner({
+    control:{...control,async commitIntent() { throw conflict; }},
+    github:{async snapshot() { return {}; },async inspect() { events.push("inspect"); return []; },async apply() { events.push("apply"); return {status:"completed",observed_revisions:[]}; }},
+    authorityRegistry:null,clock:() => "2026-09-01T08:01:00.000Z",idGenerator:() => "RECEIPT-20260901-0001",policyRevision:() => "POLICY-0001",
+  });
+  await assert.rejects(runner.apply(createOperationIntent(operationInput()),{authority:null}),error => error.code==="CORE_CONFLICT" && error.exitCode===6);
+  assert.deepEqual(events,[]);
+});
+
 test("a corrupt stored receipt is a ledger conflict before GitHub apply",async () => {
   const events=[];
   const control=memoryControl(events);
@@ -176,6 +202,19 @@ test("a remote transport failure records a failed receipt before surfacing inter
       async apply() { events.push("apply"); throw new Error("network unavailable"); },
     }, authorityRegistry:null, clock:() => "2026-09-01T08:01:00.000Z",
     idGenerator:() => "RECEIPT-20260901-0001", policyRevision:() => "POLICY-0001",
+  });
+  await assert.rejects(runner.apply(createOperationIntent(operationInput()),{authority:null}),error => error.code==="CORE_REMOTE_FAILURE" && error.exitCode===70);
+  assert.deepEqual(events,["intent","inspect","apply","receipt"]);
+});
+
+test("a port-thrown remote error persists one failed receipt before exiting",async () => {
+  const events=[];
+  const runner=createOperationRunner({
+    control:memoryControl(events), github:{
+      async snapshot() { return {}; },
+      async inspect() { events.push("inspect"); return [{operation_id:"OP-0001",repository:"TOSS-Soft/toss-cli",revision:"rev-1"}]; },
+      async apply() { events.push("apply"); throw new CoreRemoteError("adapter outage"); },
+    }, authorityRegistry:null,clock:() => "2026-09-01T08:01:00.000Z",idGenerator:() => "RECEIPT-20260901-0001",policyRevision:() => "POLICY-0001",
   });
   await assert.rejects(runner.apply(createOperationIntent(operationInput()),{authority:null}),error => error.code==="CORE_REMOTE_FAILURE" && error.exitCode===70);
   assert.deepEqual(events,["intent","inspect","apply","receipt"]);
@@ -346,4 +385,32 @@ test("authority expected revisions reject repeated repositories and reordered bi
   assert.throws(() => verifyAuthority(makeRecord(duplicateSame),{...binding,targets:["TOSS-Soft/toss-cli"],expected_revisions:duplicateSame},registry),CoreBlockedError);
   assert.throws(() => verifyAuthority(makeRecord(duplicateDifferent),{...binding,targets:["TOSS-Soft/toss-cli"],expected_revisions:duplicateDifferent},registry),CoreBlockedError);
   assert.throws(() => verifyAuthority(makeRecord([...unique].reverse()),binding,registry),CoreBlockedError);
+});
+
+test("runner authority binding uses raw canonical ordering for punctuation-bearing repositories",async () => {
+  const {privateKey,publicKey}=generateKeyPairSync("ed25519");
+  const expected_revisions=[
+    {repository:"TOSS-Soft/a--",revision:"one"},
+    {repository:"TOSS-Soft/a__",revision:"two"},
+  ];
+  const unsigned={
+    schema_version:"authority-record.v1",document_type:"authority-record",record_id:"AUTH-20260901-0001",
+    actor:"independent-approver",command:"repo.add",targets:["TOSS-Soft/a--","TOSS-Soft/a__"],expected_revisions,
+    policy_revision:"POLICY-0001",issued_at:"2026-09-01T07:00:00.000Z",expires_at:"2026-09-01T09:00:00.000Z",
+  };
+  const authority={...unsigned,signature:{algorithm:"ed25519",key_id:"approver",value:sign(null,Buffer.from(canonicalJson(unsigned)),privateKey).toString("base64")}};
+  const intent=createOperationIntent({
+    ...operationInput(),authority:authorityReference(authority),operations:[
+      {resource:"repository",action:"register",repository:"TOSS-Soft/a__",expected_revision:"two",payload:{default_branch:"main"}},
+      {resource:"repository",action:"register",repository:"TOSS-Soft/a--",expected_revision:"one",payload:{default_branch:"main"}},
+    ],
+  });
+  const runner=createOperationRunner({
+    control:memoryControl(),github:{
+      async snapshot() { return {}; },
+      async inspect() { return intent.operations.map(operation => ({operation_id:operation.operation_id,repository:operation.repository,revision:operation.expected_revision})); },
+      async apply() { return {status:"completed",observed_revisions:intent.operations.map(operation => ({operation_id:operation.operation_id,repository:operation.repository,revision:"next"}))}; },
+    },authorityRegistry:{keys:[{key_id:"approver",actor:"independent-approver",public_key:publicKey.export({format:"pem",type:"spki"}).toString()}]},clock:() => "2026-09-01T08:00:00.000Z",idGenerator:() => "RECEIPT-20260901-0001",policyRevision:() => "POLICY-0001",
+  });
+  assert.equal((await runner.apply(intent,{authority})).status,"completed");
 });

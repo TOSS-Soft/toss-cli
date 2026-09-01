@@ -707,3 +707,15 @@ test("intent lookup tags divergent immutable content as a stable conflict",async
     ...planned.operations[0],payload:{default_branch:"trunk"},
   }]}),error => error?.code==="CONTROL_LEDGER_CONFLICT");
 });
+
+test("intent commit tags stale head and immutable identity conflicts",async t => {
+  const root=await createRepository(t);
+  const store=createCoreControlStore({repository:control(root)});
+  const planned=intent();
+  const saved=await store.commitIntent({expectedHead:null,intent:planned});
+
+  await assert.rejects(store.commitIntent({expectedHead:null,intent:planned}),error => error?.code==="CONTROL_LEDGER_CONFLICT");
+  await assert.rejects(store.commitIntent({expectedHead:saved.commit_sha,intent:{
+    ...planned,operations:[{...planned.operations[0],payload:{default_branch:"trunk"}}],
+  }}),error => error?.code==="CONTROL_LEDGER_CONFLICT");
+});
