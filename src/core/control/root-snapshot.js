@@ -35,17 +35,31 @@ export function closeDocumentPaths(value,label) {
   }
   const descriptors=Object.getOwnPropertyDescriptors(value);
   const keys=Reflect.ownKeys(descriptors);
-  const expected=[...Array(value.length).keys()].map(String).concat("length");
-  if (keys.some(key => typeof key!=="string") || keys.length!==expected.length ||
-      expected.some(key => !Object.hasOwn(descriptors,key))) {
+  const lengthDescriptor=descriptors.length;
+  if (!lengthDescriptor || !("value" in lengthDescriptor) || lengthDescriptor.enumerable) {
+    throw new TypeError(`${label} must be dense and contain no extra properties`);
+  }
+  const length=lengthDescriptor.value;
+  let indexCount=0;
+  for (const key of keys) {
+    if (key==="length") continue;
+    if (typeof key!=="string") {
+      throw new TypeError(`${label} must be dense and contain no extra properties`);
+    }
+    const index=Number(key);
+    const descriptor=descriptors[key];
+    if (!Number.isSafeInteger(index) || index<0 || index>=length ||
+        String(index)!==key || !("value" in descriptor) || !descriptor.enumerable) {
+      throw new TypeError(`${label} must be dense and contain no extra properties`);
+    }
+    indexCount+=1;
+  }
+  if (indexCount!==length) {
     throw new TypeError(`${label} must be dense and contain no extra properties`);
   }
   const paths=[];
-  for (let index=0;index<value.length;index+=1) {
+  for (let index=0;index<length;index+=1) {
     const descriptor=descriptors[String(index)];
-    if (!("value" in descriptor) || !descriptor.enumerable) {
-      throw new TypeError(`${label} must contain only enumerable data entries`);
-    }
     paths.push(assertSafeSnapshotPath(descriptor.value));
   }
   for (let index=1;index<paths.length;index+=1) {

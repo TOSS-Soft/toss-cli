@@ -200,6 +200,22 @@ test("root snapshots close own data without invoking hostile values",() => {
   );
 });
 
+test("document path closure rejects huge sparse arrays within a bounded child process",async () => {
+  const script=`import {closeDocumentPaths} from "./src/core/control/root-snapshot.js";
+try {
+  closeDocumentPaths(Array(0xffffffff),"huge sparse paths");
+  throw new Error("huge sparse paths were accepted");
+} catch (error) {
+  if (!(error instanceof TypeError)) throw error;
+  process.stdout.write(error.message);
+}`;
+  const result=await execFile(process.execPath,[
+    "--max-old-space-size=32","--input-type=module","--eval",script,
+  ],{cwd:process.cwd(),timeout:2000,maxBuffer:1024});
+  assert.equal(result.stdout,"huge sparse paths must be dense and contain no extra properties");
+  assert.equal(result.stderr,"");
+});
+
 test("control material classification is exact",() => {
   assert.equal(hasControlMaterial(["README.md"]),false);
   assert.equal(hasControlMaterial(["config/organization.yaml"]),true);
