@@ -12,6 +12,10 @@
 
 **Plan sequence:** 2 of 5. Requires the completion gate in `2026-09-01-toss-core-foundation.md`; continue with `2026-09-01-toss-core-release-program.md`.
 
+## Execution Notes
+
+Foundation was accepted on 2026-09-01 at `6e9b370930b9fa6ea5b2b7a2292ea30c823ff357`. Work Lifecycle must build from this exact candidate or a descendant that contains it. The package version remains `2.1.1`; `feature add` never selects a release or version.
+
 **Global Constraints:**
 
 - `feature add` creates exactly one unversioned Epic in the TOSS OS Project; it does not select a release or version.
