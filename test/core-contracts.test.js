@@ -142,3 +142,34 @@ test("core operation intent is closed and operation IDs are unique",async () => 
       error.code==="CORE_CONTRACT_INVALID" && /duplicate operation_id/i.test(error.message),
   );
 });
+
+test("core operation intents require operation IDs in strict ascending ASCII order",async () => {
+  const unordered=clone(INTENT);
+  unordered.operations=[
+    {...unordered.operations[0],operation_id:"OP-0002"},
+    {...unordered.operations[0],operation_id:"OP-0001",action:"update"},
+  ];
+  assert.equal(validateDocument(unordered,"operation-intent.v1").valid,true);
+
+  const {CoreValidationError,validateCoreDocument}=await import("../src/core/contracts.js");
+  assert.throws(
+    () => validateCoreDocument(unordered,"operation-intent.v1"),
+    error => error instanceof CoreValidationError &&
+      error.code==="CORE_CONTRACT_INVALID" && /strict ascending ASCII order/i.test(error.message),
+  );
+});
+
+test("core validation rejects transparent root and nested proxies",async () => {
+  const {CoreValidationError,validateCoreDocument}=await import("../src/core/contracts.js");
+  const inputs=[
+    new Proxy(clone(INTENT),{}),
+    {...clone(INTENT),source:new Proxy(clone(SOURCE),{})},
+  ];
+  for (const input of inputs) {
+    assert.throws(
+      () => validateCoreDocument(input,"operation-intent.v1"),
+      error => error instanceof CoreValidationError &&
+        error.code==="CORE_CONTRACT_INVALID" && /proxy/i.test(error.message),
+    );
+  }
+});
