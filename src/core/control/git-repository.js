@@ -346,6 +346,24 @@ export function createGitControlRepository(options) {
     return document;
   }
 
+  async function documentBlobAt(relativePath,{at="HEAD"}={}) {
+    assertSafeRelativePath(relativePath);
+    if (at!=="HEAD" && (typeof at!=="string" || !SHA.test(at))) {
+      throw new TypeError("blob revision must be HEAD or an exact 40-character commit SHA");
+    }
+    await secureTarget(relativePath);
+    const revision=at==="HEAD" ? await head() : at;
+    if (revision===null) return null;
+    const output=String((await runGit(["ls-tree","-z",revision,"--",relativePath]))?.stdout ?? "");
+    if (output && !output.endsWith("\0")) throw new Error("Git returned malformed blob identity output");
+    if (!output) return null;
+    const records=output.slice(0,-1).split("\0");
+    if (records.length!==1) throw new Error("Git returned an ambiguous blob identity");
+    const match=/^100644 blob ([a-f0-9]{40})\t(.+)$/u.exec(records[0]);
+    if (!match || match[2]!==relativePath) throw new Error("Git returned an unexpected blob identity");
+    return match[1];
+  }
+
   async function listDocuments(prefix,{at="HEAD"}={}) {
     assertSafeRelativePrefix(prefix);
     if (at!=="HEAD" && (typeof at!=="string" || !SHA.test(at))) {
@@ -532,5 +550,5 @@ export function createGitControlRepository(options) {
     }
   }
 
-  return Object.freeze({head,readDocument,listDocuments,rootSnapshotAt,commitFiles});
+  return Object.freeze({head,readDocument,documentBlobAt,listDocuments,rootSnapshotAt,commitFiles});
 }

@@ -172,6 +172,37 @@ async function createBootstrappedStore(t) {
   return {root,repositoryControl,store,bootstrap,head:committed.commit_sha};
 }
 
+async function createPopulatedBootstrappedStore(t) {
+  const bootstrapped=await createBootstrappedStore(t);
+  const planned=intent();
+  const recorded=receiptForIntent(planned,{observed_revisions:[{
+    operation_id:planned.operations[0].operation_id,
+    repository:planned.operations[0].repository,
+    revision:"observed-r1",
+  }]});
+  const configuration=repositoryConfig();
+  const program={program_id:"PROGRAM-A",metadata:{owners:["team-a"]}};
+  const committed=await bootstrapped.repositoryControl.commitFiles({
+    expectedHead:bootstrapped.head,
+    message:"populated immutable state",
+    files:{
+      "config/organization.yaml":{...bootstrapped.bootstrap.organization,repositories:[configuration.repository]},
+      [repositoryPath(configuration.repository)]:configuration,
+      "programs/PROGRAM-A/manifest.yaml":program,
+      [intentPath(planned)]:planned,
+      [receiptPath(recorded)]:recorded,
+    },
+  });
+  return {...bootstrapped,planned,recorded,configuration,program,head:committed.commit_sha};
+}
+
+function assertDeeplyFrozen(value,seen=new Set()) {
+  if (value===null || typeof value!=="object" || seen.has(value)) return;
+  seen.add(value);
+  assert.equal(Object.isFrozen(value),true);
+  for (const child of Object.values(value)) assertDeeplyFrozen(child,seen);
+}
+
 async function assertAllPublicReadersConflict(store,{identity="TOSS-Soft/toss-cli",targetIntent}) {
   for (const read of [
     () => store.loadBootstrapState(),
@@ -754,6 +785,146 @@ test("all public readers reject changed immutable root records",async t => {
   }
 });
 
+test("all public readers reject byte-different immutable root records",async t => {
+  for (const [name,pathFor,documentFor] of [
+    ["intent",intentPath,bootstrap => bootstrap.intent],
+    ["receipt",receiptPath,bootstrap => bootstrap.receipt],
+  ]) {
+    await t.test(name,async t => {
+      const {root,repositoryControl,store,bootstrap,head:rootRevision}=await createBootstrappedStore(t);
+      const document=documentFor(bootstrap);
+      const path=pathFor(document);
+      const rootBytes=(await git(root,["show",`${rootRevision}:${path}`])).stdout;
+      const reformatted=`${JSON.stringify(document,null,2)}\n`;
+      assert.notEqual(reformatted,rootBytes);
+      assert.deepEqual(JSON.parse(reformatted),JSON.parse(rootBytes));
+
+      await writeFile(join(root,path),reformatted,"utf8");
+      await git(root,["add","--",path]);
+      await git(root,["commit","-m",`reformat root ${name}`]);
+      const currentRevision=await repositoryControl.head();
+      const currentBytes=(await git(root,["show",`${currentRevision}:${path}`])).stdout;
+      const rootBlob=(await git(root,["rev-parse",`${rootRevision}:${path}`])).stdout.trim();
+      const currentBlob=(await git(root,["rev-parse",`${currentRevision}:${path}`])).stdout.trim();
+
+      assert.equal(currentBytes,reformatted);
+      assert.deepEqual(JSON.parse(currentBytes),JSON.parse(rootBytes));
+      assert.notEqual(currentBlob,rootBlob);
+      await assertAllPublicReadersConflict(store,{targetIntent:bootstrap.intent});
+    });
+  }
+});
+
+test("blob identity provider failures remain typed control-ledger conflicts",async t => {
+  for (const documentBlobAt of [
+    async () => "not-a-git-blob",
+    async () => { throw new Error("blob provider failed"); },
+  ]) {
+    const {repositoryControl,head}=await createBootstrappedStore(t);
+    const repository={
+      head:repositoryControl.head,
+      readDocument:repositoryControl.readDocument,
+      listDocuments:repositoryControl.listDocuments,
+      rootSnapshotAt:repositoryControl.rootSnapshotAt,
+      documentBlobAt,
+      commitFiles:repositoryControl.commitFiles,
+    };
+    const store=createCoreControlStore({repository});
+
+    await assert.rejects(store.loadBootstrapState(),error =>
+      error?.code==="CONTROL_LEDGER_CONFLICT");
+    assert.match(head,/^[a-f0-9]{40}$/u);
+  }
+});
+
+test("validated readers preserve repository fakes without a blob identity port",async t => {
+  const {repositoryControl,bootstrap,head}=await createBootstrappedStore(t);
+  const repository={
+    head:async () => head,
+    readDocument:repositoryControl.readDocument,
+    listDocuments:repositoryControl.listDocuments,
+    rootSnapshotAt:repositoryControl.rootSnapshotAt,
+    commitFiles:repositoryControl.commitFiles,
+  };
+  const store=createCoreControlStore({repository});
+
+  assert.equal((await store.loadBootstrapState()).intent.intent_id,bootstrap.intent.intent_id);
+  assert.equal((await store.findReceipt(bootstrap.intent)).receipt_id,bootstrap.receipt.receipt_id);
+});
+
+test("intent and receipt readers return deeply frozen safe documents",async t => {
+  const {store,planned,recorded}=await createPopulatedBootstrappedStore(t);
+
+  const foundIntent=await store.findIntent(planned);
+  const foundReceipt=await store.findReceipt(planned);
+
+  assertDeeplyFrozen(foundIntent);
+  assertDeeplyFrozen(foundReceipt);
+  assert.throws(() => { foundIntent.source.revision="changed"; },TypeError);
+  assert.throws(() => { foundIntent.operations.push(foundIntent.operations[0]); },TypeError);
+  assert.throws(() => { foundReceipt.status="failed"; },TypeError);
+  assert.throws(() => { foundReceipt.observed_revisions[0].revision="changed"; },TypeError);
+  assert.deepEqual(foundIntent,planned);
+  assert.deepEqual(foundReceipt,recorded);
+});
+
+test("organization and registry readers deeply freeze every returned document",async t => {
+  const {store,bootstrap,planned,configuration}=await createPopulatedBootstrappedStore(t);
+
+  const state=await store.loadOrganizationState();
+  const organizationDocument=await store.loadOrganization();
+  const registry=await store.loadRegistryState();
+  const repository=await store.loadRepository(configuration.repository);
+  const repositories=await store.listRepositories();
+  const bootstrapState=await store.loadBootstrapState();
+
+  for (const value of [state,organizationDocument,registry,repository,repositories,bootstrapState]) {
+    assertDeeplyFrozen(value);
+  }
+  assert.throws(() => { state.receipts.pop(); },TypeError);
+  const ordinaryReceipt=state.receipts.find(value => value.intent_id===planned.intent_id);
+  assert.throws(() => { ordinaryReceipt.observed_revisions[0].revision="changed"; },TypeError);
+  assert.throws(() => { state.programs[0].metadata.owners.push("team-b"); },TypeError);
+  assert.throws(() => { state.organization.project.number=3; },TypeError);
+  assert.throws(() => { organizationDocument.repositories.push("TOSS-Soft/other"); },TypeError);
+  assert.throws(() => { registry.repositories[0].project_fields.status="changed"; },TypeError);
+  assert.throws(() => { repository.project_fields.gate="changed"; },TypeError);
+  assert.throws(() => { repositories.pop(); },TypeError);
+  assert.throws(() => { bootstrapState.intent.operations.pop(); },TypeError);
+  assert.equal(bootstrapState.intent.intent_id,bootstrap.intent.intent_id);
+});
+
+test("validated readers copy shared fake-repository documents before freezing",async t => {
+  const {repositoryControl,bootstrap,head}=await createBootstrappedStore(t);
+  const shared=new Map(Object.entries(bootstrap.files).map(([path,document]) => [
+    path,JSON.parse(JSON.stringify(document)),
+  ]));
+  const sharedIntent=shared.get(intentPath(bootstrap.intent));
+  const sharedReceipt=shared.get(receiptPath(bootstrap.receipt));
+  const repository={
+    head:async () => head,
+    readDocument:async (path,{at}) => shared.has(path)
+      ? shared.get(path)
+      : repositoryControl.readDocument(path,{at}),
+    listDocuments:repositoryControl.listDocuments,
+    rootSnapshotAt:repositoryControl.rootSnapshotAt,
+    commitFiles:repositoryControl.commitFiles,
+  };
+  const store=createCoreControlStore({repository});
+
+  const foundIntent=await store.findIntent(bootstrap.intent);
+  const foundReceipt=await store.findReceipt(bootstrap.intent);
+
+  assert.notStrictEqual(foundIntent,sharedIntent);
+  assert.notStrictEqual(foundIntent.operations,sharedIntent.operations);
+  assert.notStrictEqual(foundReceipt,sharedReceipt);
+  assertDeeplyFrozen(foundIntent);
+  assertDeeplyFrozen(foundReceipt);
+  assert.equal(Object.isFrozen(sharedIntent),false);
+  assert.equal(Object.isFrozen(sharedIntent.operations),false);
+  assert.equal(Object.isFrozen(sharedReceipt),false);
+});
+
 test("failed pre-commit hook restores control files and preserves unrelated index and worktree changes",async t => {
   const root=await createRepository(t);
   const repositoryControl=control(root);
@@ -1075,7 +1246,7 @@ test("validated readers preserve a root bootstrap across ordinary ledger and con
   assert.equal((await store.listRepositories()).length,1);
 });
 
-test("receipt lookup rejects a persisted incomplete completed receipt but permits failed partial evidence",async t => {
+test("receipt lookup rejects persisted receipt corruption in a partial control history",async t => {
   const root=await createRepository(t);
   const repositoryControl=control(root); const store=createCoreControlStore({repository:repositoryControl});
   const planned=intent(); const saved=await store.commitIntent({expectedHead:null,intent:planned});

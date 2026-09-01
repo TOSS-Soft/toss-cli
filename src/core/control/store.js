@@ -59,6 +59,15 @@ function ownDataFunction(value,key) {
   return descriptor.value;
 }
 
+function optionalOwnDataFunction(value,key) {
+  const descriptor=Object.getOwnPropertyDescriptor(value,key);
+  if (!descriptor) return null;
+  if (!("value" in descriptor) || typeof descriptor.value!=="function" || types.isProxy(descriptor.value)) {
+    throw new TypeError(`repository.${key} must be an own-data non-proxy function when provided`);
+  }
+  return descriptor.value;
+}
+
 function equivalent(left,right) {
   return canonicalJson(left)===canonicalJson(right);
 }
@@ -173,12 +182,22 @@ function validatePersistedReceiptRecords(receipts,intents,{bootstrapReceipt=null
 export function createCoreControlStore({repository}) {
   const head=ownDataFunction(repository,"head");
   const readDocument=ownDataFunction(repository,"readDocument");
+  const documentBlobAt=optionalOwnDataFunction(repository,"documentBlobAt");
   const listDocuments=ownDataFunction(repository,"listDocuments");
   const rootSnapshotAt=ownDataFunction(repository,"rootSnapshotAt");
   const commitFiles=ownDataFunction(repository,"commitFiles");
 
   async function readAt(path,revision) {
     return readDocument(path,{at:revision});
+  }
+
+  async function immutableDocumentIdentityAt(path,revision,document) {
+    if (documentBlobAt===null) return `canonical:${canonicalJson(document)}`;
+    const identity=await documentBlobAt(path,{at:revision});
+    if (typeof identity!=="string" || !/^[a-f0-9]{40}$/u.test(identity)) {
+      throw new TypeError(`repository.documentBlobAt returned an invalid blob identity: ${path}`);
+    }
+    return `git-blob:${identity}`;
   }
 
   async function listedDocuments(prefix,revision) {
@@ -217,7 +236,7 @@ export function createCoreControlStore({repository}) {
     const expected=[CONTROL_PATHS.organization,`${CONTROL_PATHS.policies}/lifecycle.yaml`,`${CONTROL_PATHS.policies}/release.yaml`,intentPath(intent),receiptPath(receipt)].sort(rawCompare);
     if (!equivalent(snapshot.paths,expected)) throw ledgerConflict("bootstrap root tree is not exact");
     bootstrapProof({organization,lifecycle,release,intent,receipt});
-    return Object.freeze({
+    const bootstrap=Object.freeze({
       root,
       organization:frozenCanonicalCopy(organization),
       lifecycle:frozenCanonicalCopy(lifecycle),
@@ -225,6 +244,11 @@ export function createCoreControlStore({repository}) {
       intent:frozenCanonicalCopy(intent),
       receipt:frozenCanonicalCopy(receipt),
     });
+    const [intentIdentity,receiptIdentity]=await Promise.all([
+      immutableDocumentIdentityAt(intentPath(intent),root,intent),
+      immutableDocumentIdentityAt(receiptPath(receipt),root,receipt),
+    ]);
+    return Object.freeze({bootstrap,intentIdentity,receiptIdentity});
   }
 
   async function loadValidatedLedgerAt(revision) {
@@ -246,19 +270,35 @@ export function createCoreControlStore({repository}) {
     } catch (error) {
       throw error?.code==="CONTROL_LEDGER_CONFLICT" ? error : ledgerConflict("current control ledger is corrupt",{cause:error});
     }
-    let bootstrap;
-    try { bootstrap=await rootBootstrapProofFrom(snapshot); }
+    let rootProof;
+    try { rootProof=await rootBootstrapProofFrom(snapshot); }
     catch (error) { throw error?.code==="CONTROL_LEDGER_CONFLICT" ? error : ledgerConflict("bootstrap root proof is corrupt",{cause:error}); }
+    const bootstrap=rootProof?.bootstrap ?? null;
     if (bootstrap===null && hasControlMaterial(currentPaths)) {
       throw ledgerConflict("control material exists without an exact root bootstrap");
     }
     if (bootstrap!==null) {
       const persistedIntent=intentRecords.filter(record => record.document.intent_id===bootstrap.intent.intent_id);
       const persistedReceipt=receiptRecords.filter(record => record.document.receipt_id===bootstrap.receipt.receipt_id);
-      if (persistedIntent.length!==1 || persistedReceipt.length!==1 ||
-          !equivalent(persistedIntent[0].document,bootstrap.intent) ||
-          !equivalent(persistedReceipt[0].document,bootstrap.receipt)) {
-        throw ledgerConflict("immutable bootstrap records differ from the root transaction");
+      try {
+        const [intentIdentity,receiptIdentity]=await Promise.all([
+          persistedIntent.length===1
+            ? immutableDocumentIdentityAt(persistedIntent[0].path,revision,persistedIntent[0].document)
+            : null,
+          persistedReceipt.length===1
+            ? immutableDocumentIdentityAt(persistedReceipt[0].path,revision,persistedReceipt[0].document)
+            : null,
+        ]);
+        if (persistedIntent.length!==1 || persistedReceipt.length!==1 ||
+            !equivalent(persistedIntent[0].document,bootstrap.intent) ||
+            !equivalent(persistedReceipt[0].document,bootstrap.receipt) ||
+            intentIdentity!==rootProof.intentIdentity || receiptIdentity!==rootProof.receiptIdentity) {
+          throw ledgerConflict("immutable bootstrap records differ from the root transaction");
+        }
+      } catch (error) {
+        throw error?.code==="CONTROL_LEDGER_CONFLICT"
+          ? error
+          : ledgerConflict("immutable bootstrap record identity is malformed",{cause:error});
       }
     }
     validatePersistedReceiptRecords(receiptRecords,intentRecords,{bootstrapReceipt:bootstrap?.receipt});
@@ -294,7 +334,7 @@ export function createCoreControlStore({repository}) {
       if (existing) {
         throw ledgerRead ? ledgerConflict(`${label} identity is globally duplicated: ${valid[idField]}`) : new Error(`${label} identity is globally duplicated: ${valid[idField]}`);
       }
-      const record=Object.freeze({path,document:valid});
+      const record=Object.freeze({path,document:frozenCanonicalCopy(valid)});
       identities.set(valid[idField],record);
       records.push(record);
     }
@@ -305,7 +345,7 @@ export function createCoreControlStore({repository}) {
     if (validated.classification==="absent") return null;
     const document=await readAt(CONTROL_PATHS.organization,validated.revision);
     if (document===null) return null;
-    try { return validateCoreDocument(document,"organization-config.v1"); }
+    try { return frozenCanonicalCopy(validateCoreDocument(document,"organization-config.v1")); }
     catch (error) { throw ledgerConflict("organization configuration is corrupt",{cause:error}); }
   }
 
@@ -319,7 +359,7 @@ export function createCoreControlStore({repository}) {
     if (configuration.repository!==identity) {
       throw ledgerConflict(`repository configuration identity does not match its path: ${identity}`);
     }
-    return configuration;
+    return frozenCanonicalCopy(configuration);
   }
 
   async function loadRegistryStateAt(validated) {
@@ -348,7 +388,11 @@ export function createCoreControlStore({repository}) {
     }
     const names=repositories.map(value => value.repository).sort(rawCompare);
     if (canonicalJson(organization.repositories)!==canonicalJson(names)) throw ledgerConflict("organization repository registry does not exactly match repository configuration namespace");
-    return Object.freeze({revision,organization,repositories:Object.freeze(repositories.sort((left,right) => rawCompare(left.repository,right.repository)))});
+    return frozenCanonicalCopy({
+      revision,
+      organization,
+      repositories:repositories.sort((left,right) => rawCompare(left.repository,right.repository)),
+    });
   }
 
   async function loadOrganization() {
@@ -396,14 +440,14 @@ export function createCoreControlStore({repository}) {
     if (valid.repository!==identity) throw ledgerConflict("repository registration intent does not bind its identity");
     const receipt=findReceiptInLedger(intent,validated);
     if (receipt===null || receipt.status!=="completed") return null;
-    return Object.freeze({revision:state.revision,intent,receipt,configuration:valid});
+    return frozenCanonicalCopy({revision:state.revision,intent,receipt,configuration:valid});
   }
 
   async function loadOrganizationState() {
     const validated=await loadValidatedLedgerAt(await head());
     const revision=validated.revision;
     if (validated.classification==="absent") {
-      return Object.freeze({organization:null,repositories:[],policies:{},programs:[],receipts:[]});
+      return frozenCanonicalCopy({organization:null,repositories:[],policies:{},programs:[],receipts:[]});
     }
     const organization=await loadOrganizationAt(validated);
     const repositories=organization===null ? [] : await Promise.all(
@@ -429,12 +473,12 @@ export function createCoreControlStore({repository}) {
       return document;
     }));
     const receipts=validated.receiptRecords.map(record => record.document);
-    return Object.freeze({
+    return frozenCanonicalCopy({
       organization,
-      repositories:Object.freeze(repositories),
-      policies:Object.freeze({lifecycle,release}),
-      programs:Object.freeze(programs),
-      receipts:Object.freeze(receipts),
+      repositories,
+      policies:{lifecycle,release},
+      programs,
+      receipts,
     });
   }
 
