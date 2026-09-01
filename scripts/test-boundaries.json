@@ -12,6 +12,8 @@
     {"id":"cli.design-runtime-boundary","classification":"real-cli","owner":"test/design-cli-runtime.test.js"},
     {"id":"cli.gate-process-boundary","classification":"real-cli","owner":"test/gate-cli-round1.test.js"},
     {"id":"command.gate-semantics","classification":"semantic","owner":"test/gate-commands.test.js"},
+    {"id":"core.control-atomic-commit","classification":"store-integration","owner":"test/core-control-store.test.js"},
+    {"id":"core.control-immutable-receipt","classification":"store-integration","owner":"test/core-control-store.test.js"},
     {"id":"design.command-semantics","classification":"semantic","owner":"test/design-commands.test.js"},
     {"id":"design.persisted-idempotent-resume","classification":"store-integration","owner":"test/design-store-boundary.test.js"},
     {"id":"feature.command-semantics","classification":"semantic","owner":"test/feature-commands.test.js"},

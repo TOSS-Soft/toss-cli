@@ -1,0 +1,349 @@
+import {types} from "node:util";
+import {
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  rename,
+  rm,
+  rmdir,
+  unlink,
+  writeFile,
+} from "node:fs/promises";
+import {dirname,join,relative,resolve} from "node:path";
+
+import YAML from "yaml";
+
+import {canonicalJson} from "../../contracts/acp.js";
+
+const SHA=/^[a-f0-9]{40}$/u;
+const SEGMENT=/^[A-Za-z0-9._-]+$/u;
+const REPOSITORY_FILENAME=/^[a-z0-9._-]+%2F[a-z0-9._-]+\.yaml$/u;
+
+function ownData(options,key) {
+  if (options===null || typeof options!=="object" || types.isProxy(options)) {
+    throw new TypeError("control repository options must be a non-proxy object");
+  }
+  const descriptor=Object.getOwnPropertyDescriptor(options,key);
+  if (!descriptor || !("value" in descriptor)) {
+    throw new TypeError(`${key} must be an own data property`);
+  }
+  return descriptor.value;
+}
+
+function ownDataFunction(options,key) {
+  const value=ownData(options,key);
+  if (typeof value!=="function" || types.isProxy(value)) {
+    throw new TypeError(`${key} must be an own-data non-proxy function`);
+  }
+  return value;
+}
+
+function assertExpectedHead(expectedHead) {
+  if (expectedHead!==null && (typeof expectedHead!=="string" || !SHA.test(expectedHead))) {
+    throw new TypeError("expectedHead must be null or an exact 40-character commit SHA");
+  }
+}
+
+function assertMessage(message) {
+  if (typeof message!=="string" || !message.trim() || message.includes("\0")) {
+    throw new TypeError("commit message must be a non-empty string without NUL bytes");
+  }
+}
+
+function assertSafeRelativePath(value) {
+  if (typeof value!=="string" || !value || value.includes("\\") || value.startsWith("/") ||
+      value.includes("\0") || /^[A-Za-z]:/u.test(value)) {
+    throw new TypeError(`unsafe relative path: ${String(value)}`);
+  }
+  const segments=value.split("/");
+  // Ledger ruling: generated repository filenames retain their canonical %2F.
+  const generatedRepositoryPath=segments.length===3 && segments[0]==="config" &&
+    segments[1]==="repositories" && REPOSITORY_FILENAME.test(segments[2]) &&
+    encodeURIComponent(decodeURIComponent(segments[2].slice(0,-5)))===segments[2].slice(0,-5);
+  if (segments.some(segment => !segment || segment==="." || segment===".." || !SEGMENT.test(segment)) &&
+      !generatedRepositoryPath) {
+    throw new TypeError(`unsafe relative path: ${value}`);
+  }
+  const extension=value.endsWith(".yaml") ? ".yaml" : value.endsWith(".json") ? ".json" : null;
+  if (!extension) throw new TypeError(`unsupported control document extension: ${value}`);
+  return {segments,extension};
+}
+
+function assertPlainData(value,label,seen=new Set()) {
+  if (value===null || typeof value!=="object") return;
+  if (types.isProxy(value)) throw new TypeError(`${label} must not contain Proxy values`);
+  if (seen.has(value)) throw new TypeError(`${label} must not contain cyclic values`);
+  seen.add(value);
+  try {
+    const prototype=Object.getPrototypeOf(value);
+    if (Array.isArray(value)) {
+      if (prototype!==Array.prototype) throw new TypeError(`${label} arrays must be plain arrays`);
+    } else if (prototype!==Object.prototype && prototype!==null) {
+      throw new TypeError(`${label} objects must be plain objects`);
+    }
+    for (const key of Reflect.ownKeys(value)) {
+      if (Array.isArray(value) && key==="length") continue;
+      const descriptor=Object.getOwnPropertyDescriptor(value,key);
+      if (typeof key!=="string" || !descriptor || !("value" in descriptor) || !descriptor.enumerable) {
+        throw new TypeError(`${label} must contain only own enumerable data properties`);
+      }
+      assertPlainData(descriptor.value,label,seen);
+    }
+  } finally {
+    seen.delete(value);
+  }
+}
+
+function canonicalBytes(document,extension) {
+  assertPlainData(document,"control document");
+  canonicalJson(document);
+  if (extension===".json") return Buffer.from(canonicalJson(document),"utf8");
+  return Buffer.from(YAML.stringify(document,{sortMapEntries:true}),"utf8");
+}
+
+function normalizeFiles(files) {
+  if (files===null || typeof files!=="object" || Array.isArray(files) || types.isProxy(files)) {
+    throw new TypeError("files must be a non-proxy object map");
+  }
+  const entries=[];
+  for (const path of Object.keys(files)) {
+    const descriptor=Object.getOwnPropertyDescriptor(files,path);
+    if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
+      throw new TypeError("files must contain only own enumerable data properties");
+    }
+    const checked=assertSafeRelativePath(path);
+    entries.push({path,document:descriptor.value,...checked});
+  }
+  if (entries.length===0) throw new TypeError("files must contain at least one control document");
+  entries.sort((left,right) => left.path.localeCompare(right.path,"en",{sensitivity:"variant"}));
+  return entries;
+}
+
+function isMissing(error) {
+  return error?.code==="ENOENT";
+}
+
+function isAbsentGitPath(error) {
+  const stderr=String(error?.stderr ?? "");
+  return /does not exist in|exists on disk, but not in|ambiguous argument 'HEAD'/iu.test(stderr);
+}
+
+export function createGitControlRepository(options) {
+  const root=ownData(options,"root");
+  const execFile=ownDataFunction(options,"execFile");
+  const clock=Object.hasOwn(options,"clock") ? ownDataFunction(options,"clock") : Date.now;
+  if (typeof root!=="string" || !root) throw new TypeError("root must be a non-empty path string");
+  const absoluteRoot=resolve(root);
+
+  async function runGit(args) {
+    return execFile("git",args,{cwd:absoluteRoot});
+  }
+
+  async function secureRoot() {
+    const stat=await lstat(absoluteRoot);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new TypeError("control repository root must be a non-symlink directory");
+    }
+  }
+
+  async function secureTarget(relativePath,{createParents=false}={}) {
+    const {segments}=assertSafeRelativePath(relativePath);
+    await secureRoot();
+    let current=absoluteRoot;
+    const created=[];
+    for (const segment of segments.slice(0,-1)) {
+      current=join(current,segment);
+      try {
+        const stat=await lstat(current);
+        if (stat.isSymbolicLink() || !stat.isDirectory()) {
+          throw new TypeError(`symbolic link or non-directory path component is not allowed: ${relativePath}`);
+        }
+      } catch (error) {
+        if (!isMissing(error)) throw error;
+        if (!createParents) {
+          const target=join(absoluteRoot,...segments);
+          return {target,created};
+        }
+        await mkdir(current,{recursive:false});
+        created.push(current);
+        const stat=await lstat(current);
+        if (stat.isSymbolicLink() || !stat.isDirectory()) {
+          throw new TypeError(`symbolic link or non-directory path component is not allowed: ${relativePath}`);
+        }
+      }
+    }
+    const target=join(absoluteRoot,...segments);
+    if (!relative(absoluteRoot,target) || relative(absoluteRoot,target).startsWith("..")) {
+      throw new TypeError(`unsafe relative path: ${relativePath}`);
+    }
+    try {
+      const stat=await lstat(target);
+      if (stat.isSymbolicLink() || !stat.isFile()) {
+        throw new TypeError(`symbolic link or non-file target is not allowed: ${relativePath}`);
+      }
+    } catch (error) {
+      if (!isMissing(error)) throw error;
+    }
+    return {target,created};
+  }
+
+  async function head() {
+    await secureRoot();
+    try {
+      const result=await runGit(["rev-parse","--verify","--quiet","HEAD"]);
+      const sha=String(result?.stdout ?? "").trim();
+      if (!SHA.test(sha)) throw new Error("Git returned an invalid HEAD commit SHA");
+      return sha;
+    } catch (error) {
+      if (error?.code===1) return null;
+      throw error;
+    }
+  }
+
+  async function readDocument(relativePath,{at="HEAD"}={}) {
+    const {extension}=assertSafeRelativePath(relativePath);
+    if (at!=="HEAD" && (typeof at!=="string" || !SHA.test(at))) {
+      throw new TypeError("document revision must be HEAD or an exact 40-character commit SHA");
+    }
+    await secureTarget(relativePath);
+    const revision=at==="HEAD" ? await head() : at;
+    if (revision===null) return null;
+    let result;
+    try {
+      result=await runGit(["show",`${revision}:${relativePath}`]);
+    } catch (error) {
+      if (isAbsentGitPath(error)) return null;
+      throw error;
+    }
+    const text=String(result?.stdout ?? "");
+    const document=extension===".json"
+      ? JSON.parse(text)
+      : YAML.parse(text,{merge:false,prettyErrors:false,uniqueKeys:true});
+    if (document===null || typeof document!=="object" || Array.isArray(document)) {
+      throw new TypeError(`control document must be an object: ${relativePath}`);
+    }
+    assertPlainData(document,"control document");
+    canonicalJson(document);
+    return document;
+  }
+
+  async function indexSnapshot() {
+    const result=await runGit(["rev-parse","--git-path","index"]);
+    const indexPath=resolve(absoluteRoot,String(result?.stdout ?? "").trim());
+    try {
+      return {indexPath,bytes:await readFile(indexPath)};
+    } catch (error) {
+      if (isMissing(error)) return {indexPath,bytes:null};
+      throw error;
+    }
+  }
+
+  async function restoreIndex(snapshot) {
+    if (snapshot.bytes===null) {
+      await rm(snapshot.indexPath,{force:true});
+    } else {
+      await writeFile(snapshot.indexPath,snapshot.bytes,{mode:0o600});
+    }
+  }
+
+  async function acquireLock() {
+    await secureRoot();
+    const path=join(absoluteRoot,".toss-core.lock");
+    try {
+      const stat=await lstat(path);
+      if (stat.isSymbolicLink()) throw new TypeError("control repository lock may not be a symbolic link");
+      throw new Error("control repository is locked");
+    } catch (error) {
+      if (!isMissing(error)) throw error;
+    }
+    const handle=await open(path,"wx",0o600);
+    await handle.close();
+    return path;
+  }
+
+  async function commitFiles({expectedHead,message,files}) {
+    assertExpectedHead(expectedHead);
+    assertMessage(message);
+    const entries=normalizeFiles(files);
+    const lock=await acquireLock();
+    const temporary=[];
+    const createdDirectories=[];
+    let index;
+    let states=[];
+    let succeeded=false;
+    try {
+      const actualHead=await head();
+      if (actualHead!==expectedHead) {
+        const error=new Error(`control repository expected head conflict: expected ${String(expectedHead)}, found ${String(actualHead)}`);
+        error.code="CORE_CONTROL_CONFLICT";
+        throw error;
+      }
+      index=await indexSnapshot();
+      for (const entry of entries) {
+        const secured=await secureTarget(entry.path,{createParents:true});
+        createdDirectories.push(...secured.created);
+        let bytes=null;
+        try {
+          bytes=await readFile(secured.target);
+        } catch (error) {
+          if (!isMissing(error)) throw error;
+        }
+        states.push({entry,target:secured.target,bytes});
+      }
+      for (const state of states) {
+        const bytes=canonicalBytes(state.entry.document,state.entry.extension);
+        const timestamp=clock();
+        const milliseconds=timestamp instanceof Date ? timestamp.getTime() : timestamp;
+        if (!Number.isSafeInteger(milliseconds) || milliseconds<0) {
+          throw new TypeError("clock must return a non-negative integer timestamp or Date");
+        }
+        const temp=`${state.target}.toss-core-${process.pid}-${milliseconds}-${temporary.length}.tmp`;
+        await secureTarget(state.entry.path);
+        const handle=await open(temp,"wx",0o600);
+        try {
+          await handle.writeFile(bytes);
+        } finally {
+          await handle.close();
+        }
+        temporary.push(temp);
+        await secureTarget(state.entry.path);
+        await rename(temp,state.target);
+        temporary.pop();
+      }
+      await runGit(["add","--",...entries.map(entry => entry.path)]);
+      await runGit(["commit","--only","-m",message,"--",...entries.map(entry => entry.path)]);
+      const commitSha=await head();
+      if (commitSha===null || !SHA.test(commitSha) || commitSha===actualHead) {
+        throw new Error("Git did not create a new exact 40-character commit SHA");
+      }
+      succeeded=true;
+      return Object.freeze({commit_sha:commitSha});
+    } finally {
+      try {
+        if (!succeeded) {
+        for (const temp of temporary) await rm(temp,{force:true});
+        for (const state of states.reverse()) {
+          try {
+            await secureTarget(state.entry.path);
+            if (state.bytes===null) await rm(state.target,{force:true});
+            else await writeFile(state.target,state.bytes,{mode:0o600});
+          } catch {
+            // A hostile replacement must not be followed during rollback.
+          }
+        }
+        if (index) await restoreIndex(index);
+        for (const directory of [...createdDirectories].reverse()) {
+          try { await rmdir(directory); } catch { /* directory is no longer empty */ }
+        }
+        }
+      } finally {
+        await unlink(lock).catch(error => {
+          if (!isMissing(error)) throw error;
+        });
+      }
+    }
+  }
+
+  return Object.freeze({head,readDocument,commitFiles});
+}
