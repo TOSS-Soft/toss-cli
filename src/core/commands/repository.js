@@ -57,17 +57,20 @@ async function add(command,services) {
   }
   const pending=await ownDataFunction(services.control,"findCompletedRepositoryRegistration","control")(repository);
   if (pending!==null) {
-    if (!sameRegistration(pending.configuration,desired)) throw new CoreConflictError("Completed repository registration does not match current repository snapshot");
-    if (!command.options.apply || command.options.dryRun) return Object.freeze({status:"recovery-preview",repository,control_revision:registry.revision,receipt:pending.receipt,configuration:pending.configuration,preview:operationPreview(pending.intent)});
+    const completed=closedData(pending,"completed repository registration");
+    const pendingIntent=completed.intent; const pendingReceipt=completed.receipt; const pendingConfiguration=completed.configuration;
+    if (!sameRegistration(pendingConfiguration,desired)) throw new CoreConflictError("Completed repository registration does not match current repository snapshot");
+    const preview=closedData(operationPreview(pendingIntent),"repository recovery operation preview");
+    if (!command.options.apply || command.options.dryRun) return Object.freeze({status:"recovery-preview",repository,control_revision:registry.revision,receipt:pendingReceipt,configuration:pendingConfiguration,preview});
     const authority=await requireAuthority(command,services);
-    await ownDataFunction(services.operations,"verifyAuthorityFor","operations")(pending.intent,authority);
-    const latest=await ownDataFunction(services.control,"loadRegistryState","control")();
+    await ownDataFunction(services.operations,"verifyAuthorityFor","operations")(pendingIntent,authority);
+    const latest=closedData(await ownDataFunction(services.control,"loadRegistryState","control")(),"control registry state");
     const present=latest.repositories.find(value => value.repository===repository);
     if (present!==undefined) return Object.freeze({status:"already-registered",repository,control_revision:latest.revision});
-    const next=Object.freeze({...latest.organization,repositories:Object.freeze([...latest.organization.repositories,repository].sort((left,right) => left===right ? 0 : left<right ? -1 : 1))});
-    const recoveryPreview=Object.freeze({...operationPreview(pending.intent),receipt:pending.receipt,configuration:pending.configuration,control_revision:latest.revision,organization:next});
+    const next=closedData({...latest.organization,repositories:[...latest.organization.repositories,repository].sort((left,right) => left===right ? 0 : left<right ? -1 : 1)},"recovery organization configuration");
+    const recoveryPreview=Object.freeze({...preview,receipt:pendingReceipt,configuration:pendingConfiguration,control_revision:latest.revision,organization:next});
     if (command.interactive && await ownDataFunction(services,"confirm","services")(recoveryPreview)!==true) throw new CoreBlockedError("Interactive apply was not confirmed");
-    try { const committed=await ownDataFunction(services.control,"commitConfiguration","control")({expectedHead:latest.revision,files:Object.freeze({"config/organization.yaml":next,[repositoryPath(repository)]:pending.configuration})}); return Object.freeze({status:"registered",repository,control_revision:committed.commit_sha,receipt:pending.receipt}); } catch (error) {
+    try { const committed=await ownDataFunction(services.control,"commitConfiguration","control")({expectedHead:latest.revision,files:Object.freeze({"config/organization.yaml":next,[repositoryPath(repository)]:pendingConfiguration})}); return Object.freeze({status:"registered",repository,control_revision:committed.commit_sha,receipt:pendingReceipt}); } catch (error) {
       if (error?.code==="CONTROL_LEDGER_CONFLICT") throw new CoreConflictError("Repository registration configuration commit conflicted",{cause:error});
       throw new CoreInternalError("Repository registration configuration commit failed",{cause:error});
     }

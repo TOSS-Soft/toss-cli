@@ -12,6 +12,7 @@ import {createGitControlRepository} from "../src/core/control/git-repository.js"
 import {
   CONTROL_PATHS,
   createCoreControlStore,
+  intentPath,
   receiptPath,
   repositoryFilename,
   repositoryPath,
@@ -401,6 +402,7 @@ test("organization state reads every document at one resolved revision",async ()
 test("organization state lists populated programs and receipts at its initially resolved revision",async t => {
   const root=await createRepository(t);
   const repositoryControl=control(root);
+  const firstIntent=intent(); const secondIntent={...intent(),intent_id:"INTENT-20260901-0002"};
   const initial=await repositoryControl.commitFiles({
     expectedHead:null,
     message:"populated state",
@@ -409,8 +411,10 @@ test("organization state lists populated programs and receipts at its initially 
       [repositoryPath("TOSS-Soft/toss-cli")]:repositoryConfig(),
       "programs/PROGRAM-A/manifest.yaml":{program_id:"PROGRAM-A"},
       "programs/PROGRAM-B/manifest.yaml":{program_id:"PROGRAM-B"},
-      "receipts/2026/09/RECEIPT-20260901-0001.json":receiptFor("0001"),
-      "receipts/2026/09/RECEIPT-20260901-0002.json":receiptFor("0002"),
+      [intentPath(firstIntent)]:firstIntent,
+      [intentPath(secondIntent)]:secondIntent,
+      "receipts/2026/09/RECEIPT-20260901-0001.json":receiptForIntent(firstIntent),
+      "receipts/2026/09/RECEIPT-20260901-0002.json":receiptForIntent(secondIntent,{number:"0002"}),
     },
   });
   const ref=(await git(root,["symbolic-ref","-q","HEAD"])).stdout.trim();
@@ -446,6 +450,30 @@ test("organization state lists populated programs and receipts at its initially 
   assert.deepEqual([...new Set(revisions)],[initial.commit_sha]);
   assert.ok(Object.isFrozen(state.programs));
   assert.ok(Object.isFrozen(state.receipts));
+});
+
+test("organization state validates aggregate receipt coverage against exact persisted intents",async t => {
+  const input={intent_id:"INTENT-20260901-0001",created_at:"2026-09-01T08:00:00.000Z",command:"repo.add",policy_revision:"POLICY-0001",source:{repository:"TOSS-Soft/toss-cli",revision:"abc123",sha256:"a".repeat(64)},authority:null,operations:[
+    {resource:"repository",action:"register",repository:"TOSS-Soft/toss-cli",expected_revision:"repo-1",payload:{kind:"one"}},
+    {resource:"project",action:"update",repository:null,expected_revision:"project-1",payload:{kind:"two"}},
+  ]};
+  const planned=createOperationIntent(input);
+  const cases=[
+    {name:"zero",receipt:receiptForIntent(planned,{observed_revisions:[]})},
+    {name:"missing",receipt:receiptForIntent(planned,{observed_revisions:[{operation_id:"OP-0001",repository:planned.operations[0].repository,revision:"r1"}]})},
+    {name:"duplicate",receipt:receiptForIntent(planned,{observed_revisions:[{operation_id:"OP-0001",repository:planned.operations[0].repository,revision:"r1"},{operation_id:"OP-0001",repository:planned.operations[0].repository,revision:"r2"}]})},
+    {name:"mismatched",receipt:receiptForIntent(planned,{observed_revisions:[{operation_id:"OP-0001",repository:"TOSS-Soft/other",revision:"r1"},{operation_id:"OP-0002",repository:null,revision:"p1"}]})},
+  ];
+  for (const {name,receipt} of cases) {
+    const root=await createRepository(t); const repositoryControl=control(root); const store=createCoreControlStore({repository:repositoryControl});
+    await repositoryControl.commitFiles({expectedHead:null,message:`aggregate ${name}`,files:{[intentPath(planned)]:planned,[receiptPath(receipt)]:receipt}});
+    await assert.rejects(store.loadOrganizationState(),error => error?.code==="CONTROL_LEDGER_CONFLICT");
+  }
+  const root=await createRepository(t); const repositoryControl=control(root); const store=createCoreControlStore({repository:repositoryControl});
+  const failed={...receiptForIntent(planned),status:"failed",observed_revisions:[]};
+  await repositoryControl.commitFiles({expectedHead:null,message:"aggregate valid",files:{[intentPath(planned)]:planned,[receiptPath(failed)]:failed}});
+  const first=await store.loadOrganizationState(); const second=await store.loadOrganizationState();
+  assert.deepEqual(first.receipts,[failed]); assert.deepEqual(second,first);
 });
 
 test("failed pre-commit hook restores control files and preserves unrelated index and worktree changes",async t => {
@@ -804,6 +832,7 @@ test("bootstrap commits its closed configuration, intent, and receipt in one unb
   }});
   assert.match(committed.commit_sha,/^[a-f0-9]{40}$/u);
   assert.equal((await store.loadOrganization()).organization,"TOSS-Soft");
+  assert.equal((await store.loadOrganizationState()).receipts[0].receipt_id,"RECEIPT-20260901-0001");
   assert.equal((await store.loadBootstrapState()).intent.intent_id,"INTENT-20260901-0001");
   await assert.rejects(store.commitBootstrap({expectedHead:committed.commit_sha,files:{"config/organization.yaml":organization()}}),/unborn|bootstrap|head/i);
 });

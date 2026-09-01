@@ -106,6 +106,28 @@ test("repo add completes a persisted registration locally after restart without 
   const concurrent=durableRegistry({onReceipt(state) { const value={schema_version:"repository-config.v1",repository:other,repository_node_id:"R_other",default_branch:"main",active_release:null,project_item_id:"PVTI_other",project_fields:{status:"S",gate:"G"},registered_at:"2026-09-01T08:00:00.000Z"}; state.repositories.set(other,value); state.organization={...state.organization,repositories:[other]}; state.revision="head-2"; }}); const concurrentGithub=githubFor({registrations}); const concurrentServices={...firstServices,control:concurrent.control(),github:concurrentGithub,operations:concurrent.operations(concurrentGithub,() => "2026-09-01T08:00:00.000Z")}; await runRepositoryCommand(command(["repo","add",repository,"--from","repo.yaml","--apply","--non-interactive","--authority","authority.json"]),concurrentServices); assert.deepEqual(concurrent.state.organization.repositories,[repository,other]);
   const conflict=durableRegistry({onConfiguration() { const error=new Error("cas"); error.code="CONTROL_LEDGER_CONFLICT"; return error; }}); const conflictServices={...firstServices,control:conflict.control(),operations:conflict.operations(github,() => "2026-09-01T08:00:00.000Z")}; await assert.rejects(runRepositoryCommand(command(["repo","add",repository,"--from","repo.yaml","--apply","--non-interactive","--authority","authority.json"]),conflictServices),error => error?.exitCode===6);
 });
+test("repo recovery confirmation cannot mutate the configuration later passed to CAS",async () => {
+  const repository="TOSS-Soft/future-repository"; const github=githubFor({registrations:new Map([[repository,registrationSnapshot(repository)]])});
+  let failOnce=true; const durable=durableRegistry({onConfiguration() { if (failOnce) { failOnce=false; return new Error("injected local failure"); } return null; }});
+  const service={control:durable.control(),github,operations:durable.operations(github,() => "2026-09-01T08:00:00.000Z"),readInput:async () => ({default_branch:"main",project_owner:"TOSS-Soft",project_number:7}),readAuthority:async () => authorityFixture(),clock:() => "2026-09-01T09:00:00.000Z"};
+  await assert.rejects(runRepositoryCommand(command(["repo","add",repository,"--from","repo.yaml","--apply","--non-interactive","--authority","authority.json"]),service),error => error?.exitCode===70);
+  let rejectedMutations=0;
+  const result=await runRepositoryCommand(command(["repo","add",repository,"--from","repo.yaml","--apply","--authority","authority.json"]),{...service,confirm:async preview => {
+    for (const mutate of [
+      () => { preview.configuration.repository_node_id="R_ATTACK"; },
+      () => { preview.configuration.project_fields.status="ATTACK"; },
+      () => { preview.organization.project.node_id="PVT_ATTACK"; },
+      () => { preview.organization.repositories.push("TOSS-Soft/attack"); },
+      () => { preview.operations[0].payload.repository_config.project_fields.gate="ATTACK"; },
+    ]) try { mutate(); } catch { rejectedMutations+=1; }
+    return true;
+  }});
+  assert.equal(rejectedMutations,5); assert.equal(result.status,"registered");
+  assert.equal(durable.state.repositories.get(repository).repository_node_id,"R_1");
+  assert.equal(durable.state.repositories.get(repository).project_fields.status,"FIELD_STATUS"); assert.equal(durable.state.repositories.get(repository).project_fields.gate,"FIELD_GATE");
+  assert.equal(durable.state.organization.project.node_id,"PVT_org");
+  assert.deepEqual(durable.state.organization.repositories,[repository]);
+});
 test("repo list is deterministic and read-only while later command families remain exit 69",async () => {
   const github=githubFor(); const control=memoryControl(); await control.commitConfiguration({expectedHead:"head-0",files:{"config/organization.yaml":{...(await control.loadOrganization()),repositories:["TOSS-Soft/a","TOSS-Soft/z"]},"config/repositories/toss-soft%2Fa.yaml":{schema_version:"repository-config.v1",repository:"TOSS-Soft/a",repository_node_id:"R_a",default_branch:"main",active_release:null,project_item_id:"PVTI_a",project_fields:{status:"S",gate:"G"},registered_at:"2026-09-01T08:00:00.000Z"},"config/repositories/toss-soft%2Fz.yaml":{schema_version:"repository-config.v1",repository:"TOSS-Soft/z",repository_node_id:"R_z",default_branch:"main",active_release:null,project_item_id:"PVTI_z",project_fields:{status:"S",gate:"G"},registered_at:"2026-09-01T08:00:00.000Z"}}});
   const result=await runRepositoryCommand(command(["repo","list"]),services({control,github})); assert.deepEqual(result.repositories.map(value => value.repository),["TOSS-Soft/a","TOSS-Soft/z"]); assert.deepEqual(result.github_revisions,[{repository:"TOSS-Soft/a",revision:"github-current"},{repository:"TOSS-Soft/z",revision:"github-current"}]); assert.equal(control.writes.length,1); const {dispatchCoreCommand}=await import("../src/core/commands/router.js"); assert.equal((await dispatchCoreCommand(command(["feature","status","FEATURE-1"]),{})).exitCode,69);

@@ -120,6 +120,9 @@ function bootstrapProof({organization,lifecycle,release,intent,receipt}) {
 function assertReceiptCoverage(receipt,intent) {
   if (receipt.intent_id!==intent.intent_id || receipt.intent_sha256!==sha256Canonical(intent)) throw new Error("receipt intent binding does not match the persisted intent");
   const operations=new Map(intent.operations.map(operation => [operation.operation_id,operation]));
+  const required=intent.command==="init"
+    ? intent.operations.filter(operation => !["organization-config","lifecycle-policy","release-policy","first-control-transaction"].includes(operation.payload?.kind))
+    : intent.operations;
   const observedIds=new Set();
   for (const observed of receipt.observed_revisions) {
     const operation=operations.get(observed.operation_id);
@@ -128,8 +131,23 @@ function assertReceiptCoverage(receipt,intent) {
     }
     observedIds.add(observed.operation_id);
   }
-  if (receipt.status==="completed" && (observedIds.size!==operations.size || intent.operations.some(operation => !observedIds.has(operation.operation_id)))) {
+  if (receipt.status==="completed" && (observedIds.size!==required.length || required.some(operation => !observedIds.has(operation.operation_id)))) {
     throw new Error("completed receipt must observe every intent operation exactly once");
+  }
+}
+
+function validatePersistedReceiptCoverage(receipt,intent) {
+  try { assertReceiptCoverage(receipt,intent); } catch (error) {
+    throw ledgerConflict("persisted receipt coverage is corrupt",{cause:error});
+  }
+}
+
+function validatePersistedReceiptRecords(receipts,intents) {
+  const byIntentId=new Map(intents.map(record => [record.document.intent_id,record.document]));
+  for (const record of receipts) {
+    const intent=byIntentId.get(record.document.intent_id);
+    if (!intent) throw ledgerConflict(`receipt intent is absent from the ledger: ${record.document.intent_id}`);
+    validatePersistedReceiptCoverage(record.document,intent);
   }
 }
 
@@ -268,7 +286,7 @@ export function createCoreControlStore({repository}) {
       readAt(`${CONTROL_PATHS.policies}/lifecycle.yaml`,revision),
       readAt(`${CONTROL_PATHS.policies}/release.yaml`,revision),
     ]);
-    const [programPaths,receiptRecords]=await Promise.all([
+    const [programPaths,receiptRecords,intentRecords]=await Promise.all([
       listedDocuments(CONTROL_PATHS.programs,revision),
       resolveGlobalIdentities({
         revision,
@@ -277,8 +295,19 @@ export function createCoreControlStore({repository}) {
         label:"receipt",
         idField:"receipt_id",
         pathFor:receiptPath,
+        ledgerRead:true,
+      }),
+      resolveGlobalIdentities({
+        revision,
+        prefix:CONTROL_PATHS.intents,
+        schemaId:"operation-intent.v1",
+        label:"intent",
+        idField:"intent_id",
+        pathFor:intentPath,
+        ledgerRead:true,
       }),
     ]);
+    validatePersistedReceiptRecords(receiptRecords,intentRecords);
     const programs=await Promise.all([...programPaths].sort().map(async path => {
       if (!/^programs\/[A-Za-z0-9._-]+\/manifest\.yaml$/u.test(path)) {
         throw new Error(`unexpected program manifest path: ${path}`);
@@ -309,6 +338,7 @@ export function createCoreControlStore({repository}) {
     if (bootstrapIntents.length!==1) throw ledgerConflict("control repository must contain exactly one bootstrap intent");
     const intent=bootstrapIntents[0].document;
     const receipts=await resolveGlobalIdentities({revision,prefix:CONTROL_PATHS.receipts,schemaId:"operation-receipt.v1",label:"receipt",idField:"receipt_id",pathFor:receiptPath,ledgerRead:true});
+    validatePersistedReceiptRecords(receipts,intents);
     const matching=receipts.filter(record => record.document.intent_id===intent.intent_id && record.document.intent_sha256===sha256Canonical(intent));
     if (matching.length!==1) throw ledgerConflict("bootstrap intent must have exactly one matching receipt");
     bootstrapProof({organization,lifecycle,release,intent,receipt:matching[0].document});
@@ -417,7 +447,7 @@ export function createCoreControlStore({repository}) {
       ledgerRead:true,
     })).filter(record => record.document.intent_id===valid.intent_id);
     if (persisted.length!==1 || !equivalent(persisted[0].document,valid)) throw ledgerConflict(`receipt intent is absent or conflicts with the ledger: ${valid.intent_id}`);
-    try { assertReceiptCoverage(matches[0].document,persisted[0].document); } catch (error) { throw ledgerConflict("persisted receipt coverage is corrupt",{cause:error}); }
+    validatePersistedReceiptCoverage(matches[0].document,persisted[0].document);
     return matches[0].document;
   }
 
