@@ -369,6 +369,26 @@ export function createGitControlRepository(options) {
     return Object.freeze(documents);
   }
 
+  async function rootSnapshotAt({at}={}) {
+    if (typeof at!=="string" || !SHA.test(at)) throw new TypeError("root snapshot revision must be an exact 40-character commit SHA");
+    await secureRoot();
+    const roots=String((await runGit(["rev-list","--max-parents=0",at]))?.stdout ?? "").trim().split("\n").filter(Boolean);
+    if (roots.length!==1 || !SHA.test(roots[0])) throw new Error("control repository history must have exactly one reachable root commit");
+    const revision=roots[0];
+    const output=String((await runGit(["ls-tree","-r","-z",revision]))?.stdout ?? "");
+    if (output && !output.endsWith("\0")) throw new Error("Git returned malformed root tree output");
+    const paths=[];
+    for (const record of output ? output.slice(0,-1).split("\0") : []) {
+      const match=/^(100644) blob [a-f0-9]{40}\t(.+)$/u.exec(record);
+      if (!match) throw new Error("root control tree must contain only regular document blobs");
+      assertSafeRelativePath(match[2]);
+      paths.push(match[2]);
+    }
+    paths.sort();
+    if (new Set(paths).size!==paths.length) throw new Error("root control tree contains duplicate paths");
+    return Object.freeze({revision,paths:Object.freeze(paths)});
+  }
+
   async function indexSnapshot() {
     const result=await runGit(["rev-parse","--git-path","index"]);
     const indexPath=resolve(absoluteRoot,String(result?.stdout ?? "").trim());
@@ -511,5 +531,5 @@ export function createGitControlRepository(options) {
     }
   }
 
-  return Object.freeze({head,readDocument,listDocuments,commitFiles});
+  return Object.freeze({head,readDocument,listDocuments,rootSnapshotAt,commitFiles});
 }

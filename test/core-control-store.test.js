@@ -391,6 +391,7 @@ test("organization state reads every document at one resolved revision",async ()
       revisions.push(at);
       return [];
     },
+    rootSnapshotAt:async ({at}) => ({revision:at,paths:[]}),
     commitFiles:async () => { throw new Error("not used"); },
   };
   const store=createCoreControlStore({repository});
@@ -440,6 +441,7 @@ test("organization state lists populated programs and receipts at its initially 
       }
       return repositoryControl.listDocuments(prefix,{at});
     },
+    rootSnapshotAt:repositoryControl.rootSnapshotAt,
     commitFiles:repositoryControl.commitFiles,
   };
   const store=createCoreControlStore({repository});
@@ -795,7 +797,7 @@ test("receipt lookup rejects a persisted incomplete completed receipt but permit
   const failedIntentCommit=await store.commitIntent({expectedHead:corrupted.commit_sha,intent:failedIntent});
   const failed={...receiptForIntent(failedIntent,{number:"0002",observed_revisions:[]}),status:"failed"};
   await store.commitReceipt({expectedHead:failedIntentCommit.commit_sha,receipt:failed});
-  assert.deepEqual(await store.findReceipt(failedIntent),failed);
+  await assert.rejects(store.findReceipt(failedIntent),error => error?.code==="CONTROL_LEDGER_CONFLICT");
 });
 
 test("receipt lookup tags a divergent immutable ledger as a stable conflict",async t => {
