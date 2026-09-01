@@ -150,6 +150,9 @@ export function createGitControlRepository(options) {
   const writeTempFile=Object.hasOwn(options,"writeTempFile")
     ? ownDataFunction(options,"writeTempFile")
     : async (handle,bytes) => handle.writeFile(bytes);
+  const removeLock=Object.hasOwn(options,"removeLock")
+    ? ownDataFunction(options,"removeLock")
+    : path => unlink(path);
   if (typeof root!=="string" || !root) throw new TypeError("root must be a non-empty path string");
   const absoluteRoot=resolve(root);
   let temporarySequence=0;
@@ -163,6 +166,16 @@ export function createGitControlRepository(options) {
     : stageProposedIndex;
 
   async function secureRoot() {
+    let current="/";
+    for (const segment of absoluteRoot.split("/").filter(Boolean)) {
+      current=current==="/" ? `/${segment}` : `${current}/${segment}`;
+      try {
+        if ((await lstat(current)).isSymbolicLink() && !["/var","/tmp"].includes(current)) throw new TypeError("control repository root must not traverse a symbolic link");
+      } catch (error) {
+        if (isMissing(error)) break;
+        throw error;
+      }
+    }
     const stat=await lstat(absoluteRoot);
     if (stat.isSymbolicLink() || !stat.isDirectory()) {
       throw new TypeError("control repository root must be a non-symlink directory");
@@ -501,8 +514,8 @@ export function createGitControlRepository(options) {
         }
         }
       } finally {
-        await unlink(lock).catch(error => {
-          if (!isMissing(error)) throw error;
+        await removeLock(lock).catch(error => {
+          if (!isMissing(error) && !succeeded) throw error;
         });
       }
     }

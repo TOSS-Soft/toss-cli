@@ -3,6 +3,7 @@ import {types} from "node:util";
 import {validateDocument} from "../contracts/validator.js";
 
 import {CoreValidationError} from "./errors.js";
+import {compareOperations} from "./operation-order.js";
 
 function validationMessage(schemaId,errors) {
   const details=errors.map(error => error.message).filter(Boolean).join("; ");
@@ -23,11 +24,16 @@ function assertUniqueOperationIds(value) {
 function assertCanonicalOperationOrder(value) {
   if (value.schema_version!=="operation-intent.v1") return;
   let previousOperationId;
+  let previousOperation;
   for (const operation of value.operations) {
     if (previousOperationId!==undefined && previousOperationId>=operation.operation_id) {
       throw new CoreValidationError("Invalid core contract operation-intent.v1: operation IDs must use strict ascending ASCII order");
     }
+    if (previousOperation!==undefined && compareOperations(previousOperation,operation)>=0) {
+      throw new CoreValidationError("Invalid core contract operation-intent.v1: operations must use canonical operation order");
+    }
     previousOperationId=operation.operation_id;
+    previousOperation=operation;
   }
 }
 

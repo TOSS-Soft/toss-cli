@@ -107,7 +107,7 @@ function bootstrapSnapshot() {
     control_repository:{exists:false,revision:null},
     organization:{
       organization:"TOSS-Soft",
-      project:{node_id:"PVT_org",number:7},
+      project:{node_id:"PVT_org",number:7,revision:"project-1"},
       policy_revision:"POLICY-0001",
       lifecycle_policy:{revision:"POLICY-0001",states:["Backlog","Ready"]},
       release_policy:{revision:"POLICY-0001",gates:["NONE","RECONCILE_REQUIRED"]},
@@ -165,7 +165,7 @@ function fakeGitHub(events) {
   });
 }
 
-function runtimeProvider({github,authorityRegistry}) {
+function runtimeProvider({github,authorityRegistry,prompt}={}) {
   const execFile=promisify(execFileCallback);
   let sequence=0;
   return async ({cwd,command}) => ({
@@ -179,6 +179,7 @@ function runtimeProvider({github,authorityRegistry}) {
       authorityRegistry,
       policyRevision:() => "POLICY-0001",
     }),
+    ...(prompt===undefined ? {} : {prompt}),
   });
 }
 
@@ -202,8 +203,8 @@ test("runCoreCli bootstrap persists control state before the real executable rea
   const initAuthority=signer.record({
     record_id:"AUTH-20260901-0001",
     command:"init",
-    targets:["TOSS-Soft/toss-os-control"],
-    expected_revisions:[{repository:"TOSS-Soft/toss-os-control",revision:null}],
+    targets:["PVT_org","TOSS-Soft/toss-os-control"],
+    expected_revisions:[{repository:"TOSS-Soft/toss-os-control",revision:null},{repository:null,revision:"project-1"}],
   });
   await writeFile(join(root,"init-authority.json"),JSON.stringify(initAuthority),"utf8");
   const provider=runtimeProvider({github:fakeGitHub(events),authorityRegistry:signer.registry});
@@ -282,6 +283,43 @@ test("runCoreCli bootstrap persists control state before the real executable rea
   assert.equal(invalidHelp.status,2);
   assert.equal(invalidHelp.stderr,"");
   assert.equal(JSON.parse(invalidHelp.stdout).error.code,"COMMAND_USAGE");
+});
+
+test("interactive init and repo add confirm their exact previews before any write",async t => {
+  const {root,control}=await controlRepository(t);
+  const signer=authoritySigner();
+  const initAuthority=signer.record({record_id:"AUTH-20260901-0001",command:"init",targets:["PVT_org","TOSS-Soft/toss-os-control"],expected_revisions:[{repository:"TOSS-Soft/toss-os-control",revision:null},{repository:null,revision:"project-1"}]});
+  const repository="TOSS-Soft/toss-example";
+  const repoAuthority=signer.record({record_id:"AUTH-20260901-0002",command:"repo.add",targets:[repository],expected_revisions:[{repository,revision:"repo-1"}]});
+  await writeFile(join(root,"init-authority.json"),JSON.stringify(initAuthority),"utf8");
+  await writeFile(join(root,"repo-authority.json"),JSON.stringify(repoAuthority),"utf8");
+  await writeFile(join(root,"repository.json"),JSON.stringify({default_branch:"main",project_owner:"TOSS-Soft",project_number:7}),"utf8");
+  const events=[]; const prompts=[];
+  const provider=runtimeProvider({github:fakeGitHub(events),authorityRegistry:signer.registry,prompt:async request => { prompts.push(request); assert.equal(request.kind,"confirm-apply"); assert.equal(request.preview.schema_version,"operation-preview.v1"); assert.equal(request.preview.command,request.command.name); return true; }});
+  const initialized=await runProgrammatic(["init","--control","control","--apply","--authority","init-authority.json","--json"],{cwd:root,runtimeProvider:provider});
+  assert.equal(initialized.exitCode,0,initialized.stderr); assert.equal(JSON.parse(initialized.stdout).data.status,"completed");
+  const registered=await runProgrammatic(["repo","add",repository,"--control","control","--from","repository.json","--apply","--authority","repo-authority.json","--json"],{cwd:root,runtimeProvider:provider});
+  assert.equal(registered.exitCode,0,registered.stderr); assert.equal(JSON.parse(registered.stdout).data.status,"registered");
+  assert.equal(prompts.length,2); assert.equal(prompts[0].preview.operations.length,7); assert.equal(prompts[1].preview.operations.length,1);
+});
+
+test("interactive decline receives the exact preview and performs no init or repo-add write",async t => {
+  const {root,control}=await controlRepository(t);
+  const signer=authoritySigner();
+  const initAuthority=signer.record({record_id:"AUTH-20260901-0001",command:"init",targets:["PVT_org","TOSS-Soft/toss-os-control"],expected_revisions:[{repository:"TOSS-Soft/toss-os-control",revision:null},{repository:null,revision:"project-1"}]});
+  const repository="TOSS-Soft/toss-example";
+  const repoAuthority=signer.record({record_id:"AUTH-20260901-0002",command:"repo.add",targets:[repository],expected_revisions:[{repository,revision:"repo-1"}]});
+  await writeFile(join(root,"init-authority.json"),JSON.stringify(initAuthority),"utf8"); await writeFile(join(root,"repo-authority.json"),JSON.stringify(repoAuthority),"utf8"); await writeFile(join(root,"repository.json"),JSON.stringify({default_branch:"main",project_owner:"TOSS-Soft",project_number:7}),"utf8");
+  const events=[]; const declined=[];
+  const declineProvider=runtimeProvider({github:fakeGitHub(events),authorityRegistry:signer.registry,prompt:async request => { declined.push(request.preview); return false; }});
+  const initDeclined=await runProgrammatic(["init","--control","control","--apply","--authority","init-authority.json","--json"],{cwd:root,runtimeProvider:declineProvider});
+  assert.equal(initDeclined.exitCode,4); assert.equal(JSON.parse(initDeclined.stdout).error.code,"CORE_BLOCKED"); assert.equal(declined[0].operations.length,7); assert.deepEqual(events,["snapshot:bootstrap"]);
+  const acceptProvider=runtimeProvider({github:fakeGitHub(events),authorityRegistry:signer.registry});
+  const initialized=await runProgrammatic(["init","--control","control","--apply","--non-interactive","--authority","init-authority.json","--json"],{cwd:root,runtimeProvider:acceptProvider});
+  assert.equal(initialized.exitCode,0,initialized.stderr); const headBefore=(await readFile(join(control,".git","HEAD"),"utf8"));
+  events.length=0;
+  const repoDeclined=await runProgrammatic(["repo","add",repository,"--control","control","--from","repository.json","--apply","--authority","repo-authority.json","--json"],{cwd:root,runtimeProvider:declineProvider});
+  assert.equal(repoDeclined.exitCode,4); assert.equal(JSON.parse(repoDeclined.stdout).error.code,"CORE_BLOCKED"); assert.equal(declined[1].operations.length,1); assert.deepEqual(events,["snapshot:repository-registration"]); assert.equal(await readFile(join(control,".git","HEAD"),"utf8"),headBefore);
 });
 
 test("legacy toss feature status retains its established JSON failure contract",() => {

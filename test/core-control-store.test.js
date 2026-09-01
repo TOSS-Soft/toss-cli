@@ -106,7 +106,11 @@ function receiptFor(number) {
   return {...receipt(),receipt_id:`RECEIPT-20260901-${number}`};
 }
 
-function receiptForIntent(value,{number="0001",observed_revisions=[]}={}) {
+function receiptForIntent(value,{number="0001",observed_revisions=value.operations.map(operation => ({
+  operation_id:operation.operation_id,
+  repository:operation.repository,
+  revision:operation.expected_revision,
+}))}={}) {
   return {
     ...receiptFor(number),
     intent_id:value.intent_id,
@@ -302,6 +306,25 @@ test("receipts require one matching persisted intent and remain immutable when b
   const withoutCreatedAt={...bound};
   delete withoutCreatedAt.created_at;
   await assert.rejects(store.commitReceipt({expectedHead:first.commit_sha,receipt:withoutCreatedAt}),/created_at|invalid/i);
+});
+
+test("completed receipts require one observation for every intent operation",async t => {
+  const root=await createRepository(t);
+  const store=createCoreControlStore({repository:control(root)});
+  const {schema_version,document_type,...input}=intent();
+  void schema_version; void document_type;
+  const planned=createOperationIntent({...input,operations:[
+    {resource:"repository",action:"register",repository:"TOSS-Soft/toss-cli",expected_revision:"r1",payload:{kind:"one"}},
+    {resource:"project",action:"update",repository:null,expected_revision:"p1",payload:{kind:"two"}},
+  ]});
+  const committed=await store.commitIntent({expectedHead:null,intent:planned});
+  const incomplete=receiptForIntent(planned,{number:"0002",observed_revisions:[{
+    operation_id:"OP-0001",repository:planned.operations[0].repository,revision:"r2",
+  }]});
+  await assert.rejects(
+    store.commitReceipt({expectedHead:committed.commit_sha,receipt:incomplete}),
+    /completed.*observation|coverage|intent operation/i,
+  );
 });
 
 test("receipt binding rejects duplicate persisted intent identities",async t => {
@@ -632,6 +655,20 @@ test("final index preparation failure rolls back before the durable CAS",async t
   assert.equal((await git(root,["diff","--cached","--name-only"])).stdout,"unrelated-staged.txt\n");
 });
 
+test("post-CAS lock cleanup failure preserves the published commit result",async t => {
+  const root=await createRepository(t);
+  const repositoryControl=controlWith(root,{removeLock:async () => {
+    const error=new Error("injected lock cleanup denial"); error.code="EACCES"; throw error;
+  }});
+  const committed=await repositoryControl.commitFiles({
+    expectedHead:null,
+    message:"published despite stale lock",
+    files:{"policies/lifecycle.yaml":{revision:"POLICY-0001"}},
+  });
+  assert.equal(await repositoryControl.head(),committed.commit_sha);
+  assert.deepEqual(await repositoryControl.readDocument("policies/lifecycle.yaml"),{revision:"POLICY-0001"});
+});
+
 test("findIntent rejects a duplicated persisted identity outside its canonical month",async t => {
   const root=await createRepository(t);
   const repositoryControl=control(root);
@@ -737,7 +774,7 @@ test("bootstrap commits its closed configuration, intent, and receipt in one unb
   const planned=createOperationIntent({intent_id:"INTENT-20260901-0001",created_at:"2026-09-01T08:00:00.000Z",command:"init",policy_revision:"POLICY-0001",source:{repository:controlRepository,revision:"abc123",sha256:"a".repeat(64)},authority:{record_id:"AUTH-20260901-0001",sha256:"a".repeat(64)},operations:[
     {resource:"repository",action:"create",repository:controlRepository,expected_revision:null,payload:{kind:"create-private-control-repository",private:true,files:hashes}},
     {resource:"repository",action:"update",repository:controlRepository,expected_revision:null,payload:{kind:"verify-default-branch-protection"}},
-    {resource:"project",action:"update",repository:null,expected_revision:null,payload:{kind:"discover-project-fields",project:bootOrganization.project}},
+    {resource:"project",action:"update",repository:null,expected_revision:"project-r1",payload:{kind:"discover-project-fields",project:bootOrganization.project}},
     ...[["organization-config",hashes.organization],["lifecycle-policy",hashes.lifecycle],["release-policy",hashes.release]].map(([kind,sha256]) => ({resource:"repository",action:"commit",repository:controlRepository,expected_revision:null,payload:{kind,sha256}})),
     {resource:"repository",action:"commit",repository:controlRepository,expected_revision:null,payload:{kind:"first-control-transaction",files:hashes}},
   ]});

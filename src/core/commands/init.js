@@ -14,13 +14,13 @@ function bootstrap(value) {
   exact(snapshot.source,["repository","revision","sha256"],"bootstrap source");
   exact(snapshot.control_repository,["exists","revision"],"bootstrap control repository");
   exact(snapshot.organization,["organization","project","policy_revision","lifecycle_policy","release_policy"],"bootstrap organization");
-  exact(snapshot.organization.project,["node_id","number"],"bootstrap project");
+  exact(snapshot.organization.project,["node_id","number","revision"],"bootstrap project");
   if (snapshot.kind!=="bootstrap" || snapshot.source.repository!==DEFAULT_CONTROL_REPOSITORY ||
       typeof snapshot.source.revision!=="string" || !/^[a-f0-9]{64}$/u.test(snapshot.source.sha256) ||
       typeof snapshot.control_repository.exists!=="boolean" ||
       !(snapshot.control_repository.revision===null || typeof snapshot.control_repository.revision==="string") ||
       typeof snapshot.organization.organization!=="string" || !snapshot.organization.organization ||
-      typeof snapshot.organization.project.node_id!=="string" || !Number.isInteger(snapshot.organization.project.number) || snapshot.organization.project.number<1 ||
+      typeof snapshot.organization.project.node_id!=="string" || !Number.isInteger(snapshot.organization.project.number) || snapshot.organization.project.number<1 || typeof snapshot.organization.project.revision!=="string" || !/\S/u.test(snapshot.organization.project.revision) ||
       typeof snapshot.organization.policy_revision!=="string" ||
       snapshot.control_repository.exists!==(snapshot.control_repository.revision!==null) ||
       snapshot.organization.lifecycle_policy?.revision!==snapshot.organization.policy_revision ||
@@ -29,7 +29,7 @@ function bootstrap(value) {
 }
 
 function organizationFor(snapshot) {
-  const organization=Object.freeze({schema_version:"organization-config.v1",organization:snapshot.organization.organization,project:snapshot.organization.project,control_repository:DEFAULT_CONTROL_REPOSITORY,policy_revision:snapshot.organization.policy_revision,repositories:[]});
+  const organization=Object.freeze({schema_version:"organization-config.v1",organization:snapshot.organization.organization,project:Object.freeze({node_id:snapshot.organization.project.node_id,number:snapshot.organization.project.number}),control_repository:DEFAULT_CONTROL_REPOSITORY,policy_revision:snapshot.organization.policy_revision,repositories:[]});
   validateCoreDocument(organization,"organization-config.v1");
   return organization;
 }
@@ -38,11 +38,12 @@ function operationsFor(snapshot,organization) {
   const revision=snapshot.control_repository.revision;
   const repository=DEFAULT_CONTROL_REPOSITORY;
   const project=snapshot.organization.project;
+  const projectIdentity=Object.freeze({node_id:project.node_id,number:project.number});
   const hashes=Object.freeze({organization:sha256Canonical(organization),lifecycle:sha256Canonical(snapshot.organization.lifecycle_policy),release:sha256Canonical(snapshot.organization.release_policy)});
   return Object.freeze([
     {resource:"repository",action:"create",repository,expected_revision:revision,payload:{kind:"create-private-control-repository",private:true,files:hashes}},
     {resource:"repository",action:"update",repository,expected_revision:revision,payload:{kind:"verify-default-branch-protection"}},
-    {resource:"project",action:"update",repository:null,expected_revision:null,payload:{kind:"discover-project-fields",project}},
+    {resource:"project",action:"update",repository:null,expected_revision:project.revision,payload:{kind:"discover-project-fields",project:projectIdentity}},
     {resource:"repository",action:"commit",repository,expected_revision:revision,payload:{kind:"organization-config",sha256:hashes.organization}},
     {resource:"repository",action:"commit",repository,expected_revision:revision,payload:{kind:"lifecycle-policy",sha256:hashes.lifecycle}},
     {resource:"repository",action:"commit",repository,expected_revision:revision,payload:{kind:"release-policy",sha256:hashes.release}},
@@ -108,6 +109,7 @@ export async function runInitCommand(command,services) {
   const intent=createOperationIntent({intent_id:services.idGenerator("intent"),created_at:services.clock(),command:"init",policy_revision:snapshot.organization.policy_revision,source:snapshot.source,authority:authority===null ? null : authorityReference(authority),operations:operationsFor(snapshot,organization)});
   const preview=operationPreview(intent);
   if (!command.options.apply || command.options.dryRun) return preview;
+  if (command.interactive && await ownDataFunction(services,"confirm","services")(preview)!==true) throw new CoreBlockedError("Interactive apply was not confirmed");
   if (typeof services.operations.verifyAuthorityFor!=="function") throw new CoreValidationError("Operation runner does not expose bootstrap authority verification");
   await services.operations.verifyAuthorityFor(intent,authority);
   const inspect=ownDataFunction(services.github,"inspect","github");

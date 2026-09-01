@@ -119,24 +119,17 @@ export async function runCoreCli(argv,{cwd,stdin,stdout,stderr,runtimeProvider}=
     json=command.options.json;
     const request=Object.freeze({cwd,stdin,command});
     const context=await coreContext(runtimeProvider,request);
-    if (command.options.apply && command.interactive) {
-      if (typeof context.prompt!=="function") {
+    const {prompt,...dispatchContext}=context;
+    if (command.options.apply && command.interactive && ["init","repo.add"].includes(command.name)) {
+      if (typeof prompt!=="function") {
         throw new CoreCliError(
           "CONFIRMATION_REQUIRED",
           "Interactive apply requires an injected confirmation capability",
           CORE_EXIT_CODES.BLOCKED,
         );
       }
-      const accepted=await Reflect.apply(context.prompt,undefined,[Object.freeze({
-        kind:"confirm-apply",command,
-      })]);
-      if (accepted!==true) {
-        throw new CoreCliError(
-          "APPLY_NOT_CONFIRMED","Interactive apply was not confirmed",CORE_EXIT_CODES.BLOCKED,
-        );
-      }
+      dispatchContext.confirm=async preview => Reflect.apply(prompt,undefined,[Object.freeze({kind:"confirm-apply",command,preview})]);
     }
-    const {prompt,...dispatchContext}=context;
     dispatched=await dispatchCoreCommand(command,dispatchContext);
   } catch (error) {
     dispatched=renderFailure(error);

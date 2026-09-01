@@ -99,7 +99,8 @@ function bootstrapProof({organization,lifecycle,release,intent,receipt}) {
   const create=byKind.get("create-private-control-repository"); const discover=byKind.get("discover-project-fields");
   exactShape(create,{operation_id:create.operation_id,resource:"repository",action:"create",repository:organization.control_repository,expected_revision:null,payload:{kind:"create-private-control-repository",private:true,files:hashes}},"bootstrap repository creation");
   exactShape(byKind.get("verify-default-branch-protection"),{operation_id:byKind.get("verify-default-branch-protection").operation_id,resource:"repository",action:"update",repository:organization.control_repository,expected_revision:null,payload:{kind:"verify-default-branch-protection"}},"bootstrap branch protection verification");
-  exactShape(discover,{operation_id:discover.operation_id,resource:"project",action:"update",repository:null,expected_revision:null,payload:{kind:"discover-project-fields",project:organization.project}},"bootstrap project discovery");
+  if (typeof discover.expected_revision!=="string" || !discover.expected_revision) throw ledgerConflict("bootstrap project discovery must bind an exact project revision");
+  exactShape(discover,{operation_id:discover.operation_id,resource:"project",action:"update",repository:null,expected_revision:discover.expected_revision,payload:{kind:"discover-project-fields",project:organization.project}},"bootstrap project discovery");
   for (const [kind,hash] of [["organization-config",hashes.organization],["lifecycle-policy",hashes.lifecycle],["release-policy",hashes.release]]) {
     const operation=byKind.get(kind);
     exactShape(operation,{operation_id:operation.operation_id,resource:"repository",action:"commit",repository:organization.control_repository,expected_revision:null,payload:{kind,sha256:hash}},"bootstrap document commit");
@@ -354,11 +355,17 @@ export function createCoreControlStore({repository}) {
       throw new Error(`receipt intent hash does not match persisted intent: ${receipt.intent_id}`);
     }
     const operations=new Map(intent.operations.map(operation => [operation.operation_id,operation]));
+    const observedIds=new Set();
     for (const observed of receipt.observed_revisions) {
       const operation=operations.get(observed.operation_id);
-      if (!operation || operation.repository!==observed.repository) {
+      if (!operation || operation.repository!==observed.repository || observedIds.has(observed.operation_id)) {
         throw new Error(`receipt observed revision is incompatible with intent operation: ${observed.operation_id}`);
       }
+      observedIds.add(observed.operation_id);
+    }
+    if (receipt.status==="completed" && (observedIds.size!==operations.size ||
+        intent.operations.some(operation => !observedIds.has(operation.operation_id)))) {
+      throw new Error("completed receipt must observe every intent operation exactly once");
     }
   }
 

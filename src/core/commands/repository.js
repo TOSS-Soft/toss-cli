@@ -71,7 +71,7 @@ async function add(command,services) {
   }
   const authority=await requireAuthority(command,services);
   const operation=Object.freeze({resource:"repository",action:"register",repository,expected_revision:snapshot.repository.revision,payload:Object.freeze({kind:"repository-registration",repository_config:desired,access:snapshot.repository.access,rules:snapshot.repository.rules,project:snapshot.project})});
-  const outcome=await ownDataFunction(services.operations,"execute","operations")({command,source:snapshot.source,operations:[operation],authority});
+  const outcome=await ownDataFunction(services.operations,"execute","operations")({command,source:snapshot.source,operations:[operation],authority,...(command.options.apply && command.interactive ? {confirm:ownDataFunction(services,"confirm","services")} : {})});
   if (!command.options.apply || command.options.dryRun) return outcome;
   const latest=await ownDataFunction(services.control,"loadRegistryState","control")();
   const present=latest.repositories.find(value => value.repository===repository);

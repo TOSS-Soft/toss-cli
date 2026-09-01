@@ -274,20 +274,17 @@ test("core CLI renders usage and internal failures to the correct stream for hum
   }
 });
 
-test("core CLI confirms interactive apply and permits non-interactive apply without a prompt",async () => {
+test("core CLI reserves exact confirmation for implemented interactive applies",async () => {
   const missing=cliOptions();
-  assert.equal(
-    await runCoreCli(["feature","add","Core lifecycle","--apply","--json"],missing.options),
-    4,
-  );
-  assert.equal(JSON.parse(missing.stdout.read()).error.code,"CONFIRMATION_REQUIRED");
+  assert.equal(await runCoreCli(["feature","add","Core lifecycle","--apply","--json"],missing.options),69);
+  assert.equal(JSON.parse(missing.stdout.read()).error.code,"COMMAND_NOT_IMPLEMENTED");
 
   const rejected=cliOptions(async () => ({prompt:async () => false}));
   assert.equal(
     await runCoreCli(["feature","add","Core lifecycle","--apply","--json"],rejected.options),
-    4,
+    69,
   );
-  assert.equal(JSON.parse(rejected.stdout.read()).error.code,"APPLY_NOT_CONFIRMED");
+  assert.equal(JSON.parse(rejected.stdout.read()).error.code,"COMMAND_NOT_IMPLEMENTED");
 
   let confirmations=0;
   const accepted=cliOptions(async ({command}) => ({
@@ -302,7 +299,7 @@ test("core CLI confirms interactive apply and permits non-interactive apply with
     await runCoreCli(["feature","add","Core lifecycle","--apply","--json"],accepted.options),
     69,
   );
-  assert.equal(confirmations,1);
+  assert.equal(confirmations,0);
   assert.equal(JSON.parse(accepted.stdout.read()).error.code,"COMMAND_NOT_IMPLEMENTED");
 
   const automated=cliOptions();

@@ -12,7 +12,7 @@ import {runInitCommand} from "./init.js";
 import {runRepositoryCommand} from "./repository.js";
 
 const FOUNDATION_COMMANDS=new Set(["init","repo.add","repo.list"]);
-const CONTEXT_KEYS=new Set(["handlers","services"]);
+const CONTEXT_KEYS=new Set(["handlers","services","confirm"]);
 const BUILTIN_HANDLERS=Object.freeze({
   init:runInitCommand,
   "repo.add":runRepositoryCommand,
@@ -94,6 +94,11 @@ function normalizeContext(context) {
   const record=dataRecord(context,"core dispatch context",CONTEXT_KEYS);
   const normalized=Object.create(null);
   if (Object.hasOwn(record,"services")) normalized.services=record.services;
+  if (Object.hasOwn(record,"confirm")) {
+    if (typeof record.confirm!=="function" || utilTypes.isProxy(record.confirm)) throw new TypeError("core dispatch confirmation must be a non-proxy function");
+    if (!normalized.services || ![Object.prototype,null].includes(Object.getPrototypeOf(normalized.services))) throw new TypeError("core dispatch confirmation requires plain services");
+    normalized.services=Object.freeze({...normalized.services,confirm:record.confirm});
+  }
   if (Object.hasOwn(record,"handlers")) {
     const handlers=dataRecord(record.handlers,"core command handlers",FOUNDATION_COMMANDS);
     for (const [name,handler] of Object.entries(handlers)) {

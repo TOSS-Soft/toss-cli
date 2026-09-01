@@ -92,6 +92,17 @@ test("apply persists the intent before its remote call and a bound receipt after
   assert.deepEqual(events,["intent","inspect","apply","receipt"]);
 });
 
+test("retry rejects a persisted completed receipt that omits an intent observation",async () => {
+  const intent=createOperationIntent(operationInput());
+  const incomplete={schema_version:"operation-receipt.v1",document_type:"operation-receipt",receipt_id:"RECEIPT-20260901-0001",intent_id:intent.intent_id,intent_sha256:sha256Canonical(intent),created_at:"2026-09-01T08:01:00.000Z",status:"completed",observed_revisions:[]};
+  const runner=createOperationRunner({
+    control:{async head() { return "head-0"; },async findIntent() { return null; },async findReceipt() { return incomplete; },async commitIntent() { throw new Error("must not commit"); },async commitReceipt() { throw new Error("must not commit"); }},
+    github:{async snapshot() { return {}; },async inspect() { throw new Error("must not inspect"); },async apply() { throw new Error("must not apply"); }},
+    authorityRegistry:null,clock:() => "2026-09-01T08:01:00.000Z",idGenerator:() => "RECEIPT-20260901-0001",policyRevision:() => "POLICY-0001",
+  });
+  await assert.rejects(runner.apply(intent,{authority:null}),CoreConflictError);
+});
+
 test("a stale inspected revision is a conflict with no remote apply",async () => {
   const events=[];
   const runner=createOperationRunner({
@@ -413,4 +424,15 @@ test("runner authority binding uses raw canonical ordering for punctuation-beari
     },authorityRegistry:{keys:[{key_id:"approver",actor:"independent-approver",public_key:publicKey.export({format:"pem",type:"spki"}).toString()}]},clock:() => "2026-09-01T08:00:00.000Z",idGenerator:() => "RECEIPT-20260901-0001",policyRevision:() => "POLICY-0001",
   });
   assert.equal((await runner.apply(intent,{authority})).status,"completed");
+});
+
+test("authority binds a Project-only operation identity and revision",async () => {
+  const {privateKey,publicKey}=generateKeyPairSync("ed25519");
+  const unsigned={schema_version:"authority-record.v1",document_type:"authority-record",record_id:"AUTH-20260901-0001",actor:"independent-approver",command:"init",targets:["PVT_project"],expected_revisions:[{repository:null,revision:"project-r1"}],policy_revision:"POLICY-0001",issued_at:"2026-09-01T07:00:00.000Z",expires_at:"2026-09-01T09:00:00.000Z"};
+  const authority={...unsigned,signature:{algorithm:"ed25519",key_id:"approver",value:sign(null,Buffer.from(canonicalJson(unsigned)),privateKey).toString("base64")}};
+  const intent=createOperationIntent({...operationInput(),command:"init",authority:authorityReference(authority),operations:[{resource:"project",action:"update",repository:null,expected_revision:"project-r1",payload:{project:{node_id:"PVT_project",number:7}}}]});
+  const runner=createOperationRunner({control:memoryControl(),github:{async snapshot() { return {}; },async inspect(operations) { return operations.map(operation => ({operation_id:operation.operation_id,repository:operation.repository,revision:operation.expected_revision})); },async apply(operations) { return {status:"completed",observed_revisions:operations.map(operation => ({operation_id:operation.operation_id,repository:operation.repository,revision:"project-r2"}))}; }},authorityRegistry:{keys:[{key_id:"approver",actor:"independent-approver",public_key:publicKey.export({format:"pem",type:"spki"}).toString()}]},clock:() => "2026-09-01T08:00:00.000Z",idGenerator:() => "RECEIPT-20260901-0001",policyRevision:() => "POLICY-0001"});
+  assert.equal((await runner.apply(intent,{authority})).status,"completed");
+  const tampered=createOperationIntent({...operationInput(),command:"init",authority:authorityReference(authority),operations:[{resource:"project",action:"update",repository:null,expected_revision:"project-r1",payload:{project:{node_id:"PVT_other",number:7}}}]});
+  await assert.rejects(runner.apply(tampered,{authority}),CoreBlockedError);
 });

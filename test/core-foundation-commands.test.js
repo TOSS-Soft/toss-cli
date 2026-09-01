@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import {mkdir,mkdtemp, rm, symlink, writeFile} from "node:fs/promises";
+import {mkdir,mkdtemp, realpath, rm, symlink, writeFile} from "node:fs/promises";
 import {tmpdir} from "node:os";
 import {join} from "node:path";
 import test from "node:test";
@@ -17,7 +17,7 @@ const command=argv => parseCoreCommand(argv);
 const source=(repository,revision="remote-1") => ({repository,revision,sha256:SHA});
 
 function bootstrapSnapshot({exists=false}={}) {
-  return {kind:"bootstrap",source:source("TOSS-Soft/toss-os-control",exists ? "remote-2" : "remote-0"),control_repository:{exists,revision:exists ? "remote-2" : null},organization:{organization:"TOSS-Soft",project:{node_id:"PVT_org",number:7},policy_revision:"POLICY-0001",lifecycle_policy:{revision:"POLICY-0001",states:["Backlog","Ready"]},release_policy:{revision:"POLICY-0001",gates:["NONE","RECONCILE_REQUIRED"]}}};
+  return {kind:"bootstrap",source:source("TOSS-Soft/toss-os-control",exists ? "remote-2" : "remote-0"),control_repository:{exists,revision:exists ? "remote-2" : null},organization:{organization:"TOSS-Soft",project:{node_id:"PVT_org",number:7,revision:"project-1"},policy_revision:"POLICY-0001",lifecycle_policy:{revision:"POLICY-0001",states:["Backlog","Ready"]},release_policy:{revision:"POLICY-0001",gates:["NONE","RECONCILE_REQUIRED"]}}};
 }
 function registrationSnapshot(repository,{node="R_1",revision="repo-1"}={}) {
   return {kind:"repository-registration",source:source(repository,revision),repository:{node_id:node,default_branch:"main",revision,access:{admin:true},rules:{default_branch_protected:true},project_item_id:"PVTI_1"},project:{node_id:"PVT_org",number:7,fields:{status:"FIELD_STATUS",gate:"FIELD_GATE"}}};
@@ -118,6 +118,18 @@ test("runtime assembles only explicit own-data services and rejects malicious po
   Object.defineProperty(hiddenGithub,"apply",{enumerable:false,value:async () => ({status:"completed",observed_revisions:[]})});
   assert.throws(() => createCoreRuntime({cwd:"/workspace",controlPath:"control",execFile:async () => ({}),github:hiddenGithub,clock:() => 0,idGenerator:() => "INTENT-20260901-0001",authorityRegistry:{keys:[]},inputReader:reader,policyRevision:() => "POLICY-0001"}),/hidden|exact/i);
   assert.throws(() => createCoreRuntime({cwd:"/workspace",controlPath:"../control",execFile:async () => ({}),github,clock:() => 0,idGenerator:() => "INTENT-20260901-0001",authorityRegistry:{keys:[]},inputReader:reader,policyRevision:() => "POLICY-0001"}),/safe relative/i);
+});
+
+test("runtime rejects a stable symlinked cwd parent before control operations",async t => {
+  const root=await mkdtemp(join(tmpdir(),"toss-core-runtime-path-"));
+  t.after(() => rm(root,{recursive:true,force:true}));
+  const physicalRoot=await realpath(root);
+  const real=join(physicalRoot,"real"); const alias=join(physicalRoot,"alias");
+  await mkdir(real); await symlink(real,alias);
+  const github=Object.freeze({async snapshot() { return {}; },async inspect() { return []; },async apply() { return {status:"completed",observed_revisions:[]}; }});
+  const reader=Object.freeze({async readInput() { return {}; },async readAuthority() { return authorityFixture(); }});
+  assert.throws(() => createCoreRuntime({cwd:alias,controlPath:"missing/control",execFile:async () => ({}),github,clock:() => 0,idGenerator:() => "INTENT-20260901-0001",authorityRegistry:{keys:[]},inputReader:reader,policyRevision:() => "POLICY-0001"}),/symbolic|symlink/i);
+  assert.doesNotThrow(() => createCoreRuntime({cwd:real,controlPath:"missing/control",execFile:async () => ({}),github,clock:() => 0,idGenerator:() => "INTENT-20260901-0001",authorityRegistry:{keys:[]},inputReader:reader,policyRevision:() => "POLICY-0001"}));
 });
 test("core router dispatches only foundation handlers without importing later families",async () => {
   const {dispatchCoreCommand}=await import("../src/core/commands/router.js");

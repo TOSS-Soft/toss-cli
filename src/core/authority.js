@@ -47,7 +47,7 @@ function sortedRevisions(values,label) {
   const repositories=new Set();
   for (const value of values) {
     exact(value,["repository","revision"],label);
-    if (typeof value.repository!=="string" || !(value.revision===null || typeof value.revision==="string")) blocked(`${label} is malformed`);
+    if (!(value.repository===null || typeof value.repository==="string") || !(value.revision===null || typeof value.revision==="string")) blocked(`${label} is malformed`);
     if (repositories.has(value.repository)) blocked(`${label} must not repeat a repository`);
     repositories.add(value.repository);
     const encoded=canonicalJson(value);

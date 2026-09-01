@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {validateDocument} from "../src/contracts/validator.js";
+import {validateCoreDocument} from "../src/core/contracts.js";
 
 const SOURCE={
   repository:"TOSS-Soft/toss-console",
@@ -138,6 +139,24 @@ test("operation receipts require lowercase SHA-256 intent hashes",() => {
     ...RECEIPT,
     intent_sha256:"A".repeat(64),
   },"operation-receipt.v1").valid,false);
+});
+
+test("persisted intents reject ascending IDs paired with noncanonical operation content",() => {
+  const reordered={
+    ...INTENT,
+    operations:[
+      {...INTENT.operations[0],payload:{default_branch:"z"}},
+      {...INTENT.operations[0],operation_id:"OP-0002",payload:{default_branch:"a"}},
+    ],
+  };
+  assert.throws(
+    () => validateCoreDocument(reordered,"operation-intent.v1"),
+    /canonical operation order/i,
+  );
+  assert.doesNotThrow(() => validateCoreDocument({...reordered,operations:[
+    {...reordered.operations[1],operation_id:"OP-0001"},
+    {...reordered.operations[0],operation_id:"OP-0002"},
+  ]},"operation-intent.v1"));
 });
 
 test("core operation intent is closed and operation IDs are unique",async () => {

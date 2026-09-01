@@ -3,7 +3,7 @@ import {types} from "node:util";
 import {canonicalJson,sha256Canonical} from "../../contracts/acp.js";
 import {validateCoreDocument} from "../contracts.js";
 import {CoreValidationError} from "../errors.js";
-import {compareCanonicalText} from "../canonical-order.js";
+import {compareOperations} from "../operation-order.js";
 
 function fail(message) {
   throw new CoreValidationError(message);
@@ -49,13 +49,6 @@ function exactKeys(value,keys,label) {
   }
 }
 
-function nullFirst(left,right) {
-  if (left===right) return 0;
-  if (left===null) return -1;
-  if (right===null) return 1;
-  return left<right ? -1 : 1;
-}
-
 function normalizeOperation(value) {
   exactKeys(value,["resource","action","repository","expected_revision","payload"],"operation");
   return Object.freeze({
@@ -65,18 +58,6 @@ function normalizeOperation(value) {
     expected_revision:value.expected_revision,
     payload:value.payload,
   });
-}
-
-function compareOperations(left,right) {
-  for (const [a,b] of [[left.repository,right.repository],[left.resource,right.resource],[left.action,right.action]]) {
-    const comparison=nullFirst(a,b);
-    if (comparison!==0) return comparison;
-  }
-  const payload=compareCanonicalText(canonicalJson(left.payload),canonicalJson(right.payload));
-  if (payload!==0) return payload;
-  const revision=nullFirst(left.expected_revision,right.expected_revision);
-  if (revision!==0) return revision;
-  return compareCanonicalText(canonicalJson(left),canonicalJson(right));
 }
 
 export function createOperationIntent(input) {

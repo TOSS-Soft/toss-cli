@@ -56,11 +56,13 @@ function observed(value) {
 function expectedAuthorityBinding(intent,now,implementationActor) {
   const revisions=new Map();
   for (const operation of intent.operations) {
-    if (operation.repository===null) continue;
-    if (revisions.has(operation.repository) && revisions.get(operation.repository)!==operation.expected_revision) throw new CoreBlockedError("Authority cannot bind conflicting expected revisions for one repository");
-    revisions.set(operation.repository,operation.expected_revision);
+    const target=operation.repository ?? (operation.resource==="project" ? operation.payload?.project?.node_id : null);
+    if (typeof target!=="string" || !target) throw new CoreBlockedError("Authority cannot bind an operation without an explicit target identity");
+    const binding=Object.freeze({repository:operation.repository,revision:operation.expected_revision});
+    if (revisions.has(target) && canonicalJson(revisions.get(target))!==canonicalJson(binding)) throw new CoreBlockedError("Authority cannot bind conflicting expected revisions for one target");
+    revisions.set(target,binding);
   }
-  const expected_revisions=[...revisions].map(([repository,revision]) => Object.freeze({repository,revision})).sort(compareCanonicalValue);
+  const expected_revisions=[...revisions.values()].sort(compareCanonicalValue);
   return Object.freeze({
     command:intent.command,
     targets:[...revisions.keys()].sort(compareCanonicalText),
@@ -112,6 +114,13 @@ function exactReceipt(value,intent) {
     throw new CoreConflictError("Operation receipt ledger is corrupt",{cause:error});
   }
   if (receipt.intent_id!==intent.intent_id || receipt.intent_sha256!==sha256Canonical(intent)) throw new CoreConflictError("Operation receipt conflicts with the intent ledger");
+  if (receipt.status==="completed") {
+    const observations=new Map(receipt.observed_revisions.map(observation => [observation.operation_id,observation]));
+    if (observations.size!==receipt.observed_revisions.length || observations.size!==intent.operations.length ||
+        intent.operations.some(operation => observations.get(operation.operation_id)?.repository!==operation.repository)) {
+      throw new CoreConflictError("Completed operation receipt does not exactly cover the intent");
+    }
+  }
   return receipt;
 }
 
@@ -221,23 +230,33 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
   }
 
   async function execute(input) {
-    const request=clone(input,"execute request");
+    if (!input || typeof input!=="object" || Array.isArray(input) || types.isProxy(input)) throw new CoreValidationError("Operation execute request must be a plain non-proxy object");
+    const descriptors=Object.getOwnPropertyDescriptors(input);
+    const confirmation=descriptors.confirm?.value;
+    if (Object.hasOwn(descriptors,"confirm") && (!descriptors.confirm.enumerable || !("value" in descriptors.confirm) || typeof confirmation!=="function" || types.isProxy(confirmation))) throw new CoreValidationError("Operation confirmation callback must be an own-data non-proxy function");
+    const clean=Object.create(null);
+    for (const [key,descriptor] of Object.entries(descriptors)) {
+      if (key==="confirm") continue;
+      if (!descriptor.enumerable || !("value" in descriptor)) throw new CoreValidationError("Operation execute request contains an accessor or hidden field");
+      clean[key]=descriptor.value;
+    }
+    const request=clone(clean,"execute request");
     const requestKeys=Object.keys(request).sort();
     const allowed=["authority","command","operations","source"];
-    const confirmedAllowed=[...allowed,"confirmed"].sort();
-    if (canonicalJson(requestKeys)!==canonicalJson(allowed) && canonicalJson(requestKeys)!==canonicalJson(confirmedAllowed)) {
+    if (canonicalJson(requestKeys)!==canonicalJson(allowed)) {
       throw new CoreValidationError("Operation execute request must use an exact closed shape");
     }
-    if (Object.hasOwn(request,"confirmed") && typeof request.confirmed!=="boolean") throw new CoreValidationError("Operation confirmation must be boolean");
     let commandValue;
     try { commandValue=validateParsedCoreCommand(request.command); } catch (error) {
       throw new CoreValidationError("Operation command is not an exact normalized core command",{cause:error});
     }
-    if (commandValue.options.apply!==true && request.confirmed===true) throw new CoreValidationError("Operation confirmation is valid only for apply");
-    if (commandValue.options.apply===true && commandValue.options.nonInteractive!==true && request.confirmed!==true) throw new CoreBlockedError("Interactive apply requires CLI confirmation");
+    if (commandValue.options.apply!==true && confirmation!==undefined) throw new CoreValidationError("Operation confirmation is valid only for apply");
+    if (commandValue.options.apply===true && commandValue.options.nonInteractive!==true && confirmation===undefined) throw new CoreBlockedError("Interactive apply requires CLI confirmation");
     const suppliedAuthority=request.authority===null ? null : clone(request.authority,"authority");
     const intent=createOperationIntent({intent_id:idGenerator("intent"),created_at:clock(),command:commandValue.name,policy_revision:policyRevision(),source:request.source,authority:suppliedAuthority===null ? null : authorityReference(suppliedAuthority),operations:request.operations});
-    if (!commandValue.options.apply || commandValue.options.dryRun) return preview(intent);
+    const previewValue=await preview(intent);
+    if (!commandValue.options.apply || commandValue.options.dryRun) return previewValue;
+    if (confirmation!==undefined && await Reflect.apply(confirmation,undefined,[previewValue])!==true) throw new CoreBlockedError("Interactive apply was not confirmed");
     return apply(intent,{authority:suppliedAuthority});
   }
   return Object.freeze({preview,apply,execute,verifyAuthorityFor});
