@@ -46,8 +46,17 @@ async function add(command,services) {
   const organization=registry.organization;
   if (organization===null) throw new CoreBlockedError("Organization initialization or reconciliation is required before repository mutation");
   if (input.project_owner!==organization.organization || input.project_number!==organization.project.number) throw new CoreValidationError("Repository input does not bind the configured organization Project");
+  const snapshot=registration(await ownDataFunction(services.github,"snapshot","github")({kind:"repository-registration",repository,project:organization.project}),repository);
+  if (snapshot.project.node_id!==organization.project.node_id || snapshot.project.number!==organization.project.number || snapshot.repository.default_branch!==input.default_branch) throw new CoreConflictError("Repository registration snapshot does not match the requested Project or default branch");
+  const desired=desiredConfig(repository,input,snapshot,services.clock);
+  const existing=registry.repositories.find(value => value.repository===repository) ?? null;
+  if (existing!==null) {
+    if (!sameRegistration(existing,desired)) throw new CoreConflictError("Repository identity is already registered with different node or configuration");
+    return Object.freeze({status:"already-registered",repository,control_revision:registry.revision});
+  }
   const pending=await ownDataFunction(services.control,"findCompletedRepositoryRegistration","control")(repository);
   if (pending!==null) {
+    if (!sameRegistration(pending.configuration,desired)) throw new CoreConflictError("Completed repository registration does not match current repository snapshot");
     if (!command.options.apply || command.options.dryRun) return Object.freeze({status:"recovery-preview",repository,control_revision:registry.revision,receipt:pending.receipt,configuration:pending.configuration});
     const authority=await requireAuthority(command,services);
     await ownDataFunction(services.operations,"verifyAuthorityFor","operations")(pending.intent,authority);
@@ -59,14 +68,6 @@ async function add(command,services) {
       if (error?.code==="CONTROL_LEDGER_CONFLICT") throw new CoreConflictError("Repository registration configuration commit conflicted",{cause:error});
       throw new CoreInternalError("Repository registration configuration commit failed",{cause:error});
     }
-  }
-  const snapshot=registration(await ownDataFunction(services.github,"snapshot","github")({kind:"repository-registration",repository,project:organization.project}),repository);
-  if (snapshot.project.node_id!==organization.project.node_id || snapshot.project.number!==organization.project.number || snapshot.repository.default_branch!==input.default_branch) throw new CoreConflictError("Repository registration snapshot does not match the requested Project or default branch");
-  const desired=desiredConfig(repository,input,snapshot,services.clock);
-  const existing=registry.repositories.find(value => value.repository===repository) ?? null;
-  if (existing!==null) {
-    if (!sameRegistration(existing,desired)) throw new CoreConflictError("Repository identity is already registered with different node or configuration");
-    return Object.freeze({status:"already-registered",repository,control_revision:await ownDataFunction(services.control,"head","control")()});
   }
   const authority=await requireAuthority(command,services);
   const operation=Object.freeze({resource:"repository",action:"register",repository,expected_revision:snapshot.repository.revision,payload:Object.freeze({kind:"repository-registration",repository_config:desired,access:snapshot.repository.access,rules:snapshot.repository.rules,project:snapshot.project})});
