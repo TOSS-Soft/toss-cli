@@ -58,7 +58,18 @@ function snapshot(kind="issue") {
     epic_required:false,
     prepared:kind==="epic" ? true : null,
     scope_approved:kind==="epic" ? true : null,
-    release:{assigned:true,active:true},
+    parent:kind==="issue" ? {
+      id:`${REPOSITORY}#42`,
+      branch:"epic/42-organizational-lifecycle",
+      revision:"issue-42@8",
+    } : null,
+    release:{
+      assigned:true,
+      active:true,
+      branch:"release/v2.2.0",
+      milestone:"v2.2.0",
+      revision:"release-v2.2.0@3",
+    },
     blocking_dependencies:[],
     children_complete:kind==="epic" ? true : null,
     physical_branch:{exists:false,head_sha:null},
@@ -310,10 +321,74 @@ test("Ready requires exact governing branch and assigned release evidence",() =>
 
   for (const kind of ["issue","epic","bug"]) {
     const backlog=snapshot(kind);
-    backlog.release={assigned:false,active:false};
-    backlog.item.base_branch=null;
+    backlog.release={
+      assigned:false,active:false,branch:null,milestone:null,revision:null,
+    };
+    if (kind!=="issue") backlog.item.base_branch=null;
     backlog.item.milestone=null;
     assert.equal(deriveWorkItemState(backlog).gate,"RELEASE_PLANNING",kind);
+  }
+});
+
+test("a same-number branch that is not the reserved parent branch cannot become Ready",() => {
+  const value=snapshot();
+  value.item.base_branch="epic/42-not-the-reserved-parent-branch";
+
+  assert.throws(
+    () => deriveWorkItemState(value),
+    error => error instanceof CoreValidationError && error.exitCode===5,
+  );
+});
+
+test("governing parent and release evidence is exact and revision-bound",() => {
+  assert.equal(deriveWorkItemState(snapshot()).status,"Ready");
+
+  const wrongParentId=snapshot();
+  wrongParentId.parent.id=`${REPOSITORY}#41`;
+
+  const wrongParentBranch=snapshot();
+  wrongParentBranch.parent.branch="epic/41-another-parent";
+
+  const missingParentRevision=snapshot();
+  missingParentRevision.parent.revision="";
+
+  const missingParent=snapshot();
+  missingParent.parent=null;
+
+  const unexpectedParent=snapshot("epic");
+  unexpectedParent.parent={
+    id:`${REPOSITORY}#42`,branch:"epic/42-organizational-lifecycle",revision:"issue-42@8",
+  };
+
+  const unassignedWithRelease=snapshot("epic");
+  unassignedWithRelease.release.assigned=false;
+  unassignedWithRelease.release.active=false;
+
+  const assignedWithoutBranch=snapshot("epic");
+  assignedWithoutBranch.release.branch=null;
+
+  const mismatchedReleaseMilestone=snapshot("epic");
+  mismatchedReleaseMilestone.release.milestone="v2.2.1";
+
+  const missingReleaseRevision=snapshot("bug");
+  missingReleaseRevision.release.revision=null;
+
+  const itemReleaseMismatch=snapshot("bug");
+  itemReleaseMismatch.item.base_branch="release/v2.1.3";
+
+  const childMilestoneMismatch=snapshot();
+  childMilestoneMismatch.item.milestone="v2.2.1";
+
+  for (const value of [
+    wrongParentId,wrongParentBranch,missingParentRevision,missingParent,
+    unexpectedParent,unassignedWithRelease,assignedWithoutBranch,
+    mismatchedReleaseMilestone,missingReleaseRevision,itemReleaseMismatch,
+    childMilestoneMismatch,
+  ]) {
+    assert.throws(
+      () => deriveWorkItemState(value),
+      error => error instanceof CoreValidationError && error.exitCode===5,
+    );
   }
 });
 
@@ -361,12 +436,25 @@ test("a complete ready epic PR cannot suppress acceptance authority",() => {
   assert.equal(deriveWorkItemState(valid).gate,"REVIEW_REQUIRED");
 });
 
+test("an explicit READY epic release projection retains the recorded release-approval gate",() => {
+  const value=withCurrentApproval(withPullRequest(snapshot("epic")));
+  value.authority.release_approval_required=true;
+
+  const result=deriveWorkItemState(value);
+  assert.equal(result.status,"In review");
+  assert.equal(result.gate,"RELEASE_APPROVAL_REQUIRED");
+  assert.equal(result.next_command,"toss-core release approve");
+
+  value.review.reviewed_revision=HEAD_B;
+  assert.equal(deriveWorkItemState(value).gate,"REVIEW_REQUIRED");
+});
+
 test("merged closed evidence wins over stale readiness review and release flags",() => {
   const value=withPullRequest(snapshot("epic"),"MERGED");
   value.issue_state="CLOSED";
   value.prepared=false;
   value.scope_approved=false;
-  value.release={assigned:false,active:false};
+  value.release.active=false;
   value.blocking_dependencies=[`${REPOSITORY}#41`];
   value.review={verdict:"CHANGES_REQUESTED",reviewed_revision:HEAD_B};
   value.checks={state:"FAILED",revision:HEAD_B};
@@ -402,7 +490,9 @@ test("impossible snapshots fail validation before any decision rule",() => {
   checksWithoutPr.checks={state:"PASSED",revision:HEAD_A};
 
   const activeUnassigned=snapshot();
-  activeUnassigned.release={assigned:false,active:true};
+  activeUnassigned.release={
+    assigned:false,active:true,branch:null,milestone:null,revision:null,
+  };
 
   const approvedUnprepared=snapshot("epic");
   approvedUnprepared.prepared=false;

@@ -7,7 +7,7 @@ import {parseReservedBranch,parseWorkItemId} from "./identity.js";
 
 const SNAPSHOT_KEYS=Object.freeze([
   "schema_version","item","issue_state","drifted","epic_required","prepared",
-  "scope_approved","release","blocking_dependencies","children_complete",
+  "scope_approved","parent","release","blocking_dependencies","children_complete",
   "physical_branch","pull_request","review","checks","authority","project",
 ]);
 const PROJECT_FIELD_KEYS=Object.freeze([
@@ -163,26 +163,57 @@ function validateProject(project,item) {
   if (item.repository.length===0) invalid("Work state item repository must be non-empty");
 }
 
-function validateAssignedReleaseEvidence(item) {
-  if (item.base_branch===null || item.milestone===null) {
-    invalid("Assigned release work requires an exact governing base branch and milestone");
+function validateParentEvidence(item,parent) {
+  if (item.kind!=="issue") {
+    if (parent!==null) invalid("Only a child issue may carry governing parent evidence");
+    return;
   }
-  if (item.kind==="issue") {
-    const parent=validateWorkId(item.parent_id,"Child issue parent");
-    let base;
-    try {
-      base=parseReservedBranch(item.base_branch);
-    } catch (error) {
-      invalid("Child issue base must be the exact native parent epic branch",{cause:error});
+  exactKeys(parent,["id","branch","revision"],"Governing parent evidence");
+  const parentId=validateWorkId(parent.id,"Governing parent identity");
+  nonEmptyText(parent.revision,"Governing parent revision");
+  if (parent.id!==item.parent_id) {
+    invalid("Governing parent identity must equal the child parent identity");
+  }
+  let branch;
+  try {
+    branch=parseReservedBranch(parent.branch);
+  } catch (error) {
+    invalid("Governing parent branch must be a canonical reserved epic branch",{cause:error});
+  }
+  if (branch.kind!=="epic" || branch.issueNumber!==parentId.issueNumber) {
+    invalid("Governing parent identity and reserved epic branch must agree");
+  }
+  if (item.base_branch!==parent.branch) {
+    invalid("Child issue base must equal the exact revision-bound parent branch");
+  }
+}
+
+function validateReleaseEvidence(item,release) {
+  exactKeys(release,[
+    "assigned","active","branch","milestone","revision",
+  ],"Work state release evidence");
+  boolean(release.assigned,"Release assigned flag");
+  boolean(release.active,"Release active flag");
+  if (release.active && !release.assigned) invalid("An active release must be assigned");
+  if (!release.assigned) {
+    if (release.branch!==null || release.milestone!==null || release.revision!==null) {
+      invalid("An unassigned release cannot carry branch, milestone, or revision evidence");
     }
-    if (base.kind!=="epic" || base.issueNumber!==parent.issueNumber) {
-      invalid("Child issue base must be the exact native parent epic branch");
+    if (item.milestone!==null || (item.kind!=="issue" && item.base_branch!==null)) {
+      invalid("Unassigned work cannot retain release base or milestone assignment");
     }
     return;
   }
-  const release=RELEASE_BRANCH.exec(item.base_branch);
-  if (!release || item.milestone!==release[1]) {
-    invalid("Epic and bounded bug milestone must match the exact governing release branch version");
+  const match=typeof release.branch==="string" ? RELEASE_BRANCH.exec(release.branch) : null;
+  if (!match || release.milestone!==match[1]) {
+    invalid("Assigned release branch and milestone must identify the same exact version");
+  }
+  nonEmptyText(release.revision,"Assigned release revision");
+  if (item.milestone!==release.milestone) {
+    invalid("Assigned work milestone must equal the exact release milestone");
+  }
+  if (item.kind!=="issue" && item.base_branch!==release.branch) {
+    invalid("Epic and bounded bug base must equal the exact revision-bound release branch");
   }
 }
 
@@ -214,13 +245,8 @@ function validateSnapshot(input) {
     invalid("Only epic snapshots may carry preparation, approval, or child completion evidence");
   }
 
-  exactKeys(value.release,["assigned","active"],"Work state release evidence");
-  boolean(value.release.assigned,"Release assigned flag");
-  boolean(value.release.active,"Release active flag");
-  if (value.release.active && !value.release.assigned) {
-    invalid("An active release must be assigned");
-  }
-  if (value.release.assigned) validateAssignedReleaseEvidence(value.item);
+  validateParentEvidence(value.item,value.parent);
+  validateReleaseEvidence(value.item,value.release);
 
   if (!Array.isArray(value.blocking_dependencies)) {
     invalid("Blocking dependencies must be an array");
@@ -291,16 +317,14 @@ function validateSnapshot(input) {
   if (value.authority.epic_acceptance_required && value.item.kind!=="epic") {
     invalid("Epic acceptance authority applies only to an epic");
   }
-  if (value.authority.release_approval_required && value.item.kind==="epic") {
-    invalid("A work-item epic is governed by epic acceptance, not release approval");
-  }
   if ((value.authority.epic_acceptance_required ||
       value.authority.release_approval_required) && value.pull_request?.state!=="READY") {
     invalid("Merge authority requirements apply only to a ready pull request");
   }
   if (value.item.kind==="epic" && value.pull_request?.state==="READY" &&
-      value.children_complete && !value.authority.epic_acceptance_required) {
-    invalid("A complete ready epic pull request cannot suppress epic acceptance authority");
+      value.children_complete && !value.authority.epic_acceptance_required &&
+      !value.authority.release_approval_required) {
+    invalid("A complete ready epic pull request requires exactly one governing authority");
   }
 
   validateProject(value.project,value.item);
