@@ -14,19 +14,41 @@ export function closedData(value,label,path="$",ancestors=new Set()) {
   }
   ancestors.add(value);
   try {
+    const prototype=Object.getPrototypeOf(value);
+    const descriptors=Object.getOwnPropertyDescriptors(value);
+    const keys=Reflect.ownKeys(descriptors);
     if (Array.isArray(value)) {
-      if (Object.getPrototypeOf(value)!==Array.prototype || Object.getOwnPropertySymbols(value).length!==0 ||
-          Object.getOwnPropertyNames(value).length!==value.length+1) throw new CoreValidationError(`${label} ${path} must be a dense plain array`);
-      return Object.freeze(value.map((_,index) => {
-        const descriptor=Object.getOwnPropertyDescriptor(value,String(index));
-        if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) throw new CoreValidationError(`${label} ${path} contains an accessor`);
-        return closedData(descriptor.value,label,`${path}[${index}]`,ancestors);
-      }));
+      const lengthDescriptor=Object.getOwnPropertyDescriptor(descriptors,"length")?.value;
+      const length=lengthDescriptor?.value;
+      if (prototype!==Array.prototype || !lengthDescriptor || !("value" in lengthDescriptor) ||
+          !Number.isSafeInteger(length) || length<0 || length>0xffffffff ||
+          lengthDescriptor.enumerable!==false || lengthDescriptor.configurable!==false ||
+          typeof lengthDescriptor.writable!=="boolean" ||
+          (lengthDescriptor.writable===false && Object.isExtensible(value)) ||
+          keys.length!==length+1) {
+        throw new CoreValidationError(`${label} ${path} must be a dense plain array`);
+      }
+      const output=[];
+      for (let index=0;index<length;index+=1) {
+        const captured=Object.getOwnPropertyDescriptor(descriptors,String(index));
+        const descriptor=captured?.value;
+        if (!captured || !("value" in captured) || !descriptor ||
+            !("value" in descriptor) || !descriptor.enumerable ||
+            (lengthDescriptor.writable===false &&
+             (descriptor.writable!==false || descriptor.configurable!==false))) {
+          throw new CoreValidationError(`${label} ${path} must contain dense own data`);
+        }
+        output.push(closedData(descriptor.value,label,`${path}[${index}]`,ancestors));
+      }
+      return Object.freeze(output);
     }
-    if (![Object.prototype,null].includes(Object.getPrototypeOf(value)) || Object.getOwnPropertySymbols(value).length!==0) throw new CoreValidationError(`${label} ${path} must be a plain object`);
+    if (![Object.prototype,null].includes(prototype) ||
+        keys.some(key => typeof key!=="string")) {
+      throw new CoreValidationError(`${label} ${path} must be a plain object`);
+    }
     const output=Object.create(null);
-    for (const key of Object.getOwnPropertyNames(value)) {
-      const descriptor=Object.getOwnPropertyDescriptor(value,key);
+    for (const key of keys) {
+      const descriptor=Object.getOwnPropertyDescriptor(descriptors,key)?.value;
       if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) throw new CoreValidationError(`${label} ${path}.${key} contains an accessor or hidden property`);
       output[key]=closedData(descriptor.value,label,`${path}.${key}`,ancestors);
     }

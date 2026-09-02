@@ -858,14 +858,66 @@ test("record review snapshot requests exact Minor reservations while status requ
   const shared=boundReservation(review,findingA,pull,projectEvidence,44);
   const sharedAcrossReviews={...shared,review_id:"REVIEW-20260903-0002"};
   const reservedZ=boundReservation(review,findingZ,pull,projectEvidence,45);
-  const ambiguous=harness({reviewResult:review,snapshot:recording({
-    pullRequest:pull,result:review,
-    project:{...projectEvidence,reservations:[shared,sharedAcrossReviews,reservedZ]},
-  })});
-  await assert.rejects(
-    runReviewCommand(command(["review","record",`${REPOSITORY}#91`,"--from","review.json"]),ambiguous.services),
+  assert.throws(
+    () => harness({reviewResult:review,snapshot:recording({
+      pullRequest:pull,result:review,
+      project:{...projectEvidence,reservations:[shared,sharedAcrossReviews,reservedZ]},
+    })}),
     error => error instanceof CoreConflictError && error.exitCode===6,
   );
+});
+
+test("native review issue reservations have one global exact source and Project owner",async () => {
+  const finding=unresolvedFinding();
+  const firstReview=result({findings:[finding],unresolved:[finding.finding_id]});
+  const firstPull=pullRequest();
+  const firstProject=project();
+  const first=recording({
+    pullRequest:firstPull,result:firstReview,
+    project:{
+      ...firstProject,
+      reservations:[boundReservation(firstReview,finding,firstPull,firstProject,44)],
+    },
+  });
+  const fixture=createCoreGithubFixture();
+  fixture.seedReviewPullRequest(first);
+  fixture.seedReviewPullRequest(first);
+  const replay=await fixture.github.snapshot({
+    kind:"review",repository:REPOSITORY,number:91,review_id:firstReview.review_id,
+    unresolved_minor_finding_ids:[finding.finding_id],
+  });
+  assert.equal(replay.project.reservations.length,1);
+
+  const secondWork=workSnapshot();
+  secondWork.item={
+    ...secondWork.item,id:`${REPOSITORY}#45`,issue_number:45,
+    branch:"issue/45-second-review",
+  };
+  secondWork.project={
+    ...secondWork.project,item_id:"PVTI_45",
+    fields:{...secondWork.project.fields,branch:"issue/45-second-review"},
+  };
+  const secondPull=pullRequest({
+    number:92,native_revision:"pull-request-2",head:"issue/45-second-review",work:secondWork,
+  });
+  const secondReview=result({
+    pull_request_number:92,findings:[finding],unresolved:[finding.finding_id],
+  });
+  const secondProject=project({item_id:"PVTI_45"});
+  const second=recording({
+    pullRequest:secondPull,result:secondReview,
+    project:{
+      ...secondProject,
+      reservations:[boundReservation(secondReview,finding,secondPull,secondProject,44)],
+    },
+  });
+  assert.throws(
+    () => fixture.seedReviewPullRequest(second),
+    error => error instanceof CoreConflictError && error.exitCode===6,
+  );
+  const repository=fixture.view().repositories[0];
+  assert.equal(repository.pull_requests.some(value => value.number===92),false);
+  assert.equal(repository.next_issue_number,44);
 });
 
 test("review Project reconciliation preserves newer observed time on replay and state change",() => {
@@ -932,6 +984,53 @@ test("review command validates closed nested snapshots and a semantic source has
   const symbol={...base.source,[Symbol("hidden")]:true};
   const sparse=[];
   sparse.length=1;
+  const arrayAccessor=[];
+  Object.defineProperty(arrayAccessor,"0",{
+    enumerable:true,configurable:true,
+    get() { traps+=1; throw new Error("nested array getter"); },
+  });
+  const arrayProxy=new Proxy([],{
+    get() { traps+=1; throw new Error("nested array proxy get"); },
+    getPrototypeOf() { traps+=1; throw new Error("nested array proxy prototype"); },
+    ownKeys() { traps+=1; throw new Error("nested array proxy keys"); },
+    getOwnPropertyDescriptor() { traps+=1; throw new Error("nested array proxy descriptor"); },
+  });
+  const arraySymbol=[];
+  arraySymbol[Symbol("hidden")]=true;
+  const arrayHidden=[];
+  Object.defineProperty(arrayHidden,"hidden",{value:true});
+  const arrayLockedLength=base.implementationIdentity.commits.map(value => ({...value}));
+  Object.defineProperty(arrayLockedLength,"length",{writable:false});
+  const arrayLockedEmpty=[];
+  Object.defineProperty(arrayLockedEmpty,"length",{writable:false});
+  function withReservations(reservations,semanticReservations=[]) {
+    const projectEvidence={...base.project,reservations};
+    const semanticProject={...base.project,reservations:semanticReservations};
+    return {
+      ...base,
+      source:{
+        ...base.source,
+        sha256:sha256Canonical({
+          kind:base.kind,pullRequest:base.pullRequest,
+          implementationIdentity:base.implementationIdentity,project:semanticProject,
+        }),
+      },
+      project:projectEvidence,
+    };
+  }
+  function withImplementationCommits(commits) {
+    return {
+      ...base,
+      source:{
+        ...base.source,
+        sha256:sha256Canonical({
+          kind:base.kind,pullRequest:base.pullRequest,
+          implementationIdentity:base.implementationIdentity,project:base.project,
+        }),
+      },
+      implementationIdentity:{...base.implementationIdentity,commits},
+    };
+  }
   const malformed=[
     {...base,pullRequest:null},
     {...base,implementationIdentity:proxied},
@@ -941,18 +1040,27 @@ test("review command validates closed nested snapshots and a semantic source has
     {...base,project:{...base.project,reservations:sparse}},
     {...base,source:{...base.source,sha256:"0".repeat(64)}},
     {...base,pullRequest:{...base.pullRequest,body:"tampered after source hash"}},
+    withReservations(arrayAccessor,[{}]),
+    withReservations(arrayProxy),
+    withReservations(arraySymbol),
+    withReservations(arrayHidden),
+    withReservations(Array(1)),
+    withReservations(arrayLockedEmpty),
+    withImplementationCommits(arrayLockedLength),
   ];
+  const exits=[];
   for (const snapshotValue of malformed) {
     const state=harness();
     const services=Object.freeze({
       ...state.services,
       github:Object.freeze({async snapshot() { return snapshotValue; }}),
     });
-    await assert.rejects(
-      runReviewCommand(command(["review","record",`${REPOSITORY}#91`,"--from","review.json"]),services),
-      error => error instanceof CoreValidationError && error.exitCode===5,
+    const dispatched=await dispatchCoreCommand(
+      command(["review","record",`${REPOSITORY}#91`,"--from","review.json"]),{services},
     );
+    exits.push(dispatched.exitCode);
   }
+  assert.deepEqual(exits,new Array(malformed.length).fill(5));
   assert.equal(traps,0);
 });
 

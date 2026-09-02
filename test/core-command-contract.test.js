@@ -5,7 +5,9 @@ import {
   dispatchCoreCommand,
   parseCoreCommand,
 } from "../src/core/commands/router.js";
+import {closedData} from "../src/core/commands/common.js";
 import {runCoreCli} from "../src/core/cli.js";
+import {CoreValidationError} from "../src/core/errors.js";
 
 function outputStream() {
   let contents="";
@@ -326,4 +328,55 @@ test("confirmation bridge rejects exotic service objects without invoking servic
   assert.equal((await dispatchCoreCommand(command,{services:symbolServices,confirm:async () => true,handlers:{init:handler}})).exitCode,70);
   const hiddenServices={control:{}}; Object.defineProperty(hiddenServices,"github",{enumerable:false,value:{}});
   assert.equal((await dispatchCoreCommand(command,{services:hiddenServices,confirm:async () => true,handlers:{init:handler}})).exitCode,70);
+});
+
+test("closedData rejects hostile array descriptors without reading array values",() => {
+  let traps=0;
+  const accessor=[];
+  Object.defineProperty(accessor,"0",{
+    enumerable:true,configurable:true,
+    get() { traps+=1; throw new Error("array getter must not run"); },
+  });
+  const proxy=new Proxy(["safe"],{
+    get() { traps+=1; throw new Error("array proxy get must not run"); },
+    getPrototypeOf() { traps+=1; throw new Error("array proxy prototype must not run"); },
+    ownKeys() { traps+=1; throw new Error("array proxy keys must not run"); },
+    getOwnPropertyDescriptor() {
+      traps+=1;
+      throw new Error("array proxy descriptor must not run");
+    },
+  });
+  const symbol=["safe"];
+  symbol[Symbol("hidden")]=true;
+  const hidden=["safe"];
+  Object.defineProperty(hidden,"hidden",{value:true});
+  const sparse=Array(1);
+  const lockedLength=["safe"];
+  Object.defineProperty(lockedLength,"length",{writable:false});
+  const lockedEmptyLength=[];
+  Object.defineProperty(lockedEmptyLength,"length",{writable:false});
+  const failures=[];
+  for (const [name,value] of [
+    ["accessor",accessor],["proxy",proxy],["symbol",symbol],
+    ["hidden",hidden],["sparse",sparse],["custom length",lockedLength],
+    ["custom empty length",lockedEmptyLength],
+  ]) {
+    try {
+      closedData({values:value},`hostile ${name} array`);
+      failures.push(`${name}: accepted`);
+    } catch (error) {
+      if (!(error instanceof CoreValidationError) || error.exitCode!==5) {
+        failures.push(`${name}: ${error?.constructor?.name ?? "unknown"}`);
+      }
+    }
+  }
+  assert.deepEqual(failures,[]);
+  assert.equal(traps,0);
+
+  const source=[{value:"kept"}];
+  const closed=closedData({values:source},"plain dense array");
+  source[0].value="changed";
+  assert.equal(closed.values[0].value,"kept");
+  assert.equal(Object.isFrozen(closed.values),true);
+  assert.equal(Object.isFrozen(closed.values[0]),true);
 });
