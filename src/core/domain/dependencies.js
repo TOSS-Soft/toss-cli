@@ -60,6 +60,9 @@ function copyClosed(value,label,ancestors=new Set()) {
 }
 
 function exactKeys(value,expected,label) {
+  if (value===null || typeof value!=="object" || Array.isArray(value)) {
+    invalid(`${label} must be a plain closed record`);
+  }
   const actual=Object.keys(value).sort();
   const wanted=[...expected].sort();
   if (canonicalJson(actual)!==canonicalJson(wanted)) {
@@ -100,29 +103,36 @@ function explicitCycle(nodes,edges) {
   for (const targets of adjacency.values()) targets.sort(compareText);
 
   const state=new Map();
-  const stack=[];
-  function visit(node) {
-    state.set(node,"visiting");
-    stack.push(node);
-    for (const target of adjacency.get(node)) {
-      if (state.get(target)==="visiting") {
-        const start=stack.indexOf(target);
-        return [...stack.slice(start),target];
-      }
-      if (state.get(target)!=="visited") {
-        const cycle=visit(target);
-        if (cycle) return cycle;
-      }
-    }
-    stack.pop();
-    state.set(node,"visited");
-    return null;
-  }
+  for (const root of [...nodes].sort(compareText)) {
+    if (state.has(root)) continue;
+    const path=[root];
+    const pathIndexes=new Map([[root,0]]);
+    const frames=[{node:root,nextTarget:0}];
+    state.set(root,"visiting");
 
-  for (const node of [...nodes].sort(compareText)) {
-    if (state.has(node)) continue;
-    const cycle=visit(node);
-    if (cycle) return cycle;
+    while (frames.length>0) {
+      const frame=frames.at(-1);
+      const targets=adjacency.get(frame.node);
+      if (frame.nextTarget>=targets.length) {
+        frames.pop();
+        path.pop();
+        pathIndexes.delete(frame.node);
+        state.set(frame.node,"visited");
+        continue;
+      }
+
+      const target=targets[frame.nextTarget];
+      frame.nextTarget+=1;
+      if (state.get(target)==="visiting") {
+        const start=pathIndexes.get(target);
+        return [...path.slice(start),target];
+      }
+      if (state.get(target)==="visited") continue;
+      state.set(target,"visiting");
+      pathIndexes.set(target,path.length);
+      path.push(target);
+      frames.push({node:target,nextTarget:0});
+    }
   }
   return null;
 }

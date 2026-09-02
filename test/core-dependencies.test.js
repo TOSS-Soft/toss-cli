@@ -254,6 +254,110 @@ test("epic plan normalization rejects altered topology and closed-input violatio
   }
 });
 
+test("epic plans bind every child base branch to the exact plan epic",() => {
+  const document=fixture("epic-plan-valid.json");
+  document.children[0].base_branch="epic/41-another-same-repository-epic";
+  const hashInput=structuredClone(document);
+  delete hashInput.content_sha256;
+  document.content_sha256=sha256Canonical(hashInput);
+
+  assert.throws(
+    () => validateCoreDocument(document,"epic-plan.v1"),
+    error => error instanceof CoreValidationError && error.exitCode===5,
+  );
+  assert.throws(
+    () => normalizeEpicPlan(normalizationInput(document)),
+    error => error instanceof CoreValidationError && error.exitCode===5,
+  );
+
+  const plan=normalizeEpicPlan(normalizationInput(fixture("epic-plan-valid.json")));
+  const operations=epicPreparationOperations(plan,{
+    revision:"github-snapshot@base-binding",
+    children:[],
+    relationships:[],
+  });
+  assert.ok(operations.every(operation =>
+    operation.payload.project.fields.base_branch===plan.epic.branch));
+});
+
+test("every Task 2 boundary rejects malformed closed shapes without invoking traps",() => {
+  const plan=normalizeEpicPlan(normalizationInput(fixture("epic-plan-valid.json")));
+  const graph=validateDependencyGraph({nodes:[`${REPOSITORY}#1`],edges:[]});
+  const invalidCalls=[
+    () => validateDependencyGraph(null),
+    () => dependencyReadiness(`${REPOSITORY}#1`,null,[]),
+    () => dependencyReadiness(`${REPOSITORY}#1`,graph,null),
+    () => normalizeEpicPlan(null),
+    () => normalizeEpicPlan({...normalizationInput(fixture("epic-plan-valid.json")),source:null}),
+    () => normalizeEpicPlan({...normalizationInput(fixture("epic-plan-valid.json")),children:[null,plan.children[0]]}),
+    () => normalizeEpicPlan({...normalizationInput(fixture("epic-plan-valid.json")),dependencies:[null,plan.edges[0]]}),
+    () => epicPreparationOperations(null,{revision:"snapshot@1",children:[],relationships:[]}),
+    () => epicPreparationOperations(plan,null),
+    () => epicPreparationOperations(plan,{revision:"snapshot@1",children:[null],relationships:[]}),
+    () => epicPreparationOperations(plan,{
+      revision:"snapshot@1",
+      children:[{...reconciledSnapshot(plan).children[0],project_fields:null}],
+      relationships:[],
+    }),
+    () => epicPreparationOperations(plan,{revision:"snapshot@1",children:[],relationships:[null]}),
+  ];
+  for (const invoke of invalidCalls) {
+    assert.throws(invoke,error => error instanceof CoreValidationError && error.exitCode===5);
+  }
+
+  let traps=0;
+  const hostile=new Proxy({}, {
+    get() { traps+=1; throw new Error("get trap invoked"); },
+    getOwnPropertyDescriptor() { traps+=1; throw new Error("descriptor trap invoked"); },
+    getPrototypeOf() { traps+=1; throw new Error("prototype trap invoked"); },
+    ownKeys() { traps+=1; throw new Error("ownKeys trap invoked"); },
+  });
+  const hostileCalls=[
+    () => validateDependencyGraph(hostile),
+    () => dependencyReadiness(`${REPOSITORY}#1`,hostile,[]),
+    () => normalizeEpicPlan(hostile),
+    () => epicPreparationOperations(hostile,{revision:"snapshot@1",children:[],relationships:[]}),
+    () => epicPreparationOperations(plan,hostile),
+    () => validateDependencyGraph({nodes:[`${REPOSITORY}#1`],edges:[hostile]}),
+  ];
+  for (const invoke of hostileCalls) {
+    assert.throws(invoke,error => error instanceof CoreValidationError && error.exitCode===5);
+  }
+  assert.equal(traps,0);
+
+  let getterCalls=0;
+  const accessorSource={repository:REPOSITORY,revision:"request@1"};
+  Object.defineProperty(accessorSource,"sha256",{
+    enumerable:true,
+    get() { getterCalls+=1; return SHA_A; },
+  });
+  assert.throws(
+    () => normalizeEpicPlan({...normalizationInput(fixture("epic-plan-valid.json")),source:accessorSource}),
+    error => error instanceof CoreValidationError && error.exitCode===5,
+  );
+  assert.equal(getterCalls,0);
+});
+
+test("a twelve-thousand-node cycle returns one deterministic closed path without recursion overflow",() => {
+  const size=12_000;
+  const nodes=Array.from({length:size},(_,index) => `${REPOSITORY}#${index+1}`);
+  const edges=nodes.map((source,index) => edge({
+    edge_id:`DEP-LARGE-${String(index+1).padStart(5,"0")}`,
+    source,
+    target:nodes[(index+1)%nodes.length],
+  }));
+
+  assert.throws(() => validateDependencyGraph({nodes:[...nodes].reverse(),edges:[...edges].reverse()}),error => {
+    assert.ok(error instanceof CoreValidationError);
+    assert.equal(error.exitCode,5);
+    const path=error.message.slice(error.message.indexOf(": ")+2).split(" -> ");
+    assert.equal(path.length,size+1);
+    assert.equal(path[0],`${REPOSITORY}#1`);
+    assert.equal(path.at(-1),path[0]);
+    return true;
+  });
+});
+
 test("epic preparation creates canonically valid native child operations",() => {
   const plan=normalizeEpicPlan(normalizationInput(fixture("epic-plan-valid.json")));
   const operations=epicPreparationOperations(plan,{
@@ -324,6 +428,59 @@ test("epic preparation preserves governed children and rejects marker identity o
   const wrongRepository=structuredClone(matching);
   wrongRepository.children[0].repository=OTHER_REPOSITORY;
   assert.throws(() => epicPreparationOperations(plan,wrongRepository),CoreConflictError);
+});
+
+test("epic preparation treats Project parent and every supplied marker as governed remote evidence",() => {
+  const plan=normalizeEpicPlan(normalizationInput(fixture("epic-plan-valid.json")));
+  const matching=reconciledSnapshot(plan);
+  const existing=matching.children[0];
+  const withoutRelationships=snapshotChild => ({
+    revision:"github-snapshot@marker-boundary",
+    children:[snapshotChild],
+    relationships:[],
+  });
+
+  for (const marker of ["", "corrupt unmanaged marker"]) {
+    assert.throws(
+      () => epicPreparationOperations(plan,withoutRelationships({
+        ...existing,
+        marker,
+        project_fields:{...existing.project_fields,parent:plan.epic.id},
+      })),
+      error => error instanceof CoreConflictError && error.exitCode===6,
+    );
+  }
+
+  assert.throws(
+    () => epicPreparationOperations(plan,withoutRelationships({
+      ...existing,
+      marker:managedChildMarker(plan.children[1].id),
+      project_fields:{...existing.project_fields,parent:plan.epic.id},
+    })),
+    error => error instanceof CoreConflictError && error.exitCode===6,
+  );
+
+  assert.throws(
+    () => epicPreparationOperations(plan,withoutRelationships({
+      ...existing,
+      project_fields:{...existing.project_fields,parent:`${REPOSITORY}#99`},
+    })),
+    error => error instanceof CoreConflictError && error.exitCode===6,
+  );
+
+  const omittedId=`${REPOSITORY}#45`;
+  const omitted=withoutRelationships({
+    ...existing,
+    id:omittedId,
+    marker:managedChildMarker(omittedId),
+    repository:REPOSITORY,
+    revision:"child-45@1",
+    project_fields:{...existing.project_fields,parent:plan.epic.id},
+  });
+  assert.throws(
+    () => epicPreparationOperations(plan,omitted),
+    error => error instanceof CoreConflictError && error.exitCode===6,
+  );
 });
 
 test("epic preparation is idempotent after applying its desired snapshot",() => {

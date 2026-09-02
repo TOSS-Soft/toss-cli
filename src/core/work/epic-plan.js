@@ -75,6 +75,9 @@ function copyClosed(value,label,ancestors=new Set()) {
 }
 
 function exactKeys(value,expected,label) {
+  if (value===null || typeof value!=="object" || Array.isArray(value)) {
+    invalid(`${label} must be a plain closed record`);
+  }
   if (canonicalJson(Object.keys(value).sort())!==canonicalJson([...expected].sort())) {
     invalid(`${label} must use the exact closed shape`);
   }
@@ -106,14 +109,14 @@ function compareEdges(left,right) {
   return compareText(canonicalJson(left),canonicalJson(right));
 }
 
-function desiredFields(child) {
+function desiredFields(child,epicBranch) {
   return Object.freeze({
     status:child.status,
     gate:child.gate,
     repository:child.repository,
     parent:child.parent_id,
     branch:child.branch,
-    base_branch:child.base_branch,
+    base_branch:epicBranch,
     milestone:child.milestone,
   });
 }
@@ -138,19 +141,21 @@ export function normalizeEpicPlan(input) {
     invalid("Epic plan source repository must match the epic repository");
   }
 
-  const children=[...value.children].sort((left,right) => compareText(left.id,right.id));
+  const children=[...value.children];
   const childIds=new Set();
   for (const child of children) {
     validateCoreDocument(child,"work-item.v1");
     if (child.kind!=="issue" || child.repository!==value.epic.repository ||
-        child.parent_id!==value.epic.id || child.milestone!==null) {
-      invalid("Epic plan children must be unversioned same-repository issues with the exact native epic parent");
+        child.parent_id!==value.epic.id || child.base_branch!==value.epic.branch ||
+        child.milestone!==null) {
+      invalid("Epic plan children must be unversioned same-repository issues with the exact native epic parent and base branch");
     }
     if (childIds.has(child.id)) invalid(`Epic plan has duplicate child ${child.id}`);
     childIds.add(child.id);
   }
+  children.sort((left,right) => compareText(left.id,right.id));
 
-  const dependencies=[...value.dependencies].sort(compareEdges);
+  const dependencies=[...value.dependencies];
   const graphNodes=new Set(childIds);
   for (const dependency of dependencies) {
     validateCoreDocument(dependency,"dependency-edge.v1");
@@ -159,6 +164,7 @@ export function normalizeEpicPlan(input) {
     }
     graphNodes.add(dependency.target);
   }
+  dependencies.sort(compareEdges);
   validateDependencyGraph({nodes:[...graphNodes],edges:dependencies});
 
   const hashInput=Object.freeze({
@@ -210,7 +216,12 @@ function validateSnapshot(input) {
     if (typeof child.repository!=="string" || !REPOSITORY.test(child.repository)) {
       invalid("Existing native child repository must be canonical OWNER/REPO ASCII");
     }
-    text(child.marker,"Existing native child marker");
+    if (typeof child.marker!=="string" || !MANAGED_MARKER.test(child.marker)) {
+      conflict(`Existing native child ${child.id} has a corrupt managed marker`);
+    }
+    if (child.marker!==managedChildMarker(child.id)) {
+      conflict(`Existing native child ${child.id} has a conflicting managed marker`);
+    }
     text(child.revision,"Existing native child revision");
     if (!Array.isArray(child.acceptance_criteria) ||
         child.acceptance_criteria.some(item => typeof item!=="string" || item.trim().length===0)) {
@@ -248,7 +259,7 @@ function operationPayload(plan,child) {
     reserved_branch:child.branch,
     project:Object.freeze({
       membership:"TOSS OS",
-      fields:desiredFields(child),
+      fields:desiredFields(child,plan.epic.branch),
     }),
   });
 }
@@ -273,7 +284,19 @@ export function epicPreparationOperations(planInput,snapshotInput) {
 
   for (const existing of snapshot.children) {
     const related=relationships.get(existing.id);
-    const governedByEpic=related?.parent_id===plan.epic.id || MANAGED_MARKER.test(existing.marker);
+    const projectParent=existing.project_fields.parent;
+    if (projectParent!==null && typeof projectParent!=="string") {
+      conflict(`Native child ${existing.id} has corrupt Project parent evidence`);
+    }
+    if (typeof projectParent==="string") {
+      try {
+        workId(projectParent,"Existing native child Project parent");
+      } catch {
+        conflict(`Native child ${existing.id} has corrupt Project parent evidence`);
+      }
+    }
+    const governedByEpic=related?.parent_id===plan.epic.id ||
+      projectParent===plan.epic.id || MANAGED_MARKER.test(existing.marker);
     if (governedByEpic && !desiredIds.has(existing.id)) {
       conflict(`Prepared epic plan would drop governed child ${existing.id}`);
     }
@@ -304,6 +327,10 @@ export function epicPreparationOperations(planInput,snapshotInput) {
     const relationship=relationships.get(child.id);
     if (relationship && relationship.parent_id!==plan.epic.id) {
       conflict(`Native child ${child.id} has conflicting parent ${relationship.parent_id}`);
+    }
+    if (existingById && existingById.project_fields.parent!==null &&
+        existingById.project_fields.parent!==plan.epic.id) {
+      conflict(`Native child ${child.id} has conflicting Project parent ${existingById.project_fields.parent}`);
     }
     if (existing && existing.repository!==child.repository) {
       conflict(`Native child ${child.id} has a conflicting repository`);

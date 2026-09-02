@@ -82,8 +82,8 @@ function assertEpicPlanTopology(value) {
   for (const child of value.children) {
     if (child===null || typeof child!=="object") continue;
     if (child.kind!=="issue" || child.repository!==epic.repository ||
-        child.parent_id!==epic.id) {
-      throw new CoreValidationError("Invalid core contract epic-plan.v1: children must be same-repository issues with the exact epic parent");
+        child.parent_id!==epic.id || child.base_branch!==epic.branch) {
+      throw new CoreValidationError("Invalid core contract epic-plan.v1: children must be same-repository issues with the exact epic parent and base branch");
     }
   }
 }
