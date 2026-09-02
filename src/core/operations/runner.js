@@ -139,6 +139,9 @@ function exactReceipt(value,intent) {
     throw new CoreConflictError("Operation receipt ledger is corrupt",{cause:error});
   }
   if (receipt.intent_id!==intent.intent_id || receipt.intent_sha256!==sha256Canonical(intent)) throw new CoreConflictError("Operation receipt conflicts with the intent ledger");
+  if (intent.planned_receipt_id!==undefined && receipt.receipt_id!==intent.planned_receipt_id) {
+    throw new CoreConflictError("Operation receipt does not use its durably planned identity");
+  }
   if (receipt.status==="completed") {
     const observations=new Map(receipt.observed_revisions.map(observation => [observation.operation_id,observation]));
     if (observations.size!==receipt.observed_revisions.length || observations.size!==intent.operations.length ||
@@ -212,6 +215,10 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
 
   async function applyIntent(intent,{authority,receiptId=null}={}) {
     const valid=validateCoreDocument(clone(intent,"intent"),"operation-intent.v1");
+    if (receiptId!==null && valid.planned_receipt_id!==undefined &&
+        receiptId!==valid.planned_receipt_id) {
+      throw new CoreConflictError("Operation receipt identity conflicts with its immutable reservation");
+    }
     let storedReceipt;
     try { storedReceipt=exactReceipt(await findReceipt(valid),valid); } catch (error) {
       const conflict=ledgerConflict(error,"receipt lookup");
@@ -232,7 +239,9 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
     if (localOperations.length>1 || (localOperations.length===1 && inspectReleaseProgramOperation===null)) {
       throw new CoreValidationError("Operation intent contains an unsupported release-program manifest mutation");
     }
-    const remoteOperations=valid.operations.filter(operation => operation.payload?.kind!=="release-program-manifest");
+    const githubOperations=valid.operations.filter(operation => operation.payload?.kind!=="release-program-manifest");
+    const verifyOperations=githubOperations.filter(operation => operation.action==="verify");
+    const mutationOperations=githubOperations.filter(operation => operation.action!=="verify");
     let prior;
     try { prior=await findIntent(valid); } catch (error) {
       const conflict=ledgerConflict(error,"intent lookup");
@@ -258,10 +267,10 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
       if (error instanceof CoreValidationError || error instanceof CoreBlockedError) throw error;
       throw new CoreInternalError("Control ledger intent commit failed",{cause:error});
     }
-    const selectedReceiptId=receiptId ?? reserveReceiptId();
+    const selectedReceiptId=valid.planned_receipt_id ?? receiptId ?? reserveReceiptId();
     let inspected=[];
     try {
-      const remoteInspected=remoteOperations.length===0 ? [] : observed(await inspect(remoteOperations));
+      const remoteInspected=githubOperations.length===0 ? [] : observed(await inspect(githubOperations));
       const localInspected=localOperations.length===0 ? [] : [await inspectReleaseProgramOperation(localOperations[0])];
       inspected=observed([...remoteInspected,...localInspected]);
       inspectMatches(valid.operations,inspected);
@@ -276,18 +285,20 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
     }
     let appliedObservations=[];
     try {
-      const result=remoteOperations.length===0
+      const verifiedIds=new Set(verifyOperations.map(operation => operation.operation_id));
+      const verifiedObservations=inspected.filter(value => verifiedIds.has(value.operation_id));
+      const result=mutationOperations.length===0
         ? Object.freeze({status:"completed",observed_revisions:Object.freeze([])})
-        : remoteResult(await applyRemote(remoteOperations,{idempotencyKey:sha256Canonical(valid)}),remoteOperations);
-      appliedObservations=result.observed_revisions;
+        : remoteResult(await applyRemote(mutationOperations,{idempotencyKey:sha256Canonical(valid)}),mutationOperations);
+      appliedObservations=observed([...verifiedObservations,...result.observed_revisions]);
       const localObserved=localOperations.map(operation => Object.freeze({
         operation_id:operation.operation_id,
         repository:operation.repository,
         revision:operation.payload.program.revision,
       }));
       const completedObservations=result.status==="completed"
-        ? observed([...result.observed_revisions,...localObserved])
-        : result.observed_revisions;
+        ? observed([...appliedObservations,...localObserved])
+        : appliedObservations;
       const receipt=receiptFor(valid,{receipt_id:selectedReceiptId,created_at:clock(),status:result.status,observed_revisions:completedObservations});
       if (localOperations.length===1 && result.status==="completed") {
         await commitReleaseProgramReceipt({expectedHead:revision,operation:localOperations[0],receipt});
@@ -347,11 +358,17 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
     if (commandValue.options.apply!==true && confirmation!==undefined) throw new CoreValidationError("Operation confirmation is valid only for apply");
     if (commandValue.options.apply===true && commandValue.options.nonInteractive!==true && confirmation===undefined) throw new CoreBlockedError("Interactive apply requires CLI confirmation");
     const suppliedAuthority=request.authority===null ? null : clone(request.authority,"authority");
-    const intent=createOperationIntent({intent_id:idGenerator("intent"),created_at:clock(),command:commandValue.name,policy_revision:policyRevision(),source:request.source,authority:suppliedAuthority===null ? null : authorityReference(suppliedAuthority),operations:request.operations});
+    const intentId=idGenerator("intent");
+    const plannedReceiptId=Object.hasOwn(request,"receipt_id")
+      ? request.receipt_id
+      : commandValue.options.apply && !commandValue.options.dryRun
+        ? reserveReceiptId()
+        : null;
+    const intent=createOperationIntent({intent_id:intentId,created_at:clock(),command:commandValue.name,policy_revision:policyRevision(),source:request.source,authority:suppliedAuthority===null ? null : authorityReference(suppliedAuthority),...(plannedReceiptId===null ? {} : {planned_receipt_id:plannedReceiptId}),operations:request.operations});
     const previewValue=await preview(intent);
     if (!commandValue.options.apply || commandValue.options.dryRun) return previewValue;
     if (confirmation!==undefined && await Reflect.apply(confirmation,undefined,[previewValue])!==true) throw new CoreBlockedError("Interactive apply was not confirmed");
-    return applyIntent(intent,{authority:suppliedAuthority,receiptId:request.receipt_id ?? null});
+    return applyIntent(intent,{authority:suppliedAuthority,receiptId:plannedReceiptId});
   }
   return Object.freeze({preview,apply,execute,reserveReceiptId,verifyAuthorityFor});
 }

@@ -13,7 +13,7 @@ const PLANNING_STATE_KEYS=Object.freeze([
   "revision","organization","repositories","programs","intents","receipts",
 ]);
 const PLAN_SNAPSHOT_KEYS=Object.freeze([
-  "kind","source","control_revision","candidates","completed","repositories",
+  "kind","source","control_revision","project","candidates","completed","repositories",
 ]);
 const ACTIVATION_SNAPSHOT_KEYS=Object.freeze([
   "kind","source","control_revision","program_id","program_revision","project",
@@ -135,6 +135,66 @@ function compareProgramIds(left,right) {
   return leftNumber<rightNumber ? -1 : leftNumber>rightNumber ? 1 : compareCanonicalText(left,right);
 }
 
+function releaseIntentAffects(intent,{programId,repository}) {
+  if (programId===null && repository===null) return true;
+  const programMatch=programId!==null && intent.operations.some(operation =>
+    operation.payload?.program_id===programId || operation.payload?.program?.program_id===programId);
+  const repositoryMatch=repository!==null && intent.operations.some(operation =>
+    (operation.payload?.kind!=="release-program-manifest" && operation.repository===repository) ||
+    (Array.isArray(operation.payload?.program?.repository_releases) &&
+      operation.payload.program.repository_releases.some(release => release?.repository===repository)));
+  return programMatch || repositoryMatch;
+}
+
+function assertReleaseReceiptCoverage(receipt,intent) {
+  if (receipt.intent_id!==intent.intent_id || receipt.intent_sha256!==sha256Canonical(intent)) {
+    throw new CoreConflictError("Release reconciliation receipt does not bind its immutable intent");
+  }
+  const operations=new Map(intent.operations.map(operation => [operation.operation_id,operation]));
+  const observed=new Set();
+  for (const observation of receipt.observed_revisions) {
+    const operation=operations.get(observation.operation_id);
+    if (!operation || operation.repository!==observation.repository || observed.has(observation.operation_id)) {
+      throw new CoreConflictError("Release reconciliation receipt contains incompatible operation evidence");
+    }
+    observed.add(observation.operation_id);
+  }
+  if (receipt.status==="completed" && observed.size!==operations.size) {
+    throw new CoreConflictError("Release reconciliation receipt omits completed operation evidence");
+  }
+}
+
+function reconciliationFromState(state,{programId,repository}) {
+  const receipts=new Map();
+  for (const receipt of state.receipts) {
+    if (receipts.has(receipt.intent_id)) {
+      throw new CoreConflictError("Release receipt evidence is ambiguous");
+    }
+    receipts.set(receipt.intent_id,receipt);
+  }
+  const evidence=[];
+  for (const intent of state.intents) {
+    if (!intent.command.startsWith("release.") ||
+        !releaseIntentAffects(intent,{programId,repository})) continue;
+    const receipt=receipts.get(intent.intent_id) ?? null;
+    if (receipt!==null) assertReleaseReceiptCoverage(receipt,intent);
+    if (receipt===null || receipt.status!=="completed") evidence.push({intent,receipt});
+  }
+  evidence.sort((left,right) => compareCanonicalText(left.intent.created_at,right.intent.created_at) ||
+    compareCanonicalText(left.intent.intent_id,right.intent.intent_id));
+  return clone({required:evidence.length>0,evidence},"Release reconciliation evidence");
+}
+
+export function releaseReconciliationEvidence(input) {
+  const {planningState,programId,repository}=optionRecord(input,
+    ["planningState","programId","repository"],"Release reconciliation request");
+  if (!(programId===null || typeof programId==="string") ||
+      !(repository===null || typeof repository==="string")) {
+    invalid("Release reconciliation scope is malformed");
+  }
+  return reconciliationFromState(normalizeReleasePlanningState(planningState),{programId,repository});
+}
+
 export function normalizeReleasePlanningState(input) {
   const value=clone(input,"Release planning state");
   exact(value,PLANNING_STATE_KEYS,"Release planning state");
@@ -163,15 +223,19 @@ function normalizedPlanSnapshot(input,state) {
   const value=clone(input,"Release plan snapshot");
   exact(value,PLAN_SNAPSHOT_KEYS,"Release plan snapshot");
   exact(value.source,["repository","revision","sha256"],"Release plan source");
+  exact(value.project,["id","revision"],"Release plan Project evidence");
   if (value.kind!=="release-plan" || value.control_revision!==state.revision ||
       value.source.repository!==state.organization.control_repository ||
       value.source.revision!==state.revision ||
+      value.project.id!==state.organization.project.node_id ||
+      typeof value.project.revision!=="string" || value.project.revision.length===0 ||
       typeof value.source.sha256!=="string" || !/^[a-f0-9]{64}$/u.test(value.source.sha256)) {
     throw new CoreConflictError("Release plan snapshot does not bind the exact control revision");
   }
   const github=Object.freeze({
     kind:value.kind,
     control_revision:value.control_revision,
+    project:value.project,
     candidates:value.candidates,
     completed:value.completed,
     repositories:value.repositories,
@@ -223,6 +287,24 @@ export function releasePlanOperations(input) {
     ? [...state.programs,program]
     : [...state.programs.filter(value => value.program_id!==current.program_id),program];
   assertRepositoryConcurrency(programsForConcurrency);
+  const precondition=Object.freeze({
+    resource:"project",
+    action:"verify",
+    repository:null,
+    expected_revision:observed.project.revision,
+    payload:Object.freeze({
+      kind:"release-plan-precondition",
+      project_id:observed.project.id,
+      snapshot_sha256:sha256Canonical({
+        kind:observed.kind,
+        control_revision:observed.control_revision,
+        project:observed.project,
+        candidates:observed.candidates,
+        completed:observed.completed,
+        repositories:observed.repositories,
+      }),
+    }),
+  });
   const operation=Object.freeze({
     resource:"repository",
     action:"commit",
@@ -237,7 +319,7 @@ export function releasePlanOperations(input) {
   return Object.freeze({
     source:observed.source,
     program,
-    operations:Object.freeze([operation]),
+    operations:Object.freeze([precondition,operation]),
   });
 }
 
@@ -317,10 +399,13 @@ function normalizedActivationSnapshot(input,state,program) {
     }
     const workById=new Map();
     for (const item of repository.work_items) {
-      exact(item,["id","kind","revision","work"],"Release activation work item");
+      exact(item,["id","kind","revision","branch_revision","work"],"Release activation work item");
       if (item.id!==item.work?.item?.id || item.kind!==item.work?.item?.kind ||
           item.work?.item?.repository!==repository.repository || typeof item.revision!=="string" ||
-          item.revision.length===0 || item.work?.project?.project_id!==state.organization.project.node_id) {
+          item.revision.length===0 ||
+          !(item.branch_revision===null || typeof item.branch_revision==="string" && item.branch_revision.length>0) ||
+          item.work?.project?.project_id!==state.organization.project.node_id ||
+          item.work?.physical_branch?.exists!==(item.branch_revision!==null)) {
         throw new CoreConflictError("Release activation work item identity is inconsistent");
       }
       if (workById.has(item.id)) throw new CoreConflictError(`Duplicate activation work item: ${item.id}`);
@@ -478,7 +563,12 @@ export function activationOperations(input) {
   const configurations=new Map(state.repositories.map(value => [value.repository,value]));
   const observations=new Map(observed.repositories.map(value => [value.repository,value]));
   const activatedById=new Map();
-  const operations=[];
+  const operations=[{
+    resource:"project",action:"verify",repository:null,
+    expected_revision:observed.project.revision,
+    payload:{kind:"release-activation-precondition",project_id:observed.project.id,
+      snapshot_sha256:sha256Canonical(activationBody(observed))},
+  }];
   for (const draft of selected) {
     const observation=observations.get(draft.repository);
     const configuration=configurations.get(draft.repository);
@@ -501,6 +591,38 @@ export function activationOperations(input) {
     });
     assertExistingResources(observation,activated,configuration);
     activatedById.set(draft.release_id,activated);
+    operations.push({
+      resource:"repository",action:"verify",repository:draft.repository,
+      expected_revision:observation.repository_revision,
+      payload:{kind:"release-repository-precondition",program_id:program.program_id,
+        release_id:draft.release_id,snapshot_sha256:sha256Canonical(observation)},
+    },{
+      resource:"branch",action:"verify",repository:draft.repository,
+      expected_revision:observation.default_branch.revision,
+      payload:{kind:"release-default-branch-precondition",name:observation.default_branch.name,
+        head_sha:observation.default_branch.head_sha},
+    });
+    if (observation.milestone!==null) operations.push({
+      resource:"milestone",action:"verify",repository:draft.repository,
+      expected_revision:observation.milestone.revision,
+      payload:{kind:"release-milestone-precondition",title:observation.milestone.title,
+        state:observation.milestone.state},
+    });
+    if (observation.release_branch!==null) operations.push({
+      resource:"branch",action:"verify",repository:draft.repository,
+      expected_revision:observation.release_branch.revision,
+      payload:{kind:"release-branch-precondition",name:observation.release_branch.name,
+        base_branch:observation.release_branch.base_branch,
+        head_sha:observation.release_branch.head_sha},
+    });
+    if (observation.release_pull_request!==null) operations.push({
+      resource:"pull_request",action:"verify",repository:draft.repository,
+      expected_revision:observation.release_pull_request.revision,
+      payload:{kind:"release-pull-request-precondition",number:observation.release_pull_request.number,
+        base_branch:observation.release_pull_request.base_branch,
+        head_branch:observation.release_pull_request.head_branch,
+        head_sha:observation.release_pull_request.head_sha,draft:observation.release_pull_request.draft},
+    });
     if (observation.milestone===null) operations.push({
       resource:"milestone",action:"create",repository:draft.repository,
       expected_revision:observation.repository_revision,
@@ -533,17 +655,38 @@ export function activationOperations(input) {
       )) {
         throw new CoreConflictError(`Work item ${item.id} release assignment drifted`);
       }
-      if (!item.work.release.assigned) operations.push({
+      if (item.work.release.assigned) operations.push({
+        resource:"issue",action:"verify",repository:draft.repository,
+        expected_revision:item.revision,
+        payload:{kind:"release-assignment-precondition",work_item_id:item.id,
+          work_sha256:sha256Canonical(item.work)},
+      });
+      else operations.push({
         resource:"issue",action:"update",repository:draft.repository,
         expected_revision:item.revision,
         payload:{kind:"release-assignment",program_id:program.program_id,release_id:draft.release_id,work_item_id:item.id,release:projection.work.release,item:{milestone:projection.work.item.milestone,base_branch:projection.work.item.base_branch}},
       });
-      if (item.kind==="epic" && !item.work.physical_branch.exists) operations.push({
+      if (item.kind==="epic" && item.work.physical_branch.exists) operations.push({
+        resource:"branch",action:"verify",repository:draft.repository,
+        expected_revision:item.branch_revision,
+        payload:{kind:"release-epic-branch-precondition",work_item_id:item.id,
+          name:item.work.item.branch,base_branch:branch,
+          head_sha:item.work.physical_branch.head_sha},
+      });
+      else if (item.kind==="epic") operations.push({
         resource:"branch",action:"create",repository:draft.repository,
         expected_revision:observation.repository_revision,
-        payload:{kind:"release-epic-branch",program_id:program.program_id,release_id:draft.release_id,work_item_id:item.id,name:item.work.item.branch,base_branch:branch,head_sha:releaseHead,base_revision:activated.revision},
+        payload:{kind:"release-epic-branch",program_id:program.program_id,release_id:draft.release_id,work_item_id:item.id,name:item.work.item.branch,base_branch:branch,head_sha:releaseHead,
+          base_revision:observation.release_branch?.revision ?? observation.default_branch.revision},
       });
-      if (canonicalJson(item.work.project.fields)!==canonicalJson(projection.fields)) operations.push({
+      if (canonicalJson(item.work.project.fields)===canonicalJson(projection.fields)) operations.push({
+        resource:"project",action:"verify",repository:draft.repository,
+        expected_revision:item.work.project.revision,
+        payload:{kind:"release-project-item-precondition",work_item_id:item.id,
+          project_id:item.work.project.project_id,item_id:item.work.project.item_id,
+          fields_sha256:sha256Canonical(item.work.project.fields)},
+      });
+      else operations.push({
         resource:"project",action:"update",repository:draft.repository,
         expected_revision:item.work.project.revision,
         payload:{kind:"release-project-state",program_id:program.program_id,release_id:draft.release_id,work_item_id:item.id,project_id:item.work.project.project_id,item_id:item.work.project.item_id,fields:projection.fields},
@@ -663,7 +806,7 @@ function nextReleaseCommand(program,release) {
   return null;
 }
 
-function releaseTrack(program,release,observation) {
+function releaseTrack(program,release,observation,reconciliation) {
   return Object.freeze({
     release_id:release.release_id,
     repository:release.repository,
@@ -677,7 +820,11 @@ function releaseTrack(program,release,observation) {
     gates:observation.gates,
     checks:observation.checks,
     patch_link:observation.patch_link,
-    next_command:nextReleaseCommand(program,release),
+    gate:reconciliation.required ? "RECONCILE_REQUIRED" : "NONE",
+    reconciliation,
+    next_command:reconciliation.required
+      ? `toss-core sync ${release.repository}`
+      : nextReleaseCommand(program,release),
   });
 }
 
@@ -707,7 +854,10 @@ export function releaseStatusResult(input) {
     program_id:selected.program.program_id,release_id:selected.release.release_id,
   }]);
   const repositoryEvidence=observed.repositories[0];
-  const track=releaseTrack(selected.program,selected.release,repositoryEvidence);
+  const reconciliation=reconciliationFromState(state,{
+    programId:selected.program.program_id,repository:selected.release.repository,
+  });
+  const track=releaseTrack(selected.program,selected.release,repositoryEvidence,reconciliation);
   return clone({
     kind:"release-status",source:observed.source,
     program:{id:selected.program.program_id,revision:selected.program.revision,phase:selected.program.phase},
@@ -715,6 +865,7 @@ export function releaseStatusResult(input) {
       phase:track.phase,version:track.version,milestone:track.milestone,branch:track.branch,
       release_pr_intent:track.release_pr_intent},
     scope:track.scope,gates:track.gates,checks:track.checks,patch_link:track.patch_link,
+    gate:track.gate,reconciliation:track.reconciliation,
     next_command:track.next_command,
   },"Release status result");
 }
@@ -733,8 +884,9 @@ export function programStatusResult(input) {
     programs:programs.map(program => ({
       id:program.program_id,revision:program.revision,phase:program.phase,
       dependency_stages:program.dependency_stages,
-      tracks:program.repository_releases.map(release =>
-        releaseTrack(program,release,byRelease.get(`${program.program_id}:${release.release_id}`))),
+      tracks:program.repository_releases.map(release => releaseTrack(program,release,
+        byRelease.get(`${program.program_id}:${release.release_id}`),
+        reconciliationFromState(state,{programId:program.program_id,repository:release.repository}))),
     })),
   },"Program status result");
 }

@@ -39,11 +39,12 @@ function configuredRepository(repository,number) {
     project_item_id:`PVTI_${number}`};
 }
 
-function releasePlanBody(revision) {
+function releasePlanBody(revision,{approved=true}={}) {
   return {
     kind:"release-plan",control_revision:revision,
+    project:{id:"PVT_TOSS_OS_2",revision:"project-plan-1"},
     candidates:[{
-      id:`${REPOSITORY}#10`,repository:REPOSITORY,approved:true,version:null,
+      id:`${REPOSITORY}#10`,repository:REPOSITORY,approved,version:null,
       decomposed:true,priority:10,risk:"medium",outcome:"organizational-lifecycle",
       change_class:"backward_compatible_feature",dependencies:[],
     }],
@@ -111,7 +112,8 @@ function activationBody(state,program) {
       milestone:null,release_branch:null,release_pull_request:null,
       comparison:{base_sha:"a".repeat(40),head_sha:"a".repeat(40),material_difference:false},
       governed_children:[{epic_id:`${REPOSITORY}#10`,epic_revision:"issue-10-1",child_ids:[]}],
-      work_items:[{id:`${REPOSITORY}#10`,kind:"epic",revision:"issue-10-1",work:epicWork()}],
+      work_items:[{id:`${REPOSITORY}#10`,kind:"epic",revision:"issue-10-1",
+        branch_revision:null,work:epicWork()}],
     }],
   };
 }
@@ -154,7 +156,7 @@ function activationRepository(repository,number,sha) {
     comparison:{base_sha:sha,head_sha:sha,material_difference:false},
     governed_children:[{epic_id:`${repository}#${number}`,
       epic_revision:`issue-${number}-1`,child_ids:[]}],
-    work_items:[{id:`${repository}#${number}`,kind:"epic",revision:`issue-${number}-1`,
+    work_items:[{id:`${repository}#${number}`,kind:"epic",revision:`issue-${number}-1`,branch_revision:null,
       work:epicFor(repository,number)}],
   };
 }
@@ -191,6 +193,10 @@ function memoryReleaseControl() {
     },
     async commitIntent({expectedHead,intent}) {
       assert.equal(expectedHead,revision);
+      if (intent.planned_receipt_id!==undefined && (
+        receipts.some(value => value.receipt_id===intent.planned_receipt_id) ||
+        intents.some(value => value.planned_receipt_id===intent.planned_receipt_id)
+      )) throw new CoreConflictError("planned receipt identity is already reserved");
       intents.push(structuredClone(intent));
       events.push({kind:"intent",value:structuredClone(intent)});
       revision=`control-${++revisionNumber}`;
@@ -198,6 +204,13 @@ function memoryReleaseControl() {
     },
     async commitReceipt({expectedHead,receipt}) {
       assert.equal(expectedHead,revision);
+      const owner=intents.find(value => value.intent_id===receipt.intent_id);
+      if (owner?.planned_receipt_id!==undefined && owner.planned_receipt_id!==receipt.receipt_id) {
+        throw new CoreConflictError("receipt does not use its planned identity");
+      }
+      if (receipts.some(value => value.receipt_id===receipt.receipt_id)) {
+        throw new CoreConflictError("receipt identity is already immutable");
+      }
       receipts.push(structuredClone(receipt));
       events.push({kind:"receipt",value:structuredClone(receipt)});
       revision=`control-${++revisionNumber}`;
@@ -211,6 +224,11 @@ function memoryReleaseControl() {
     async commitReleaseProgramReceipt({expectedHead,operation,receipt}) {
       assert.equal(expectedHead,revision);
       assert.equal(operation.payload.kind,"release-program-manifest");
+      const owner=intents.find(value => value.intent_id===receipt.intent_id);
+      if (owner?.planned_receipt_id!==receipt.receipt_id ||
+          receipts.some(value => value.receipt_id===receipt.receipt_id)) {
+        throw new CoreConflictError("program receipt identity is not uniquely reserved");
+      }
       programs=programs.filter(value => value.program_id!==operation.payload.program.program_id);
       programs.push(structuredClone(operation.payload.program));
       receipts.push(structuredClone(receipt));
@@ -234,28 +252,173 @@ function releaseHarness() {
   const control=memoryReleaseControl();
   const calls=[];
   let failureMode=null;
+  let planApproved=true;
+  let activationOverride=null;
+  let lastPlanBody=null;
+  let lastActivationBody=null;
+  const activationRevision=operation => {
+    const current=activationOverride ?? lastActivationBody;
+    if (!current) throw new CoreConflictError("activation evidence was not snapshotted");
+    if (operation.payload.kind==="release-activation-precondition") {
+      if (operation.payload.project_id!==current.project.id ||
+          operation.payload.snapshot_sha256!==sha256Canonical(current)) {
+        throw new CoreConflictError("activation aggregate evidence changed after snapshot");
+      }
+      return current.project.revision;
+    }
+    const repository=current.repositories.find(value => value.repository===operation.repository);
+    if (!repository) throw new CoreConflictError("activation repository evidence is absent");
+    const item=repository.work_items.find(value => value.id===operation.payload.work_item_id);
+    switch (operation.payload.kind) {
+      case "release-repository-precondition":
+        if (operation.payload.snapshot_sha256!==sha256Canonical(repository)) {
+          throw new CoreConflictError("repository aggregate evidence changed after snapshot");
+        }
+        return repository.repository_revision;
+      case "release-default-branch-precondition":
+        if (operation.payload.name!==repository.default_branch.name ||
+            operation.payload.head_sha!==repository.default_branch.head_sha) {
+          throw new CoreConflictError("default branch evidence changed after snapshot");
+        }
+        return repository.default_branch.revision;
+      case "release-milestone-precondition":
+        if (!repository.milestone || operation.payload.title!==repository.milestone.title ||
+            operation.payload.state!==repository.milestone.state) {
+          throw new CoreConflictError("milestone evidence changed after snapshot");
+        }
+        return repository.milestone.revision;
+      case "release-branch-precondition":
+        if (!repository.release_branch || operation.payload.name!==repository.release_branch.name ||
+            operation.payload.base_branch!==repository.release_branch.base_branch ||
+            operation.payload.head_sha!==repository.release_branch.head_sha) {
+          throw new CoreConflictError("release branch evidence changed after snapshot");
+        }
+        return repository.release_branch.revision;
+      case "release-pull-request-precondition":
+        if (!repository.release_pull_request ||
+            operation.payload.number!==repository.release_pull_request.number ||
+            operation.payload.base_branch!==repository.release_pull_request.base_branch ||
+            operation.payload.head_branch!==repository.release_pull_request.head_branch ||
+            operation.payload.head_sha!==repository.release_pull_request.head_sha ||
+            operation.payload.draft!==repository.release_pull_request.draft) {
+          throw new CoreConflictError("release pull request evidence changed after snapshot");
+        }
+        return repository.release_pull_request.revision;
+      case "release-assignment-precondition":
+        if (!item || operation.payload.work_sha256!==sha256Canonical(item.work)) {
+          throw new CoreConflictError("release assignment evidence changed after snapshot");
+        }
+        return item.revision;
+      case "release-epic-branch-precondition":
+        if (!item?.work.physical_branch.exists || operation.payload.name!==item.work.item.branch ||
+            operation.payload.base_branch!==repository.release_branch?.name ||
+            operation.payload.head_sha!==item.work.physical_branch.head_sha) {
+          throw new CoreConflictError("epic branch evidence changed after snapshot");
+        }
+        return item.branch_revision;
+      case "release-project-item-precondition":
+        if (!item || operation.payload.project_id!==item.work.project.project_id ||
+            operation.payload.item_id!==item.work.project.item_id ||
+            operation.payload.fields_sha256!==sha256Canonical(item.work.project.fields)) {
+          throw new CoreConflictError("Project item evidence changed after snapshot");
+        }
+        return item.work.project.revision;
+      case "release-milestone":
+        if (repository.milestone!==null) throw new CoreConflictError("milestone already exists");
+        return repository.repository_revision;
+      case "release-branch":
+        if (repository.release_branch!==null ||
+            operation.payload.base_branch!==repository.default_branch.name ||
+            operation.payload.head_sha!==repository.default_branch.head_sha) {
+          throw new CoreConflictError("release branch create base is stale");
+        }
+        return repository.default_branch.revision;
+      case "release-pull-request":
+        if (repository.release_pull_request!==null ||
+            operation.payload.base!==repository.default_branch.name ||
+            operation.payload.expected_head_revision!==repository.comparison.head_sha) {
+          throw new CoreConflictError("release pull request create evidence is stale");
+        }
+        return repository.repository_revision;
+      case "release-assignment":
+        if (!item || item.work.release.assigned) throw new CoreConflictError("release assignment is stale");
+        return item.revision;
+      case "release-epic-branch": {
+        if (!item || item.work.physical_branch.exists) throw new CoreConflictError("epic branch already exists");
+        const expectedBaseRevision=repository.release_branch?.revision ?? repository.default_branch.revision;
+        const expectedHead=repository.release_branch?.head_sha ?? repository.default_branch.head_sha;
+        if (operation.payload.base_revision!==expectedBaseRevision ||
+            operation.payload.head_sha!==expectedHead) {
+          throw new CoreConflictError("epic branch create base evidence is stale");
+        }
+        return repository.repository_revision;
+      }
+      case "release-project-state":
+        if (!item || operation.payload.project_id!==item.work.project.project_id ||
+            operation.payload.item_id!==item.work.project.item_id) {
+          throw new CoreConflictError("Project update target is stale");
+        }
+        return item.work.project.revision;
+      default:
+        throw new CoreConflictError(`unexpected release fake operation: ${operation.payload.kind}`);
+    }
+  };
   const github=Object.freeze({
     async snapshot(query) {
       calls.push({method:"snapshot",query:structuredClone(query)});
       const selectedPrograms=query.kind==="program-status" ? query.programs :
         query.program===null || query.program===undefined ? [] : [query.program];
       const planning={revision:query.control_revision};
-      const body=query.kind==="release-plan" ? releasePlanBody(query.control_revision) :
+      const body=query.kind==="release-plan" ? releasePlanBody(query.control_revision,{approved:planApproved}) :
         query.kind==="release-activation"
-          ? activationBody(planning,query.program)
+          ? structuredClone(activationOverride ?? activationBody(planning,query.program))
           : statusBody(planning,query.kind,selectedPrograms);
       if (failureMode==="source-race") control.advance();
+      if (query.kind==="release-plan") lastPlanBody=structuredClone(body);
+      if (query.kind==="release-activation") lastActivationBody=structuredClone(body);
       return body;
     },
     async inspect(operations) {
       calls.push({method:"inspect",operations:structuredClone(operations)});
-      return operations.map(operation => ({operation_id:operation.operation_id,
-        repository:operation.repository,revision:failureMode==="stale" &&
-          operation.payload.kind==="release-branch"
-          ? "stale-revision" : operation.expected_revision}));
+      return operations.map(operation => {
+        if (operation.payload.kind==="release-plan-precondition") {
+          const current={...lastPlanBody,candidates:lastPlanBody.candidates.map(candidate => ({
+            ...candidate,approved:planApproved,
+          }))};
+          if (operation.payload.project_id!==current.project.id ||
+              operation.payload.snapshot_sha256!==sha256Canonical(current)) {
+            throw new CoreConflictError("release plan evidence changed after snapshot");
+          }
+          return {operation_id:operation.operation_id,repository:null,
+            revision:current.project.revision};
+        }
+        if (operation.payload.kind.startsWith("release-")) {
+          const revision=failureMode==="stale" && operation.payload.kind==="release-branch"
+            ? "stale-revision"
+            : activationRevision(operation);
+          return {operation_id:operation.operation_id,repository:operation.repository,revision};
+        }
+        return {operation_id:operation.operation_id,
+          repository:operation.repository,revision:failureMode==="stale" &&
+            operation.payload.kind==="release-branch"
+            ? "stale-revision" : operation.expected_revision};
+      });
     },
     async apply(operations) {
       calls.push({method:"apply",operations:structuredClone(operations)});
+      const ranks=new Map([["release-milestone",10],["release-branch",20],
+        ["release-pull-request",40],["release-assignment",50],
+        ["release-epic-branch",60],["release-project-state",70]]);
+      let previous=-Infinity;
+      for (const operation of operations) {
+        if (operation.action==="verify") throw new CoreConflictError("verify operation reached mutation apply");
+        const rank=ranks.get(operation.payload.kind);
+        if (rank===undefined || rank<previous) throw new CoreConflictError("release mutation order is invalid");
+        previous=rank;
+        if (activationRevision(operation)!==operation.expected_revision) {
+          throw new CoreConflictError("release mutation expected revision is stale");
+        }
+      }
       if (failureMode==="partial") return {status:"failed",observed_revisions:operations.slice(0,1).map(operation => ({
         operation_id:operation.operation_id,repository:operation.repository,revision:`applied-${operation.operation_id}`,
       }))};
@@ -277,7 +440,15 @@ function releaseHarness() {
     policyRevision:() => "POLICY-0001",
   });
   const services=Object.freeze({control,github,operations:runner,clock:() => NOW});
-  return {calls,control,services,setFailureMode(value) { failureMode=value; }};
+  return {
+    calls,control,services,
+    setFailureMode(value) { failureMode=value; },
+    mutatePlanApproval() { planApproved=false; },
+    setActivationObservation(value) { activationOverride=structuredClone(value); },
+    mutateActivationDefaultBranch() {
+      activationOverride.repositories[0].default_branch.revision="main-after-confirmation";
+    },
+  };
 }
 
 test("Release Program commands are routed to built-in handlers",async () => {
@@ -305,11 +476,13 @@ test("release plan previews and atomically persists an exact Task 3 Draft throug
   assert.equal(preview.exitCode,0,JSON.stringify(preview.result.error));
   assert.equal(preview.result.data.schema_version,"operation-preview.v1");
   assert.deepEqual(preview.result.data.operations.map(value => value.payload.kind),[
-    "release-program-manifest",
+    "release-plan-precondition","release-program-manifest",
   ]);
-  assert.equal(preview.result.data.operations[0].payload.program.program_id,"TOSS-OS-R0001");
-  assert.equal(preview.result.data.operations[0].payload.program.phase,"DRAFT");
-  assert.equal(preview.result.data.operations[0].payload.program.rationale[0].version,"2.2.0");
+  const manifest=preview.result.data.operations.find(value =>
+    value.payload.kind==="release-program-manifest");
+  assert.equal(manifest.payload.program.program_id,"TOSS-OS-R0001");
+  assert.equal(manifest.payload.program.phase,"DRAFT");
+  assert.equal(manifest.payload.program.rationale[0].version,"2.2.0");
   assert.equal(control.events.length,0);
   assert.deepEqual(calls.map(value => value.method),["snapshot"]);
   assert.equal(calls[0].query.organization.control_repository,CONTROL_REPOSITORY);
@@ -325,7 +498,21 @@ test("release plan previews and atomically persists an exact Task 3 Draft throug
   assert.equal(control.view().programs[0].program_id,"TOSS-OS-R0001");
   assert.equal(control.view().programs[0].revision,"REV-0001");
   assert.deepEqual(control.events.map(value => value.kind),["intent","program-receipt"]);
-  assert.deepEqual(calls.map(value => value.method),["snapshot","snapshot"]);
+  assert.deepEqual(calls.map(value => value.method),["snapshot","snapshot","inspect"]);
+});
+
+test("release plan revalidates approval evidence after interactive confirmation",async () => {
+  const harness=releaseHarness();
+  const result=await dispatchCoreCommand(parseCoreCommand(["release","plan","--apply"]),{
+    services:harness.services,
+    confirm:async () => {
+      harness.mutatePlanApproval();
+      return true;
+    },
+  });
+  assert.equal(result.exitCode,6,JSON.stringify(result.result.error));
+  assert.deepEqual(harness.control.view().programs,[]);
+  assert.equal(harness.calls.filter(value => value.method==="apply").length,0);
 });
 
 test("repeated planning reuses the current record and promotes Waiting without allocating an id",async () => {
@@ -344,7 +531,8 @@ test("repeated planning reuses the current record and promotes Waiting without a
 
   const base={revision:"control-waiting",organization:organization(),
     repositories:[repositoryConfiguration()],programs:[],intents:[],receipts:[]};
-  const emptyBody={kind:"release-plan",control_revision:base.revision,candidates:[],completed:[],
+  const emptyBody={kind:"release-plan",control_revision:base.revision,
+    project:{id:"PVT_TOSS_OS_2",revision:"project-plan-1"},candidates:[],completed:[],
     repositories:[{repository:REPOSITORY,latest_published_version:"2.1.2"}]};
   const waiting=releasePlanOperations({planningState:base,snapshot:{...emptyBody,source:{
     repository:CONTROL_REPOSITORY,revision:base.revision,
@@ -358,7 +546,8 @@ test("repeated planning reuses the current record and promotes Waiting without a
   assert.equal(promoted.program.program_id,waiting.program_id);
   assert.equal(promoted.program.revision,"REV-0002");
   assert.equal(promoted.program.phase,"DRAFT");
-  assert.equal(promoted.operations[0].expected_revision,"REV-0001");
+  assert.equal(promoted.operations.find(value => value.payload.kind==="release-program-manifest")
+    .expected_revision,"REV-0001");
 });
 
 test("release activate materializes exact identities and Work projections in dependency order",async () => {
@@ -368,6 +557,7 @@ test("release activate materializes exact identities and Work projections in dep
   );
   assert.equal(planned.exitCode,0);
   const beforePreviewEvents=control.events.length;
+  const beforePreviewRemote=calls.filter(value => ["inspect","apply"].includes(value.method)).length;
 
   const preview=await dispatchCoreCommand(
     parseCoreCommand(["release","activate","TOSS-OS-R0001",REPOSITORY]),{services},
@@ -375,7 +565,8 @@ test("release activate materializes exact identities and Work projections in dep
   assert.equal(preview.exitCode,0,JSON.stringify(preview.result.error));
   assert.equal(preview.result.data.schema_version,"operation-preview.v1");
   assert.deepEqual(preview.result.data.operations.map(value => value.payload.kind),[
-    "release-milestone","release-branch","release-program-manifest",
+    "release-activation-precondition","release-repository-precondition",
+    "release-default-branch-precondition","release-milestone","release-branch","release-program-manifest",
     "release-assignment","release-epic-branch","release-project-state",
   ]);
   const previewProgram=preview.result.data.operations
@@ -391,7 +582,8 @@ test("release activate materializes exact identities and Work projections in dep
   assert.equal(activationQuery.repository_configurations[0].repository,REPOSITORY);
   assert.equal(activationQuery.project.node_id,"PVT_TOSS_OS_2");
   assert.equal(control.events.length,beforePreviewEvents);
-  assert.equal(calls.filter(value => ["inspect","apply"].includes(value.method)).length,0);
+  assert.equal(calls.filter(value => ["inspect","apply"].includes(value.method)).length,
+    beforePreviewRemote);
 
   const applied=await dispatchCoreCommand(
     parseCoreCommand(["release","activate","TOSS-OS-R0001",REPOSITORY,"--apply","--non-interactive"]),
@@ -413,6 +605,74 @@ test("release activate materializes exact identities and Work projections in dep
   const project=remoteApply.operations.find(value => value.payload.kind==="release-project-state");
   assert.equal(project.payload.fields.Status,"Blocked");
   assert.equal(project.payload.fields.Gate,"DEPENDENCY_REQUIRED");
+});
+
+test("release activation revalidates matching remote evidence after confirmation",async () => {
+  const harness=releaseHarness();
+  await dispatchCoreCommand(parseCoreCommand(["release","plan","--apply","--non-interactive"]),{
+    services:harness.services,
+  });
+  const state=harness.control.view();
+  const body=activationBody(state,state.programs[0]);
+  body.repositories[0].release_branch={
+    name:"release/v2.2.0",base_branch:"main",head_sha:"a".repeat(40),revision:"branch-1",
+  };
+  harness.setActivationObservation(body);
+  const applyBefore=harness.calls.filter(value => value.method==="apply").length;
+  const result=await dispatchCoreCommand(parseCoreCommand([
+    "release","activate","TOSS-OS-R0001",REPOSITORY,"--apply",
+  ]),{
+    services:harness.services,
+    confirm:async () => {
+      harness.mutateActivationDefaultBranch();
+      return true;
+    },
+  });
+  assert.equal(result.exitCode,6,JSON.stringify(result.result.error));
+  assert.equal(harness.calls.filter(value => value.method==="apply").length,applyBefore);
+  assert.equal(harness.control.view().programs[0].phase,"DRAFT");
+});
+
+test("activation retains verify-only preconditions for every matching remote observation",async () => {
+  const harness=releaseHarness();
+  await dispatchCoreCommand(parseCoreCommand(["release","plan","--apply","--non-interactive"]),{
+    services:harness.services,
+  });
+  const state=harness.control.view();
+  const program=state.programs[0];
+  const body=activationBody(state,program);
+  const repository=body.repositories[0];
+  repository.milestone={title:"v2.2.0",state:"OPEN",revision:"milestone-1"};
+  repository.release_branch={name:"release/v2.2.0",base_branch:"main",
+    head_sha:"b".repeat(40),revision:"branch-1"};
+  repository.comparison={base_sha:"a".repeat(40),head_sha:"b".repeat(40),material_difference:true};
+  repository.release_pull_request={number:42,base_branch:"main",head_branch:"release/v2.2.0",
+    head_sha:"b".repeat(40),draft:true,revision:"pull-1"};
+  const item=repository.work_items[0];
+  item.branch_revision="epic-branch-1";
+  item.work.release={assigned:true,active:true,id:`${REPOSITORY}@release/v2.2.0`,
+    repository:REPOSITORY,branch:"release/v2.2.0",milestone:"v2.2.0",revision:"REV-0002"};
+  Object.assign(item.work.item,{milestone:"v2.2.0",base_branch:"release/v2.2.0",
+    status:"Blocked",gate:"DEPENDENCY_REQUIRED"});
+  item.work.physical_branch={exists:true,head_sha:"b".repeat(40)};
+  Object.assign(item.work.project.fields,{Status:"Blocked",Gate:"DEPENDENCY_REQUIRED",
+    milestone:"v2.2.0",base_branch:"release/v2.2.0",last_reconciled_at:NOW});
+  const snapshot={...body,source:{repository:CONTROL_REPOSITORY,revision:state.revision,
+    sha256:sha256Canonical({control:state,github:body})}};
+  const decision=activationOperations({planningState:state,programId:program.program_id,
+    repository:REPOSITORY,snapshot,receiptId:"RECEIPT-20260903-2000",clock:() => NOW});
+  assert.deepEqual(decision.operations.map(operation => [operation.action,operation.payload.kind]),[
+    ["verify","release-activation-precondition"],
+    ["verify","release-repository-precondition"],
+    ["verify","release-default-branch-precondition"],
+    ["verify","release-milestone-precondition"],
+    ["verify","release-branch-precondition"],
+    ["verify","release-pull-request-precondition"],
+    ["verify","release-assignment-precondition"],
+    ["verify","release-epic-branch-precondition"],
+    ["verify","release-project-item-precondition"],
+    ["commit","release-program-manifest"],
+  ]);
 });
 
 test("release and program status return frozen aggregate projections without runner writes",async () => {
@@ -515,6 +775,39 @@ test("an unresolved failed release receipt blocks a new identity before another 
   assert.equal(calls.length,before);
 });
 
+test("release and program status expose failed release evidence as reconciliation",async () => {
+  const harness=releaseHarness();
+  await dispatchCoreCommand(parseCoreCommand(["release","plan","--apply","--non-interactive"]),{
+    services:harness.services,
+  });
+  harness.setFailureMode("partial");
+  const partial=await dispatchCoreCommand(parseCoreCommand([
+    "release","activate","TOSS-OS-R0001",REPOSITORY,"--apply","--non-interactive",
+  ]),{services:harness.services});
+  assert.equal(partial.exitCode,70);
+  harness.setFailureMode(null);
+  const failed=harness.control.view().receipts.find(value => value.status==="failed");
+
+  const release=await dispatchCoreCommand(parseCoreCommand(["release","status",REPOSITORY]),{
+    services:harness.services,
+  });
+  assert.equal(release.exitCode,0,JSON.stringify(release.result.error));
+  assert.equal(release.result.data.gate,"RECONCILE_REQUIRED");
+  assert.equal(release.result.data.next_command,`toss-core sync ${REPOSITORY}`);
+  assert.equal(release.result.data.reconciliation.required,true);
+  assert.equal(release.result.data.reconciliation.evidence[0].intent.intent_id,failed.intent_id);
+  assert.equal(release.result.data.reconciliation.evidence[0].receipt.receipt_id,failed.receipt_id);
+
+  const program=await dispatchCoreCommand(parseCoreCommand(["program","status","TOSS-OS-R0001"]),{
+    services:harness.services,
+  });
+  assert.equal(program.exitCode,0,JSON.stringify(program.result.error));
+  const track=program.result.data.programs[0].tracks[0];
+  assert.equal(track.gate,"RECONCILE_REQUIRED");
+  assert.equal(track.next_command,`toss-core sync ${REPOSITORY}`);
+  assert.equal(track.reconciliation.evidence[0].receipt.receipt_id,failed.receipt_id);
+});
+
 test("activation ignores failed evidence that affects neither its program nor repository",async () => {
   const initial=twoRepositoryDraft();
   const intent=createOperationIntent({
@@ -609,6 +902,7 @@ test("matching release resources are idempotent, while same-version milestone dr
   staleAssignment.repositories[0].work_items[0].work.physical_branch={
     exists:true,head_sha:"a".repeat(40),
   };
+  staleAssignment.repositories[0].work_items[0].branch_revision="epic-branch-1";
   const staleAssignmentSnapshot={...staleAssignment,source:{repository:CONTROL_REPOSITORY,
     revision:state.revision,sha256:sha256Canonical({control:state,github:staleAssignment})}};
   assert.throws(() => activationOperations({planningState:state,programId:program.program_id,
@@ -622,6 +916,31 @@ test("matching release resources are idempotent, while same-version milestone dr
   assert.throws(() => activationOperations({planningState:state,programId:program.program_id,
     repository:REPOSITORY,snapshot:driftedSnapshot,receiptId:"RECEIPT-20260903-9004",clock:() => NOW}),
   CoreConflictError);
+});
+
+test("epic branch creation binds the observed physical base revision",async () => {
+  const harness=releaseHarness();
+  await dispatchCoreCommand(parseCoreCommand(["release","plan","--apply","--non-interactive"]),{
+    services:harness.services,
+  });
+  const state=harness.control.view();
+  const program=state.programs[0];
+  const decisionFor=body => activationOperations({planningState:state,programId:program.program_id,
+    repository:REPOSITORY,snapshot:{...body,source:{repository:CONTROL_REPOSITORY,
+      revision:state.revision,sha256:sha256Canonical({control:state,github:body})}},
+    receiptId:"RECEIPT-20260903-9006",clock:() => NOW});
+
+  const existing=activationBody(state,program);
+  existing.repositories[0].release_branch={name:"release/v2.2.0",base_branch:"main",
+    head_sha:"a".repeat(40),revision:"branch-physical-1"};
+  const existingEpic=decisionFor(existing).operations.find(value =>
+    value.payload.kind==="release-epic-branch");
+  assert.equal(existingEpic.payload.base_revision,"branch-physical-1");
+
+  const created=activationBody(state,program);
+  const createdEpic=decisionFor(created).operations.find(value =>
+    value.payload.kind==="release-epic-branch");
+  assert.equal(createdEpic.payload.base_revision,"main-1");
 });
 
 test("material comparison emits one Draft release PR after its persisted intent operation",async () => {
@@ -656,6 +975,8 @@ test("material comparison emits one Draft release PR after its persisted intent 
     operations:decision.operations,
   });
   assert.deepEqual(intent.operations.map(value => value.payload.kind),[
+    "release-activation-precondition","release-repository-precondition",
+    "release-default-branch-precondition","release-branch-precondition",
     "release-milestone","release-program-manifest",
     "release-pull-request","release-assignment","release-epic-branch","release-project-state",
   ]);
@@ -673,7 +994,7 @@ test("activation assigns governed children but creates only the epic physical br
   const program=state.programs[0];
   const body=activationBody(state,program);
   body.repositories[0].work_items.push({
-    id:`${REPOSITORY}#11`,kind:"issue",revision:"issue-11-1",work:childWork(),
+    id:`${REPOSITORY}#11`,kind:"issue",revision:"issue-11-1",branch_revision:null,work:childWork(),
   });
   body.repositories[0].governed_children[0].child_ids=[`${REPOSITORY}#11`];
   const snapshot={...body,source:{repository:CONTROL_REPOSITORY,revision:state.revision,
@@ -755,7 +1076,7 @@ test("stale activation preflight performs zero remote writes and partial evidenc
   assert.equal(failed.exitCode,70);
   assert.equal(partial.control.view().programs[0].phase,"DRAFT");
   const failedReceipt=partial.control.view().receipts.find(value => value.status==="failed");
-  assert.equal(failedReceipt.observed_revisions.length,1);
+  assert.equal(failedReceipt.observed_revisions.length,4);
   const before=partial.calls.length;
   const retry=await dispatchCoreCommand(parseCoreCommand([
     "release","activate","TOSS-OS-R0001",REPOSITORY,
@@ -774,7 +1095,7 @@ test("stale activation preflight performs zero remote writes and partial evidenc
   assert.equal(controlRace.exitCode,70);
   assert.equal(raced.control.view().programs[0].phase,"DRAFT");
   const raceReceipt=raced.control.view().receipts.find(value => value.status==="failed");
-  assert.equal(raceReceipt.observed_revisions.length,5);
+  assert.equal(raceReceipt.observed_revisions.length,8);
 });
 
 function twoRepositoryDraft() {
@@ -786,6 +1107,7 @@ function twoRepositoryDraft() {
   };
   const body={
     kind:"release-plan",control_revision:state.revision,
+    project:{id:"PVT_TOSS_OS_2",revision:"project-plan-1"},
     candidates:[
       {id:`${REPOSITORY}#10`,repository:REPOSITORY,approved:true,version:null,decomposed:true,
         priority:10,risk:"medium",outcome:"joint",change_class:"backward_compatible_feature",dependencies:[]},
@@ -899,7 +1221,8 @@ test("activation rechecks one-active-release concurrency against every persisted
 
 test("release operation boundaries reject proxy and accessor wrappers without invoking traps",() => {
   const initial=twoRepositoryDraft();
-  const body={kind:"release-plan",control_revision:"control-wrapper",candidates:[],completed:[],
+  const body={kind:"release-plan",control_revision:"control-wrapper",
+    project:{id:"PVT_TOSS_OS_2",revision:"project-plan-1"},candidates:[],completed:[],
     repositories:[{repository:REPOSITORY,latest_published_version:"2.1.2"},
       {repository:CONSOLE,latest_published_version:"1.3.2"}]};
   const state={...initial.state,revision:"control-wrapper",programs:[]};

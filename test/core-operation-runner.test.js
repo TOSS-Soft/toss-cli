@@ -60,6 +60,27 @@ test("mixed legacy and release operations retain one transitive canonical order"
   ]);
 });
 
+test("release verify operations sort before mutations and bind a planned receipt",() => {
+  const intent=createOperationIntent({
+    intent_id:"INTENT-20260901-0003",created_at:"2026-09-01T08:00:00.000Z",
+    command:"release.activate",policy_revision:"POLICY-0001",
+    source:{repository:"TOSS-Soft/control",revision:"control-1",sha256:"a".repeat(64)},
+    authority:null,planned_receipt_id:"RECEIPT-20260901-0003",
+    operations:[
+      {resource:"milestone",action:"create",repository:"TOSS-Soft/toss-cli",
+        expected_revision:"repository-1",payload:{kind:"release-milestone"}},
+      {resource:"branch",action:"verify",repository:"TOSS-Soft/toss-cli",
+        expected_revision:"main-1",payload:{kind:"release-default-branch-precondition",
+          name:"main",head_sha:"a".repeat(40)}},
+    ],
+  });
+  assert.equal(intent.planned_receipt_id,"RECEIPT-20260901-0003");
+  assert.deepEqual(intent.operations.map(value => [value.action,value.payload.kind]),[
+    ["verify","release-default-branch-precondition"],
+    ["create","release-milestone"],
+  ]);
+});
+
 test("an expected revision changes the deterministic operation intent hash",() => {
   const first=createOperationIntent(operationInput({expected_revision:"rev-1"}));
   const second=createOperationIntent(operationInput({expected_revision:"rev-2"}));
@@ -232,6 +253,68 @@ test("a tagged intent CAS conflict exits six before GitHub apply",async () => {
   });
   await assert.rejects(runner.apply(createOperationIntent(operationInput()),{authority:null}),error => error.code==="CORE_CONFLICT" && error.exitCode===6);
   assert.deepEqual(events,[]);
+});
+
+test("caller-bound receipt collision is reserved with intent before remote apply",async () => {
+  const collision="RECEIPT-20260901-0099";
+  const receipts=[collision];
+  const intents=[];
+  let revision="head-0";
+  let applyCount=0;
+  let intentSequence=0;
+  const conflict=message => Object.assign(new Error(message),{code:"CONTROL_LEDGER_CONFLICT"});
+  const runner=createOperationRunner({
+    control:{
+      async head() { return revision; },
+      async findIntent(intent) { return intents.find(value => value.intent_id===intent.intent_id) ?? null; },
+      async findReceipt() { return null; },
+      async commitIntent({expectedHead,intent}) {
+        assert.equal(expectedHead,revision);
+        if (receipts.includes(intent.planned_receipt_id) ||
+            intents.some(value => value.planned_receipt_id===intent.planned_receipt_id)) {
+          throw conflict("planned receipt identity is already reserved");
+        }
+        intents.push(structuredClone(intent));
+        revision=`head-${intents.length}`;
+        return {commit_sha:revision};
+      },
+      async commitReceipt({expectedHead,receipt}) {
+        assert.equal(expectedHead,revision);
+        if (receipts.includes(receipt.receipt_id)) throw conflict("receipt identity already exists");
+        receipts.push(receipt.receipt_id);
+        revision=`head-${intents.length + receipts.length}`;
+        return {commit_sha:revision};
+      },
+    },
+    github:{
+      async snapshot() { return {}; },
+      async inspect(operations) { return operations.map(operation => ({
+        operation_id:operation.operation_id,repository:operation.repository,
+        revision:operation.expected_revision,
+      })); },
+      async apply(operations) {
+        applyCount+=1;
+        return {status:"completed",observed_revisions:operations.map(operation => ({
+          operation_id:operation.operation_id,repository:operation.repository,revision:"applied-1",
+        }))};
+      },
+    },
+    authorityRegistry:null,clock:() => "2026-09-01T08:01:00.000Z",
+    idGenerator:kind => kind==="intent"
+      ? `INTENT-20260901-${String(++intentSequence).padStart(4,"0")}`
+      : "RECEIPT-20260901-0100",
+    policyRevision:() => "POLICY-0001",
+  });
+  const command=parseCoreCommand(["repo","add","TOSS-Soft/toss-cli","--apply","--non-interactive"]);
+  const request={command,source:operationInput().source,operations:operationInput().operations,authority:null};
+  await assert.rejects(runner.execute({...request,receipt_id:collision}),error =>
+    error.code==="CORE_CONFLICT" && error.exitCode===6);
+  assert.equal(applyCount,0);
+
+  const completed=await runner.execute({...request,receipt_id:"RECEIPT-20260901-0100"});
+  assert.equal(completed.receipt_id,"RECEIPT-20260901-0100");
+  assert.equal(completed.status,"completed");
+  assert.equal(applyCount,1);
 });
 
 test("a corrupt stored receipt is a ledger conflict before GitHub apply",async () => {

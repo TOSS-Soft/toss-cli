@@ -198,11 +198,28 @@ function validatePersistedReceiptCoverage(receipt,intent) {
 
 function validatePersistedReceiptRecords(receipts,intents,{bootstrapReceipt=null}={}) {
   const byIntentId=new Map(intents.map(record => [record.document.intent_id,record.document]));
+  const byReceiptId=new Map(receipts.map(record => [record.document.receipt_id,record.document]));
+  const reservations=new Map();
+  for (const record of intents) {
+    const intent=record.document;
+    if (intent.planned_receipt_id===undefined) continue;
+    if (reservations.has(intent.planned_receipt_id)) {
+      throw ledgerConflict(`planned receipt identity has multiple intent owners: ${intent.planned_receipt_id}`);
+    }
+    reservations.set(intent.planned_receipt_id,intent.intent_id);
+    const receipt=byReceiptId.get(intent.planned_receipt_id);
+    if (receipt && receipt.intent_id!==intent.intent_id) {
+      throw ledgerConflict(`planned receipt identity was consumed by another intent: ${intent.planned_receipt_id}`);
+    }
+  }
   const receiptByIntentId=new Map();
   for (const record of receipts) {
     const intent=byIntentId.get(record.document.intent_id);
     if (!intent) throw ledgerConflict(`receipt intent is absent from the ledger: ${record.document.intent_id}`);
     if (receiptByIntentId.has(record.document.intent_id)) throw ledgerConflict(`receipt intent has multiple immutable receipts: ${record.document.intent_id}`);
+    if (intent.planned_receipt_id!==undefined && intent.planned_receipt_id!==record.document.receipt_id) {
+      throw ledgerConflict(`receipt does not use its persisted intent reservation: ${record.document.receipt_id}`);
+    }
     receiptByIntentId.set(record.document.intent_id,record);
     if (record.document.receipt_id!==bootstrapReceipt?.receipt_id) validatePersistedReceiptCoverage(record.document,intent);
   }
@@ -628,6 +645,21 @@ export function createCoreControlStore({repository}) {
       prefix:CONTROL_PATHS.intents,
       idField:"intent_id",
       pathFor:intentPath,
+      beforeWrite:async (candidate,revision) => {
+        if (candidate.planned_receipt_id===undefined) return;
+        const [intents,receipts]=await Promise.all([
+          resolveGlobalIdentities({revision,prefix:CONTROL_PATHS.intents,
+            schemaId:"operation-intent.v1",label:"intent",idField:"intent_id",
+            pathFor:intentPath,ledgerRead:true}),
+          resolveGlobalIdentities({revision,prefix:CONTROL_PATHS.receipts,
+            schemaId:"operation-receipt.v1",label:"receipt",idField:"receipt_id",
+            pathFor:receiptPath,ledgerRead:true}),
+        ]);
+        if (intents.some(record => record.document.planned_receipt_id===candidate.planned_receipt_id) ||
+            receipts.some(record => record.document.receipt_id===candidate.planned_receipt_id)) {
+          throw ledgerConflict(`planned receipt identity is already reserved: ${candidate.planned_receipt_id}`);
+        }
+      },
     });
   }
 
@@ -635,18 +667,27 @@ export function createCoreControlStore({repository}) {
     if (revision===null) {
       throw new Error("receipt intent must already be persisted");
     }
-    const matches=(await resolveGlobalIdentities({
+    const intentRecords=await resolveGlobalIdentities({
       revision,
       prefix:CONTROL_PATHS.intents,
       schemaId:"operation-intent.v1",
       label:"intent",
       idField:"intent_id",
       pathFor:intentPath,
-    })).filter(record => record.document.intent_id===receipt.intent_id).map(record => record.document);
+    });
+    const matches=intentRecords.filter(record =>
+      record.document.intent_id===receipt.intent_id).map(record => record.document);
     if (matches.length!==1) {
       throw new Error(`receipt intent must resolve to exactly one persisted intent: ${receipt.intent_id}`);
     }
     const intent=matches[0];
+    if (intent.planned_receipt_id!==undefined && intent.planned_receipt_id!==receipt.receipt_id) {
+      throw ledgerConflict(`receipt does not use its intent reservation: ${receipt.receipt_id}`);
+    }
+    if (intentRecords.some(record => record.document.intent_id!==intent.intent_id &&
+        record.document.planned_receipt_id===receipt.receipt_id)) {
+      throw ledgerConflict(`receipt identity is reserved by another intent: ${receipt.receipt_id}`);
+    }
     assertReceiptCoverage(receipt,intent);
     const matchingReceipts=(await resolveGlobalIdentities({
       revision,

@@ -21,6 +21,10 @@
         {"$ref": "https://toss.software/schemas/core/authority-record.v1.schema.json"}
       ]
     },
+    "planned_receipt_id": {
+      "type": "string",
+      "pattern": "^RECEIPT-[0-9]{8}-[0-9]{4,}$"
+    },
     "operations": {
       "type": "array",
       "minItems": 1,
@@ -54,7 +58,7 @@
       "properties": {
         "operation_id": {"type": "string", "pattern": "^OP-[0-9]{4,}$"},
         "resource": {"enum": ["branch", "issue", "milestone", "project", "pull_request", "repository", "workflow"]},
-        "action": {"enum": ["close", "commit", "create", "merge", "register", "reopen", "update"]},
+        "action": {"enum": ["close", "commit", "create", "merge", "register", "reopen", "update", "verify"]},
         "repository": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
         "expected_revision": {"type": ["string", "null"], "minLength": 1},
         "payload": {"type": "object"},

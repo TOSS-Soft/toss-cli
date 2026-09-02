@@ -2,6 +2,16 @@ import {canonicalJson} from "../contracts/acp.js";
 import {compareCanonicalText} from "./canonical-order.js";
 
 const RELEASE_OPERATION_RANK=Object.freeze(new Map([
+  ["release-plan-precondition",-100],
+  ["release-activation-precondition",-99],
+  ["release-repository-precondition",-98],
+  ["release-default-branch-precondition",-97],
+  ["release-milestone-precondition",-96],
+  ["release-branch-precondition",-95],
+  ["release-pull-request-precondition",-94],
+  ["release-assignment-precondition",-93],
+  ["release-epic-branch-precondition",-92],
+  ["release-project-item-precondition",-91],
   ["release-milestone",10],
   ["release-branch",20],
   ["release-program-manifest",30],

@@ -65,7 +65,9 @@ function normalizeOperation(value) {
 
 export function createOperationIntent(input) {
   const value=closedClone(input);
-  exactKeys(value,["intent_id","created_at","command","policy_revision","source","authority","operations"],"operation intent input");
+  const required=["intent_id","created_at","command","policy_revision","source","authority","operations"];
+  const keys=Object.hasOwn(value,"planned_receipt_id") ? [...required,"planned_receipt_id"] : required;
+  exactKeys(value,keys,"operation intent input");
   exactKeys(value.source,["repository","revision","sha256"],"operation intent source");
   if (!Array.isArray(value.operations) || value.operations.length===0) fail("Operation intent input must contain operations");
   const operations=value.operations.map(normalizeOperation).sort(compareOperations).map((operation,index) => Object.freeze({
@@ -81,6 +83,9 @@ export function createOperationIntent(input) {
     policy_revision:value.policy_revision,
     source:value.source,
     authority:value.authority,
+    ...(Object.hasOwn(value,"planned_receipt_id")
+      ? {planned_receipt_id:value.planned_receipt_id}
+      : {}),
     operations:Object.freeze(operations),
   });
   validateCoreDocument(intent,"operation-intent.v1");

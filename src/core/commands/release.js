@@ -1,15 +1,15 @@
 import {types} from "node:util";
 
 import {sha256Canonical} from "../../contracts/acp.js";
-import {validateCoreDocument} from "../contracts.js";
 import {CoreBlockedError,CoreConflictError,CoreValidationError} from "../errors.js";
 import {
   activationOperations,
   normalizeReleasePlanningState,
   releasePlanOperations,
+  releaseReconciliationEvidence,
   releaseStatusResult,
 } from "../release/operations.js";
-import {assertReceiptCoverage,closedData,ownDataFunction,ownDataValue} from "./common.js";
+import {closedData,ownDataFunction,ownDataValue} from "./common.js";
 
 function assertUngated(command) {
   if (command.options.authority!==null || command.options.from!==null) {
@@ -35,34 +35,10 @@ function compareProgramIds(left,right) {
   return leftNumber<rightNumber ? -1 : leftNumber>rightNumber ? 1 : left<right ? -1 : left>right ? 1 : 0;
 }
 
-function releaseIntentAffects(intent,{programId,repository}) {
-  if (programId===null && repository===null) return true;
-  const operations=intent.operations;
-  const programMatch=programId!==null && operations.some(operation =>
-    operation.payload?.program_id===programId || operation.payload?.program?.program_id===programId);
-  const repositoryMatch=repository!==null && operations.some(operation =>
-    (operation.payload?.kind!=="release-program-manifest" && operation.repository===repository) ||
-    (Array.isArray(operation.payload?.program?.repository_releases) &&
-      operation.payload.program.repository_releases.some(release => release?.repository===repository)));
-  return programMatch || repositoryMatch;
-}
-
 function assertResolvedReleaseEvidence(state,{programId=null,repository=null}={}) {
-  const receipts=new Map();
-  for (const value of state.receipts) {
-    const receipt=validateCoreDocument(value,"operation-receipt.v1");
-    if (receipts.has(receipt.intent_id)) throw new CoreConflictError("Release receipt evidence is ambiguous");
-    receipts.set(receipt.intent_id,receipt);
-  }
-  for (const value of state.intents) {
-    const intent=validateCoreDocument(value,"operation-intent.v1");
-    if (!intent.command.startsWith("release.") ||
-        !releaseIntentAffects(intent,{programId,repository})) continue;
-    const receipt=receipts.get(intent.intent_id);
-    if (receipt) assertReceiptCoverage(receipt,intent,"Release operation receipt");
-    if (!receipt || receipt.status!=="completed") {
-      throw new CoreBlockedError(`Release operation ${intent.intent_id} has unresolved partial or failed evidence`);
-    }
+  const reconciliation=releaseReconciliationEvidence({planningState:state,programId,repository});
+  if (reconciliation.required) {
+    throw new CoreBlockedError(`Release operation ${reconciliation.evidence[0].intent.intent_id} has unresolved partial or failed evidence`);
   }
 }
 

@@ -1653,6 +1653,38 @@ test("bootstrap state returns a deeply frozen root proof",async t => {
   assert.equal(Object.isFrozen(state.receipt.observed_revisions),true);
 });
 
+test("intent commit atomically reserves one globally unique planned receipt identity",async t => {
+  const {store,repositoryControl,bootstrap,head}=await createBootstrappedStore(t);
+  const operation={resource:"repository",action:"update",repository:"TOSS-Soft/toss-cli",
+    expected_revision:"repository-1",payload:{kind:"planned-receipt-probe"}};
+  const intentWith=(intentId,plannedReceiptId) => createOperationIntent({
+    intent_id:intentId,created_at:"2026-09-03T08:00:00.000Z",command:"release.activate",
+    policy_revision:"POLICY-0001",
+    source:{repository:bootstrap.organization.control_repository,revision:head,sha256:"d".repeat(64)},
+    authority:null,planned_receipt_id:plannedReceiptId,operations:[operation],
+  });
+  const colliding=intentWith("INTENT-20260903-0098",bootstrap.receipt.receipt_id);
+  await assert.rejects(store.commitIntent({expectedHead:head,intent:colliding}),error =>
+    error?.code==="CONTROL_LEDGER_CONFLICT");
+  assert.equal(await store.head(),head);
+
+  const planned=intentWith("INTENT-20260903-0099","RECEIPT-20260901-0100");
+  const committed=await store.commitIntent({expectedHead:head,intent:planned});
+  const recorded=receiptForIntent(planned,{number:"0100",observed_revisions:[{
+    operation_id:planned.operations[0].operation_id,repository:planned.operations[0].repository,
+    revision:"repository-2",
+  }]});
+  const completed=await store.commitReceipt({expectedHead:committed.commit_sha,receipt:recorded});
+  assert.deepEqual(await store.findReceipt(planned),recorded);
+
+  const corrupt=intentWith("INTENT-20260903-0100",planned.planned_receipt_id);
+  await repositoryControl.commitFiles({expectedHead:completed.commit_sha,
+    message:"inject duplicate planned receipt reservation",
+    files:{[intentPath(corrupt)]:corrupt}});
+  await assert.rejects(store.loadOperationState(),error =>
+    error?.code==="CONTROL_LEDGER_CONFLICT");
+});
+
 test("release program finalization atomically CAS-writes the manifest and its logical-revision receipt",async t => {
   const {store,bootstrap,head}=await createBootstrappedStore(t);
   const configuration=repositoryConfig();
