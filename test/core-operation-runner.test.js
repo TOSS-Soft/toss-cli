@@ -81,6 +81,65 @@ test("release verify operations sort before mutations and bind a planned receipt
   ]);
 });
 
+test("verify actions and release precondition kinds are bidirectionally closed",() => {
+  const makeIntent=operation => createOperationIntent({...operationInput(),
+    command:"release.activate",operations:[operation]});
+  const valid={resource:"branch",action:"verify",repository:"TOSS-Soft/toss-cli",
+    expected_revision:"main-1",payload:{kind:"release-default-branch-precondition",
+      name:"main",head_sha:"a".repeat(40)}};
+  assert.equal(makeIntent(valid).operations[0].action,"verify");
+  const planQuery={kind:"release-plan",control_revision:"abc",organization:{
+    schema_version:"organization-config.v1",organization:"TOSS-Soft",
+    project:{node_id:"PVT_project",number:2},control_repository:"TOSS-Soft/control",
+    policy_revision:"POLICY-0001",repositories:["TOSS-Soft/toss-cli"],
+  },repositories:[{
+    schema_version:"repository-config.v1",repository:"TOSS-Soft/toss-cli",
+    repository_node_id:"R_cli",default_branch:"main",active_release:null,
+    project_item_id:"PVTI_cli",project_fields:{status:"Status",gate:"Gate"},
+    registered_at:"2026-09-01T08:00:00.000Z",
+  }],programs:[]};
+  const validPlan={resource:"project",action:"verify",repository:null,
+    expected_revision:"project-1",payload:{kind:"release-plan-precondition",
+      project_id:"PVT_project",query:planQuery,snapshot_sha256:"b".repeat(64)}};
+  const makePlanIntent=operation => createOperationIntent({...operationInput(),
+    command:"release.plan",source:{...operationInput().source,
+      repository:"TOSS-Soft/control"},operations:[operation]});
+  assert.equal(makePlanIntent(validPlan).operations[0].payload.query.control_revision,"abc");
+
+  const invalid=[
+    () => makeIntent({...valid,payload:{kind:"release-milestone",program_id:"TOSS-OS-R0001",
+      release_id:"REL-TOSS-OS-R0001-abc",title:"v2.2.0",state:"OPEN"}}),
+    () => makeIntent({...valid,action:"update"}),
+    () => makeIntent({...valid,repository:null}),
+    () => makeIntent({...valid,payload:{...valid.payload,unexpected:true}}),
+    () => makePlanIntent({...validPlan,payload:{...validPlan.payload,
+      query:{...planQuery,unexpected:true}}}),
+    () => makePlanIntent({...validPlan,payload:{...validPlan.payload,
+      query:{...planQuery,control_revision:"other-control"}}}),
+  ];
+  for (const invalidIntent of invalid) {
+    assert.throws(invalidIntent,error =>
+      error?.code==="CORE_CONTRACT_INVALID" && error?.exitCode===5);
+  }
+
+  let hostileCalls=0;
+  let deep={leaf:true};
+  for (let index=0;index<10_000;index+=1) deep={next:deep};
+  const accessor={...valid.payload};
+  Object.defineProperty(accessor,"query",{enumerable:true,get() {
+    hostileCalls+=1;
+    throw new Error("must not read verify payload accessor");
+  }});
+  const proxy=new Proxy(valid.payload,{
+    ownKeys() { hostileCalls+=1; throw new Error("must not enumerate verify payload proxy"); },
+  });
+  for (const payload of [accessor,proxy,{...valid.payload,unexpected:deep}]) {
+    assert.throws(() => makeIntent({...valid,payload}),error =>
+      error?.code==="CORE_CONTRACT_INVALID" && error?.exitCode===5);
+  }
+  assert.equal(hostileCalls,0);
+});
+
 test("an expected revision changes the deterministic operation intent hash",() => {
   const first=createOperationIntent(operationInput({expected_revision:"rev-1"}));
   const second=createOperationIntent(operationInput({expected_revision:"rev-2"}));
@@ -154,6 +213,127 @@ test("apply persists the intent before its remote call and a bound receipt after
   const receipt=await runner.apply(createOperationIntent(operationInput()),{authority:null});
   assert.equal(receipt.status,"completed");
   assert.deepEqual(events,["intent","inspect","apply","receipt"]);
+});
+
+test("direct legacy apply reserves before remote work and blocks an unresolved persisted legacy intent",async () => {
+  const legacy=createOperationIntent(operationInput());
+  let committedIntent=null;
+  let committedReceipt=null;
+  const freshEvents=[];
+  let freshHead="head-0";
+  const github=events => ({
+    async snapshot() { return {}; },
+    async inspect(operations) {
+      events.push("inspect");
+      return operations.map(operation => ({operation_id:operation.operation_id,
+        repository:operation.repository,revision:operation.expected_revision}));
+    },
+    async apply(operations) {
+      events.push("apply");
+      return {status:"completed",observed_revisions:operations.map(operation => ({
+        operation_id:operation.operation_id,repository:operation.repository,revision:"rev-2",
+      }))};
+    },
+  });
+  const freshRunner=createOperationRunner({
+    control:{
+      async head() { return freshHead; },
+      async findIntent(intent) {
+        return committedIntent?.intent_id===intent.intent_id
+          ? structuredClone(committedIntent)
+          : null;
+      },
+      async findReceipt(intent) {
+        return committedReceipt?.intent_id===intent.intent_id
+          ? structuredClone(committedReceipt)
+          : null;
+      },
+      async commitIntent({expectedHead,intent}) {
+        assert.equal(expectedHead,freshHead);
+        committedIntent=structuredClone(intent);
+        freshEvents.push("intent");
+        freshHead="head-1";
+        return {commit_sha:freshHead};
+      },
+      async commitReceipt({expectedHead,receipt}) {
+        assert.equal(expectedHead,freshHead);
+        committedReceipt=structuredClone(receipt);
+        freshEvents.push("receipt");
+        freshHead="head-2";
+        return {commit_sha:freshHead};
+      },
+    },github:github(freshEvents),authorityRegistry:null,
+    clock:() => "2026-09-01T08:01:00.000Z",
+    idGenerator:() => "RECEIPT-20260901-0044",policyRevision:() => "POLICY-0001",
+  });
+  const completed=await freshRunner.apply(legacy,{authority:null});
+  const eventsAfterCompletion=[...freshEvents];
+  const replayed=await freshRunner.apply(legacy,{authority:null});
+
+  const unresolvedEvents=[];
+  let unresolvedError=null;
+  const unresolvedRunner=createOperationRunner({
+    control:{
+      async head() { return "legacy-head"; },
+      async findIntent() { return structuredClone(legacy); },
+      async findReceipt() { return null; },
+      async commitIntent() { throw new Error("persisted legacy intent is immutable"); },
+      async commitReceipt() { unresolvedEvents.push("receipt"); return {commit_sha:"receipt-head"}; },
+    },github:github(unresolvedEvents),authorityRegistry:null,
+    clock:() => "2026-09-01T08:01:00.000Z",
+    idGenerator:() => "RECEIPT-20260901-0045",policyRevision:() => "POLICY-0001",
+  });
+  try {
+    await unresolvedRunner.apply(legacy,{authority:null});
+  } catch (error) {
+    unresolvedError=error;
+  }
+  const completedLegacyReceipt={
+    schema_version:"operation-receipt.v1",document_type:"operation-receipt",
+    receipt_id:"RECEIPT-20260901-0046",intent_id:legacy.intent_id,
+    intent_sha256:sha256Canonical(legacy),created_at:"2026-09-01T08:01:00.000Z",
+    status:"completed",observed_revisions:[{operation_id:"OP-0001",
+      repository:"TOSS-Soft/toss-cli",revision:"rev-2"}],
+  };
+  const completedLegacyRunner=createOperationRunner({
+    control:{
+      async head() { return "legacy-complete-head"; },
+      async findIntent() { return structuredClone(legacy); },
+      async findReceipt() { return structuredClone(completedLegacyReceipt); },
+      async commitIntent() { throw new Error("completed legacy replay must not commit"); },
+      async commitReceipt() { throw new Error("completed legacy replay must not commit"); },
+    },github:{
+      async snapshot() { throw new Error("completed legacy replay must not snapshot"); },
+      async inspect() { throw new Error("completed legacy replay must not inspect"); },
+      async apply() { throw new Error("completed legacy replay must not apply"); },
+    },authorityRegistry:null,clock:() => "2026-09-01T08:01:00.000Z",
+    idGenerator:() => "RECEIPT-20260901-9999",policyRevision:() => "POLICY-0001",
+  });
+  const replayedLegacy=await completedLegacyRunner.apply(legacy,{authority:null});
+
+  assert.deepEqual({
+    planned:committedIntent?.planned_receipt_id ?? null,
+    receipt:committedReceipt?.receipt_id ?? null,
+    status:completed.status,
+    replayReceipt:replayed.receipt_id,
+    replayEvents:freshEvents.slice(eventsAfterCompletion.length),
+    freshEvents,
+    unresolvedCode:unresolvedError?.code ?? null,
+    unresolvedExit:unresolvedError?.exitCode ?? null,
+    unresolvedEvents,
+    completedLegacyReceipt:replayedLegacy.receipt_id,
+  },{
+    planned:"RECEIPT-20260901-0044",
+    receipt:"RECEIPT-20260901-0044",
+    status:"completed",
+    replayReceipt:"RECEIPT-20260901-0044",
+    replayEvents:[],
+    freshEvents:["intent","inspect","apply","receipt"],
+    unresolvedCode:"CORE_BLOCKED",
+    unresolvedExit:4,
+    unresolvedEvents:[],
+    completedLegacyReceipt:"RECEIPT-20260901-0046",
+  });
 });
 
 test("retry rejects a persisted completed receipt that omits an intent observation",async () => {

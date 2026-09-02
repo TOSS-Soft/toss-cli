@@ -324,7 +324,56 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
   }
 
   async function apply(intent,{authority}={}) {
-    return applyIntent(intent,{authority});
+    const valid=validateCoreDocument(clone(intent,"intent"),"operation-intent.v1");
+    if (valid.planned_receipt_id!==undefined) return applyIntent(valid,{authority});
+    let prior;
+    try { prior=await findIntent(valid); } catch (error) {
+      const conflict=ledgerConflict(error,"legacy intent lookup");
+      if (conflict) throw conflict;
+      throw error;
+    }
+    if (prior!==null) {
+      let storedIntent;
+      try { storedIntent=validateCoreDocument(clone(prior,"stored legacy intent"),"operation-intent.v1"); } catch (error) {
+        throw new CoreConflictError("Legacy operation intent ledger is corrupt",{cause:error});
+      }
+      if (storedIntent.planned_receipt_id!==undefined) {
+        const {planned_receipt_id:_reservation,...legacyShape}=storedIntent;
+        if (canonicalJson(legacyShape)!==canonicalJson(valid)) {
+          throw new CoreConflictError("Legacy intent identity conflicts with the ledger");
+        }
+        return applyIntent(storedIntent,{authority});
+      }
+      if (sha256Canonical(storedIntent)!==sha256Canonical(valid)) {
+        throw new CoreConflictError("Legacy intent identity conflicts with the ledger");
+      }
+      let storedReceipt;
+      try { storedReceipt=exactReceipt(await findReceipt(storedIntent),storedIntent); } catch (error) {
+        const conflict=ledgerConflict(error,"legacy receipt lookup");
+        if (conflict) throw conflict;
+        throw error;
+      }
+      if (storedReceipt?.status==="completed") return storedReceipt;
+      throw new CoreBlockedError(storedReceipt===null
+        ? "Persisted legacy operation has no durable receipt reservation and requires reconciliation"
+        : "Persisted legacy operation has unresolved receipt evidence and requires reconciliation");
+    }
+    let orphanedReceipt;
+    try { orphanedReceipt=exactReceipt(await findReceipt(valid),valid); } catch (error) {
+      const conflict=ledgerConflict(error,"legacy receipt lookup");
+      if (conflict) throw conflict;
+      throw error;
+    }
+    if (orphanedReceipt!==null) {
+      if (orphanedReceipt.status!=="completed") {
+        throw new CoreBlockedError("Persisted legacy operation has unresolved receipt evidence and requires reconciliation");
+      }
+      return orphanedReceipt;
+    }
+    const receiptId=reserveReceiptId();
+    const planned=validateCoreDocument(clone({...valid,planned_receipt_id:receiptId},
+      "planned legacy intent"),"operation-intent.v1");
+    return applyIntent(planned,{authority,receiptId});
   }
 
   async function execute(input) {

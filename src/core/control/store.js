@@ -706,6 +706,11 @@ export function createCoreControlStore({repository}) {
     const existing=validated.intentRecords.find(record => record.document.intent_id===valid.intent_id);
     if (!existing) return null;
     if (!equivalent(existing.document,valid)) {
+      if (valid.planned_receipt_id===undefined &&
+          existing.document.planned_receipt_id!==undefined) {
+        const {planned_receipt_id:_reservation,...legacyShape}=existing.document;
+        if (equivalent(legacyShape,valid)) return existing.document;
+      }
       throw ledgerConflict(`intent lookup conflicts with immutable content: ${valid.intent_id}`);
     }
     return existing.document;

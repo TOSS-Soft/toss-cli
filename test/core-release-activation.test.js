@@ -9,6 +9,7 @@ import {createOperationRunner} from "../src/core/operations/runner.js";
 import {
   activationOperations,
   releasePlanOperations,
+  releaseReconciliationEvidence,
   releaseStatusResult,
 } from "../src/core/release/operations.js";
 
@@ -254,18 +255,20 @@ function releaseHarness() {
   let failureMode=null;
   let planApproved=true;
   let activationOverride=null;
-  let lastPlanBody=null;
-  let lastActivationBody=null;
   const activationRevision=operation => {
-    const current=activationOverride ?? lastActivationBody;
-    if (!current) throw new CoreConflictError("activation evidence was not snapshotted");
     if (operation.payload.kind==="release-activation-precondition") {
+      const query=operation.payload.query;
+      if (query===undefined) throw new CoreConflictError("activation query descriptor is absent");
+      const current=activationOverride ?? activationBody({revision:query.control_revision},query.program);
       if (operation.payload.project_id!==current.project.id ||
           operation.payload.snapshot_sha256!==sha256Canonical(current)) {
         throw new CoreConflictError("activation aggregate evidence changed after snapshot");
       }
       return current.project.revision;
     }
+    const current=activationOverride ?? activationBody({revision:"durable-remote"},{
+      program_id:"TOSS-OS-R0001",revision:"REV-0001",
+    });
     const repository=current.repositories.find(value => value.repository===operation.repository);
     if (!repository) throw new CoreConflictError("activation repository evidence is absent");
     const item=repository.work_items.find(value => value.id===operation.payload.work_item_id);
@@ -374,17 +377,15 @@ function releaseHarness() {
           ? structuredClone(activationOverride ?? activationBody(planning,query.program))
           : statusBody(planning,query.kind,selectedPrograms);
       if (failureMode==="source-race") control.advance();
-      if (query.kind==="release-plan") lastPlanBody=structuredClone(body);
-      if (query.kind==="release-activation") lastActivationBody=structuredClone(body);
       return body;
     },
     async inspect(operations) {
       calls.push({method:"inspect",operations:structuredClone(operations)});
       return operations.map(operation => {
         if (operation.payload.kind==="release-plan-precondition") {
-          const current={...lastPlanBody,candidates:lastPlanBody.candidates.map(candidate => ({
-            ...candidate,approved:planApproved,
-          }))};
+          const query=operation.payload.query;
+          if (query===undefined) throw new CoreConflictError("release plan query descriptor is absent");
+          const current=releasePlanBody(query.control_revision,{approved:planApproved});
           if (operation.payload.project_id!==current.project.id ||
               operation.payload.snapshot_sha256!==sha256Canonical(current)) {
             throw new CoreConflictError("release plan evidence changed after snapshot");
@@ -513,6 +514,93 @@ test("release plan revalidates approval evidence after interactive confirmation"
   assert.equal(result.exitCode,6,JSON.stringify(result.result.error));
   assert.deepEqual(harness.control.view().programs,[]);
   assert.equal(harness.calls.filter(value => value.method==="apply").length,0);
+});
+
+test("persisted aggregate preconditions restart from their closed query descriptors",async () => {
+  const base=memoryReleaseControl().view();
+  const planQuery={kind:"release-plan",control_revision:base.revision,
+    organization:base.organization,repositories:base.repositories,programs:base.programs};
+  const planBody=releasePlanBody(base.revision);
+  const planDecision=releasePlanOperations({planningState:base,snapshot:{...planBody,source:{
+    repository:CONTROL_REPOSITORY,revision:base.revision,
+    sha256:sha256Canonical({control:base,github:planBody}),
+  }},clock:() => NOW});
+  const persisted=JSON.parse(JSON.stringify(createOperationIntent({
+    intent_id:"INTENT-20260903-9001",created_at:NOW,command:"release.plan",
+    policy_revision:"POLICY-0001",source:planDecision.source,authority:null,
+    planned_receipt_id:"RECEIPT-20260903-9001",operations:planDecision.operations,
+  })));
+  const aggregate=persisted.operations.find(operation =>
+    operation.payload.kind==="release-plan-precondition");
+  const durable={approved:true};
+  let remoteApplyCount=0;
+  const restartedControl=() => ({
+    async head() { return "restart-control-1"; },
+    async findIntent() { return JSON.parse(JSON.stringify(persisted)); },
+    async findReceipt() { return null; },
+    async commitIntent() { throw new Error("persisted restart intent must not be replaced"); },
+    async inspectReleaseProgramOperation(operation) {
+      return {operation_id:operation.operation_id,repository:CONTROL_REPOSITORY,revision:null};
+    },
+    async commitReleaseProgramReceipt({receipt}) { return {commit_sha:receipt.receipt_id}; },
+    async commitReceipt({receipt}) { return {commit_sha:receipt.receipt_id}; },
+  });
+  const restartedGithub=() => {
+    const snapshot=async query => {
+      assert.equal(JSON.stringify(query),JSON.stringify(planQuery));
+      return releasePlanBody(query.control_revision,{approved:durable.approved});
+    };
+    return {
+    snapshot,
+    async inspect(operations) {
+      return Promise.all(operations.map(async operation => {
+        if (operation.payload.kind!=="release-plan-precondition" ||
+            operation.payload.query===undefined) {
+          throw new CoreConflictError("stored aggregate query descriptor is absent");
+        }
+        const current=await snapshot(operation.payload.query);
+        if (operation.payload.snapshot_sha256!==sha256Canonical(current)) {
+          throw new CoreConflictError("stored aggregate evidence changed after restart");
+        }
+        return {operation_id:operation.operation_id,repository:null,
+          revision:current.project.revision};
+      }));
+    },
+    async apply() {
+      remoteApplyCount+=1;
+      throw new Error("plan verification has no remote mutation");
+    },
+  }; };
+  const restart=() => createOperationRunner({
+    control:restartedControl(),github:restartedGithub(),authorityRegistry:null,
+    clock:() => NOW,idGenerator:() => "RECEIPT-20260903-9999",
+    policyRevision:() => "POLICY-0001",
+  });
+
+  const completed=await restart().apply(persisted,{authority:null});
+  assert.equal(completed.status,"completed");
+  assert.equal(JSON.stringify(aggregate.payload.query),JSON.stringify(planQuery));
+  assert.equal(remoteApplyCount,0);
+
+  const activationState={...base,revision:"control-plan",programs:[planDecision.program]};
+  const activationQuery={kind:"release-activation",control_revision:activationState.revision,
+    program:planDecision.program,repository:REPOSITORY,
+    repository_configurations:activationState.repositories,project:activationState.organization.project};
+  const activationSnapshot=activationBody(activationState,planDecision.program);
+  const activationDecision=activationOperations({planningState:activationState,
+    programId:planDecision.program.program_id,repository:REPOSITORY,snapshot:{
+      ...activationSnapshot,source:{repository:CONTROL_REPOSITORY,
+        revision:activationState.revision,
+        sha256:sha256Canonical({control:activationState,github:activationSnapshot})},
+    },receiptId:"RECEIPT-20260903-9002",clock:() => NOW});
+  assert.equal(JSON.stringify(activationDecision.operations.find(operation =>
+    operation.payload.kind==="release-activation-precondition").payload.query),
+  JSON.stringify(activationQuery));
+
+  durable.approved=false;
+  await assert.rejects(restart().apply(persisted,{authority:null}),error =>
+    error instanceof CoreConflictError && /changed after restart/u.test(error.message));
+  assert.equal(remoteApplyCount,0);
 });
 
 test("repeated planning reuses the current record and promotes Waiting without allocating an id",async () => {
@@ -806,6 +894,32 @@ test("release and program status expose failed release evidence as reconciliatio
   assert.equal(track.gate,"RECONCILE_REQUIRED");
   assert.equal(track.next_command,`toss-core sync ${REPOSITORY}`);
   assert.equal(track.reconciliation.evidence[0].receipt.receipt_id,failed.receipt_id);
+});
+
+test("release reconciliation rejects a receipt that does not own its planned identity",() => {
+  const base=memoryReleaseControl().view();
+  const intent=createOperationIntent({
+    intent_id:"INTENT-20260903-9100",created_at:NOW,command:"release.activate",
+    policy_revision:"POLICY-0001",
+    source:{repository:CONTROL_REPOSITORY,revision:base.revision,sha256:"d".repeat(64)},
+    authority:null,planned_receipt_id:"RECEIPT-20260903-9100",
+    operations:[{resource:"milestone",action:"create",repository:REPOSITORY,
+      expected_revision:"repository-1",payload:{kind:"release-milestone",
+        program_id:"TOSS-OS-R0001",release_id:"REL-TOSS-OS-R0001-cli",
+        title:"v2.2.0",state:"OPEN"}}],
+  });
+  const receipt={
+    schema_version:"operation-receipt.v1",document_type:"operation-receipt",
+    receipt_id:"RECEIPT-20260903-9101",intent_id:intent.intent_id,
+    intent_sha256:sha256Canonical(intent),created_at:NOW,status:"completed",
+    observed_revisions:[{operation_id:"OP-0001",repository:REPOSITORY,
+      revision:"milestone-1"}],
+  };
+  assert.throws(() => releaseReconciliationEvidence({
+    planningState:{...base,intents:[intent],receipts:[receipt]},
+    programId:null,repository:null,
+  }),error => error instanceof CoreConflictError &&
+    /planned|reservation|identity/u.test(error.message));
 });
 
 test("activation ignores failed evidence that affects neither its program nor repository",async () => {
@@ -1137,6 +1251,15 @@ test("same-stage repositories activate together when omitted and independently w
     receiptId:"RECEIPT-20260903-9100",clock:() => NOW});
   assert.deepEqual(all.program.repository_releases.map(value => value.phase),["ACTIVE","ACTIVE"]);
   assert.equal(all.program.revision,"REV-0002");
+  assert.throws(() => createOperationIntent({
+    intent_id:"INTENT-20260903-9200",created_at:NOW,command:"release.activate",
+    policy_revision:"POLICY-0001",source:all.source,authority:null,
+    planned_receipt_id:"RECEIPT-20260903-9200",
+    operations:all.operations.map(operation => operation.payload.kind===
+      "release-activation-precondition" ? {...operation,payload:{...operation.payload,
+        query:{...operation.payload.query,
+          repository_configurations:operation.payload.query.repository_configurations.slice(0,1)}}} : operation),
+  }),error => error?.code==="CORE_CONTRACT_INVALID" && error?.exitCode===5);
 
   const cliOnly=activationOperations({planningState:initial.state,programId:initial.program.program_id,
     repository:REPOSITORY,snapshot:signedActivation(initial.state,initial.program,[repositories[0]]),

@@ -5,11 +5,14 @@ import {validateCoreDocument} from "../contracts.js";
 import {CoreValidationError} from "../errors.js";
 import {compareOperations} from "../operation-order.js";
 
+const MAX_OPERATION_INPUT_DEPTH=64;
+
 function fail(message) {
   throw new CoreValidationError(message);
 }
 
-function closedClone(value,path="$",ancestors=new Set()) {
+function closedClone(value,path="$",ancestors=new Set(),depth=0) {
+  if (depth>MAX_OPERATION_INPUT_DEPTH) fail(`Operation input ${path} exceeds the maximum closed-data depth`);
   if (value===null || ["string","number","boolean"].includes(typeof value)) {
     if (typeof value==="number" && !Number.isFinite(value)) fail(`Operation input ${path} must be finite`);
     return value;
@@ -24,7 +27,7 @@ function closedClone(value,path="$",ancestors=new Set()) {
       return Object.freeze(value.map((_,index) => {
         const descriptor=Object.getOwnPropertyDescriptor(value,String(index));
         if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) fail(`Operation input ${path}[${index}] contains an accessor`);
-        return closedClone(descriptor.value,`${path}[${index}]`,ancestors);
+        return closedClone(descriptor.value,`${path}[${index}]`,ancestors,depth+1);
       }));
     }
     if (![Object.prototype,null].includes(Object.getPrototypeOf(value)) || Object.getOwnPropertySymbols(value).length!==0) {
@@ -34,7 +37,7 @@ function closedClone(value,path="$",ancestors=new Set()) {
     for (const key of Object.getOwnPropertyNames(value)) {
       const descriptor=Object.getOwnPropertyDescriptor(value,key);
       if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) fail(`Operation input ${path}.${key} contains an accessor or hidden field`);
-      clone[key]=closedClone(descriptor.value,`${path}.${key}`,ancestors);
+      clone[key]=closedClone(descriptor.value,`${path}.${key}`,ancestors,depth+1);
     }
     return Object.freeze(clone);
   } finally {

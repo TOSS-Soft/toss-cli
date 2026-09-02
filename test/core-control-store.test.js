@@ -7,7 +7,7 @@ import {promisify} from "node:util";
 import test from "node:test";
 import YAML from "yaml";
 
-import {sha256Canonical} from "../src/contracts/acp.js";
+import {canonicalJson,sha256Canonical} from "../src/contracts/acp.js";
 import {createOperationIntent} from "../src/core/operations/plan.js";
 import {createGitControlRepository} from "../src/core/control/git-repository.js";
 import {
@@ -1670,6 +1670,8 @@ test("intent commit atomically reserves one globally unique planned receipt iden
 
   const planned=intentWith("INTENT-20260903-0099","RECEIPT-20260901-0100");
   const committed=await store.commitIntent({expectedHead:head,intent:planned});
+  const {planned_receipt_id:_reservation,...legacyLookup}=planned;
+  assert.equal(canonicalJson(await store.findIntent(legacyLookup)),canonicalJson(planned));
   const recorded=receiptForIntent(planned,{number:"0100",observed_revisions:[{
     operation_id:planned.operations[0].operation_id,repository:planned.operations[0].repository,
     revision:"repository-2",

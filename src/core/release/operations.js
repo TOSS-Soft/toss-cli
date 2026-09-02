@@ -150,6 +150,10 @@ function assertReleaseReceiptCoverage(receipt,intent) {
   if (receipt.intent_id!==intent.intent_id || receipt.intent_sha256!==sha256Canonical(intent)) {
     throw new CoreConflictError("Release reconciliation receipt does not bind its immutable intent");
   }
+  if (intent.planned_receipt_id!==undefined &&
+      receipt.receipt_id!==intent.planned_receipt_id) {
+    throw new CoreConflictError("Release reconciliation receipt does not own its planned identity");
+  }
   const operations=new Map(intent.operations.map(operation => [operation.operation_id,operation]));
   const observed=new Set();
   for (const observation of receipt.observed_revisions) {
@@ -251,6 +255,16 @@ function normalizedPlanSnapshot(input,state) {
   return value;
 }
 
+function planQueryDescriptor(state) {
+  return clone({
+    kind:"release-plan",
+    control_revision:state.revision,
+    organization:state.organization,
+    repositories:state.repositories,
+    programs:state.programs,
+  },"Release plan query descriptor");
+}
+
 export function releasePlanOperations(input) {
   const {planningState,snapshot,clock}=optionRecord(
     input,["planningState","snapshot","clock"],"Release plan operation request",
@@ -295,6 +309,7 @@ export function releasePlanOperations(input) {
     payload:Object.freeze({
       kind:"release-plan-precondition",
       project_id:observed.project.id,
+      query:planQueryDescriptor(state),
       snapshot_sha256:sha256Canonical({
         kind:observed.kind,
         control_revision:observed.control_revision,
@@ -563,10 +578,21 @@ export function activationOperations(input) {
   const configurations=new Map(state.repositories.map(value => [value.repository,value]));
   const observations=new Map(observed.repositories.map(value => [value.repository,value]));
   const activatedById=new Map();
+  const query=clone({
+    kind:"release-activation",
+    control_revision:state.revision,
+    program,
+    repository,
+    repository_configurations:repository===null
+      ? state.repositories.filter(configuration => program.repository_releases.some(release =>
+        release.repository===configuration.repository))
+      : state.repositories.filter(configuration => configuration.repository===repository),
+    project:state.organization.project,
+  },"Release activation query descriptor");
   const operations=[{
     resource:"project",action:"verify",repository:null,
     expected_revision:observed.project.revision,
-    payload:{kind:"release-activation-precondition",project_id:observed.project.id,
+    payload:{kind:"release-activation-precondition",project_id:observed.project.id,query,
       snapshot_sha256:sha256Canonical(activationBody(observed))},
   }];
   for (const draft of selected) {
