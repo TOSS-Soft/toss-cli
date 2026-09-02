@@ -13,6 +13,8 @@ const SHA_A="a".repeat(64);
 const SHA_B="b".repeat(64);
 const REVIEWED_SHA="1".repeat(40);
 const REPOSITORY="TOSS-Soft/toss-cli";
+const RELEASE_220=`${REPOSITORY}@release/v2.2.0`;
+const RELEASE_213=`${REPOSITORY}@release/v2.1.3`;
 
 const EPIC=Object.freeze({
   schema_version:"work-item.v1",
@@ -178,11 +180,11 @@ test("required bases follow only normalized same-repository relationships",() =>
   }),EPIC.branch);
 
   assert.equal(requiredBaseBranch({id:EPIC.id,kind:"epic",repository:REPOSITORY},{
-    release:{repository:REPOSITORY,branch:"release/v2.2.0"},
+    release:{id:RELEASE_220,repository:REPOSITORY,branch:"release/v2.2.0"},
   }),"release/v2.2.0");
 
   assert.equal(requiredBaseBranch({id:`${REPOSITORY}#55`,kind:"bug",repository:REPOSITORY},{
-    patch_release:{repository:REPOSITORY,branch:"release/v2.1.3"},
+    patch_release:{id:RELEASE_213,repository:REPOSITORY,branch:"release/v2.1.3"},
   }),"release/v2.1.3");
 
   assert.equal(requiredBaseBranch({id:EPIC.id,kind:"epic",repository:REPOSITORY},{
@@ -219,6 +221,26 @@ test("required base derivation rejects cross-repository Git parents and exotic r
     id:CHILD.id,kind:"issue",repository:REPOSITORY,parent_id:EPIC.id,
   },{parent}),CoreValidationError);
   assert.equal(traps,0);
+});
+
+test("required bases reject missing, malformed, or wrong normalized relation identities",() => {
+  const child={id:CHILD.id,kind:"issue",repository:REPOSITORY,parent_id:EPIC.id};
+  const epic={id:EPIC.id,kind:"epic",repository:REPOSITORY};
+  const bug={id:`${REPOSITORY}#55`,kind:"bug",repository:REPOSITORY};
+
+  for (const [item,context] of [
+    [child,{parent:{repository:REPOSITORY,branch:EPIC.branch}}],
+    [child,{parent:{id:`${REPOSITORY}#not-a-number`,repository:REPOSITORY,branch:EPIC.branch}}],
+    [child,{parent:{id:`${REPOSITORY}#41`,repository:REPOSITORY,branch:EPIC.branch}}],
+    [{...child,id:"not-a-work-item"},{parent:{id:EPIC.id,repository:REPOSITORY,branch:EPIC.branch}}],
+    [{...child,parent_id:`${REPOSITORY}#not-a-number`},{parent:{id:`${REPOSITORY}#not-a-number`,repository:REPOSITORY,branch:EPIC.branch}}],
+    [epic,{release:{repository:REPOSITORY,branch:"release/v2.2.0"}}],
+    [epic,{release:{id:"release-220",repository:REPOSITORY,branch:"release/v2.2.0"}}],
+    [bug,{patch_release:{repository:REPOSITORY,branch:"release/v2.1.3"}}],
+    [bug,{patch_release:{id:`${REPOSITORY}@release/v2.1.4`,repository:REPOSITORY,branch:"release/v2.1.3"}}],
+  ]) {
+    assert.throws(() => requiredBaseBranch(item,context),CoreValidationError);
+  }
 });
 
 test("pull request targets enforce the issue to epic to release to main hierarchy",() => {
@@ -344,5 +366,39 @@ test("work-item contracts bind child parents and base branches to the persisted 
     {...EPIC,base_branch:"bug/40-wrong-base"},
   ]) {
     assert.throws(() => validateCoreDocument(value,"work-item.v1"),CoreValidationError);
+  }
+});
+
+test("epic-plan contracts bind an epic root to exact same-repository child topology",() => {
+  const crossRepositoryChild={
+    ...CHILD,
+    id:"TOSS-Soft/toss-console#43",
+    repository:"TOSS-Soft/toss-console",
+    parent_id:"TOSS-Soft/toss-console#42",
+  };
+  const cases=[
+    {...PLAN,epic:{...EPIC,kind:"bug",branch:"bug/42-organizational-lifecycle"}},
+    {...PLAN,children:[{...CHILD,parent_id:`${REPOSITORY}#41`}]},
+    {...PLAN,children:[crossRepositoryChild]},
+    {...PLAN,children:[{...EPIC,acceptance_criteria:["Invalid nested epic"]}]},
+  ];
+  for (const value of cases) {
+    assert.throws(() => validateCoreDocument(value,"epic-plan.v1"),CoreValidationError);
+  }
+});
+
+test("persisted work branches accept a 48-character slug and reject longer slugs",() => {
+  const slug48="abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuv";
+  const slug49="abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvw";
+  const slug100="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  assert.equal(slug48.length,48);
+  assert.equal(slug49.length,49);
+  assert.equal(slug100.length,100);
+  assert.equal(validateCoreDocument({...EPIC,branch:`epic/42-${slug48}`},"work-item.v1").branch,`epic/42-${slug48}`);
+  for (const slug of [slug49,slug100]) {
+    assert.throws(
+      () => validateCoreDocument({...EPIC,branch:`epic/42-${slug}`},"work-item.v1"),
+      CoreValidationError,
+    );
   }
 });

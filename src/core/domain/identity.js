@@ -5,6 +5,8 @@ import {CoreValidationError} from "../errors.js";
 
 const RESERVATION_KEYS=Object.freeze(["kind","number","title"]);
 const REPOSITORY=/^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?\/[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$/;
+const WORK_ITEM_ID=/^([A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?\/[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?)#([1-9][0-9]*)$/;
+const RESERVED_BRANCH=/^(bug|epic|issue)\/([1-9][0-9]*)-([a-z0-9]+(?:-[a-z0-9]+)*)$/;
 const PREFIXES=Object.freeze({bug:"bug",epic:"epic",issue:"issue"});
 const MAX_SLUG_LENGTH=48;
 const HASH_LENGTH=8;
@@ -69,6 +71,24 @@ function normalizedSlug(title,number) {
 
 export function workItemId(repository,issueNumber) {
   return `${assertCanonicalRepository(repository)}#${assertIssueNumber(issueNumber)}`;
+}
+
+export function parseWorkItemId(value) {
+  const match=typeof value==="string" ? WORK_ITEM_ID.exec(value) : null;
+  if (!match) invalid("Work item id must be canonical OWNER/REPO#NUMBER ASCII");
+  const issueNumber=Number(match[2]);
+  assertIssueNumber(issueNumber);
+  return Object.freeze({repository:match[1],issueNumber});
+}
+
+export function parseReservedBranch(value) {
+  const match=typeof value==="string" ? RESERVED_BRANCH.exec(value) : null;
+  if (!match || match[3].length>MAX_SLUG_LENGTH) {
+    invalid("Reserved branch must use a canonical kind, issue number, and slug of at most 48 characters");
+  }
+  const issueNumber=Number(match[2]);
+  assertIssueNumber(issueNumber);
+  return Object.freeze({kind:match[1],issueNumber,slug:match[3]});
 }
 
 export function reserveBranch(input) {

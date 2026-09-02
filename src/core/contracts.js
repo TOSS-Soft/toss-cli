@@ -4,6 +4,7 @@ import {validateDocument} from "../contracts/validator.js";
 
 import {CoreValidationError} from "./errors.js";
 import {compareOperations} from "./operation-order.js";
+import {parseReservedBranch} from "./domain/identity.js";
 
 function validationMessage(schemaId,errors) {
   const details=errors.map(error => error.message).filter(Boolean).join("; ");
@@ -56,11 +57,34 @@ function assertWorkItemIdentity(value) {
       typeof value.id!=="string" || typeof value.kind!=="string" ||
       typeof value.branch!=="string") return;
   const expectedId=`${value.repository}#${value.issue_number}`;
-  const expectedBranchPrefix=`${value.kind}/${value.issue_number}-`;
+  let branch;
+  try {
+    branch=parseReservedBranch(value.branch);
+  } catch (error) {
+    throw new CoreValidationError("Invalid core contract work-item.v1: reserved branch identity is not canonical",{cause:error});
+  }
   const parentMatches=value.kind!=="issue" ||
     (typeof value.parent_id==="string" && value.parent_id.startsWith(`${value.repository}#`));
-  if (value.id!==expectedId || !value.branch.startsWith(expectedBranchPrefix) || !parentMatches) {
+  if (value.id!==expectedId || branch.kind!==value.kind ||
+      branch.issueNumber!==value.issue_number || !parentMatches) {
     throw new CoreValidationError("Invalid core contract work-item.v1: identity, repository, native issue number, and branch reservation must agree");
+  }
+}
+
+function assertEpicPlanTopology(value) {
+  const epic=value.epic;
+  if (epic===null || typeof epic!=="object") return;
+  if (epic.kind!=="epic") {
+    throw new CoreValidationError("Invalid core contract epic-plan.v1: root work item must be an epic");
+  }
+  if (!Array.isArray(value.children) || typeof epic.id!=="string" ||
+      typeof epic.repository!=="string") return;
+  for (const child of value.children) {
+    if (child===null || typeof child!=="object") continue;
+    if (child.kind!=="issue" || child.repository!==epic.repository ||
+        child.parent_id!==epic.id) {
+      throw new CoreValidationError("Invalid core contract epic-plan.v1: children must be same-repository issues with the exact epic parent");
+    }
   }
 }
 
@@ -74,6 +98,7 @@ function assertWorkContractSemantics(value) {
     if (Array.isArray(value.children)) {
       for (const child of value.children) assertWorkItemIdentity(child);
     }
+    assertEpicPlanTopology(value);
   }
   if (value.schema_version==="review-result.v1") {
     assertUniqueIds(value.findings,"finding_id","review finding id");

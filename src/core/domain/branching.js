@@ -1,9 +1,9 @@
 import {types} from "node:util";
 
 import {CoreConflictError,CoreValidationError} from "../errors.js";
+import {parseReservedBranch,parseWorkItemId} from "./identity.js";
 
 const REPOSITORY=/^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?\/[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$/;
-const WORK_BRANCH=/^(epic|issue|bug)\/[1-9][0-9]*-[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const RELEASE_BRANCH=/^release\/v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$/;
 const ITEM_KEYS=new Set([
   "acceptance_criteria","base_branch","branch","gate","id","issue_number","kind","milestone",
@@ -48,11 +48,16 @@ function assertRepository(value,label) {
 }
 
 function assertWorkBranch(value,label,kind) {
-  const match=typeof value==="string" ? WORK_BRANCH.exec(value) : null;
-  if (!match || (kind!==undefined && match[1]!==kind)) {
+  let parsed;
+  try {
+    parsed=parseReservedBranch(value);
+  } catch {
     invalid(`${label} must be a canonical ${kind ?? "work"} branch`);
   }
-  return value;
+  if (kind!==undefined && parsed.kind!==kind) {
+    invalid(`${label} must be a canonical ${kind ?? "work"} branch`);
+  }
+  return parsed;
 }
 
 function assertReleaseBranch(value,label) {
@@ -65,13 +70,20 @@ function assertReleaseBranch(value,label) {
 function relation(value,label,kind) {
   const record=closeRecord(value,label,{
     allowed:new Set(["branch","id","repository"]),
-    required:new Set(["branch","repository"]),
+    required:new Set(["branch","id","repository"]),
   });
   assertRepository(record.repository,`${label}.repository`);
-  if (kind==="release") assertReleaseBranch(record.branch,`${label}.branch`);
-  else assertWorkBranch(record.branch,`${label}.branch`,kind);
-  if (Object.hasOwn(record,"id") && (typeof record.id!=="string" || record.id.length===0)) {
-    invalid(`${label}.id must be a non-empty string`);
+  if (kind==="release") {
+    assertReleaseBranch(record.branch,`${label}.branch`);
+    if (record.id!==`${record.repository}@${record.branch}`) {
+      invalid(`${label}.id must bind the exact repository release branch`);
+    }
+  } else {
+    const branch=assertWorkBranch(record.branch,`${label}.branch`,kind);
+    const identity=parseWorkItemId(record.id);
+    if (identity.repository!==record.repository || identity.issueNumber!==branch.issueNumber) {
+      invalid(`${label}.id must bind the exact repository and native issue branch`);
+    }
   }
   return record;
 }
@@ -92,16 +104,24 @@ export function requiredBaseBranch(itemValue,contextValue) {
     required:new Set(),
   });
   assertRepository(item.repository,"Work item repository");
-  if (typeof item.id!=="string" || item.id.length===0) invalid("Work item id must be non-empty");
+  if (["bug","epic","issue"].includes(item.kind)) {
+    const identity=parseWorkItemId(item.id);
+    if (identity.repository!==item.repository) invalid("Work item id must match its repository");
+  } else if (item.kind==="release") {
+    if (typeof item.id!=="string" || !item.id.startsWith(`${item.repository}@release/v`)) {
+      invalid("Release item id must bind its repository and release identity");
+    }
+  }
 
   if (item.kind==="issue") {
-    if (typeof item.parent_id!=="string" || !item.parent_id.startsWith(`${item.repository}#`)) {
+    const parentIdentity=parseWorkItemId(item.parent_id);
+    if (parentIdentity.repository!==item.repository) {
       invalid("Child issue must identify a same-repository parent");
     }
     if (context.parent===null || context.parent===undefined) return null;
     const parent=relation(context.parent,"Parent epic","epic");
     sameRepository(item,parent,"Parent epic");
-    if (parent.id!==undefined && parent.id!==item.parent_id) {
+    if (parent.id!==item.parent_id) {
       invalid("Parent epic identity does not match the child relation");
     }
     return parent.branch;
@@ -148,10 +168,15 @@ export function assertValidPullRequestTarget(value) {
     throw new CoreConflictError("Existing pull request base conflicts with the required base");
   }
 
-  const workMatch=typeof target.head==="string" ? WORK_BRANCH.exec(target.head) : null;
-  if (workMatch) {
+  let workHead;
+  try {
+    workHead=parseReservedBranch(target.head);
+  } catch {
+    workHead=null;
+  }
+  if (workHead) {
     if (target.base==="main") invalid("Work item pull requests may not target main");
-    if (workMatch[1]==="issue") assertWorkBranch(target.base,"Issue pull request base","epic");
+    if (workHead.kind==="issue") assertWorkBranch(target.base,"Issue pull request base","epic");
     else assertReleaseBranch(target.base,"Epic or bug pull request base");
     return true;
   }
