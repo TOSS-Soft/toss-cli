@@ -37,6 +37,49 @@ function assertCanonicalOperationOrder(value) {
   }
 }
 
+function assertUniqueIds(values,key,label) {
+  if (!Array.isArray(values)) return;
+  const ids=new Set();
+  for (const value of values) {
+    const id=value?.[key];
+    if (typeof id!=="string") continue;
+    if (ids.has(id)) {
+      throw new CoreValidationError(`Invalid core contract: duplicate ${label} ${id}`);
+    }
+    ids.add(id);
+  }
+}
+
+function assertWorkItemIdentity(value) {
+  if (!value || value.schema_version!=="work-item.v1" ||
+      typeof value.repository!=="string" || !Number.isSafeInteger(value.issue_number) ||
+      typeof value.id!=="string" || typeof value.kind!=="string" ||
+      typeof value.branch!=="string") return;
+  const expectedId=`${value.repository}#${value.issue_number}`;
+  const expectedBranchPrefix=`${value.kind}/${value.issue_number}-`;
+  const parentMatches=value.kind!=="issue" ||
+    (typeof value.parent_id==="string" && value.parent_id.startsWith(`${value.repository}#`));
+  if (value.id!==expectedId || !value.branch.startsWith(expectedBranchPrefix) || !parentMatches) {
+    throw new CoreValidationError("Invalid core contract work-item.v1: identity, repository, native issue number, and branch reservation must agree");
+  }
+}
+
+function assertWorkContractSemantics(value) {
+  if (value===null || typeof value!=="object") return;
+  assertWorkItemIdentity(value);
+  if (value.schema_version==="epic-plan.v1") {
+    assertUniqueIds(value.children,"id","work item id");
+    assertUniqueIds(value.edges,"edge_id","dependency edge id");
+    assertWorkItemIdentity(value.epic);
+    if (Array.isArray(value.children)) {
+      for (const child of value.children) assertWorkItemIdentity(child);
+    }
+  }
+  if (value.schema_version==="review-result.v1") {
+    assertUniqueIds(value.findings,"finding_id","review finding id");
+  }
+}
+
 function assertClosedContract(value,seen=new Set()) {
   if (value===null || typeof value!=="object") return;
   if (types.isProxy(value)) {
@@ -88,6 +131,7 @@ export {CoreValidationError};
 
 export function validateCoreDocument(value,schemaId) {
   assertClosedContract(value);
+  assertWorkContractSemantics(value);
   let result;
   try {
     result=validateDocument(value,schemaId);

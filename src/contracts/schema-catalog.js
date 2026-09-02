@@ -107,12 +107,14 @@ const definitions=[
   ["command-result.v1","pipeline","command-result.v1.schema.json"],
   ["decision-answer.v1","pipeline","decision-answer.v1.schema.json"],
   ["decision-package.v1","pipeline","decision-package.v1.schema.json"],
+  ["dependency-edge.v1","core","dependency-edge.v1.schema.json"],
   ["design-approval.v1","design","design-approval.v1.schema.json"],
   ["design-audit.v1","design","design-audit.v1.schema.json"],
   ["design-brief.v1","design","design-brief.v1.schema.json"],
   ["design-orchestration-state.v1","pipeline","design-orchestration-state.v1.schema.json"],
   ["design-system.v1","design","design-system.v1.schema.json"],
   ["entity.v1","common","entity.schema.json"],
+  ["epic-plan.v1","core","epic-plan.v1.schema.json"],
   ["feature-delta.v1","pipeline","feature-delta.v1.schema.json"],
   ["finding.v1","agents","finding.v1.schema.json"],
   ["github-publication-result.v1","pipeline","github-publication-result.v1.schema.json"],
@@ -129,6 +131,7 @@ const definitions=[
   ["question.v1","common","question.schema.json"],
   ["reference.v1","common","reference.schema.json"],
   ["repository-config.v1","core","repository-config.v1.schema.json"],
+  ["review-result.v1","core","review-result.v1.schema.json"],
   ["screen-spec.v1","design","screen-spec.v1.schema.json"],
   ["spec-audit.v1","agents","spec-audit.v1.schema.json"],
   ["trace-graph.v1","pipeline","trace-graph.v1.schema.json"],
@@ -140,6 +143,7 @@ const definitions=[
   ["ux-analysis.v1","design","ux-analysis.v1.schema.json"],
   ["visual-direction.v1","design","visual-direction.v1.schema.json"],
   ["wireframe-plan.v1","design","wireframe-plan.v1.schema.json"],
+  ["work-item.v1","core","work-item.v1.schema.json"],
 ];
 
 export const CONTRACT_SCHEMA_CATALOG=validateContractSchemaCatalog(

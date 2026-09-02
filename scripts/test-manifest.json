@@ -6,6 +6,7 @@
       "test/acp-v1.test.js",
       "test/architecture.test.js",
       "test/common-contracts.test.js",
+      "test/core-branching.test.js",
       "test/core-command-contract.test.js",
       "test/core-contracts.test.js",
       "test/core-foundation-commands.test.js",
