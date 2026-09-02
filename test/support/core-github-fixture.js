@@ -267,6 +267,169 @@ export function createCoreGithubFixture(options={}) {
         },
       },"issue intake snapshot");
     }
+    if (query.kind==="epic-prepare") {
+      exact(query,["kind","id"],"epic preparation snapshot query");
+      const epicRecord=issue(query.id);
+      if (!epicRecord || epicRecord.work.item.kind!=="epic") {
+        throw new CoreConflictError(`Unknown governed epic ${query.id}`);
+      }
+      const repository=repo(epicRecord.work.item.repository);
+      const governed=[...repository.issues.values()]
+        .filter(record => record.native_parent_id===query.id ||
+          /^<!-- toss-core:managed-child:[a-f0-9]{64} -->$/u.test(record.marker))
+        .sort((left,right) => compare(left.work.item.id,right.work.item.id));
+      return copy({
+        kind:query.kind,source:source(repository.repository,repository.revision),
+        epic:epicRecord.work,epic_plan:epicRecord.epic_plan ?? null,
+        epic_approval:epicRecord.epic_approval ?? null,
+        preparation:{
+          revision:repository.revision,
+          children:governed.map(record => ({
+            marker:record.marker,id:record.work.item.id,repository:record.work.item.repository,
+            acceptance_criteria:record.work.item.acceptance_criteria,
+            branch:record.work.item.branch,project_fields:record.managed_project_fields,
+            revision:record.revision,
+          })),
+          relationships:governed
+            .filter(record => record.native_parent_id!==undefined)
+            .map(record => ({child_id:record.work.item.id,parent_id:record.native_parent_id,revision:record.native_parent_revision})),
+        },
+        dependency:graphSnapshot(null),
+      },"epic preparation snapshot");
+    }
+    if (query.kind==="epic-approval") {
+      exact(query,["kind","id"],"epic approval snapshot query");
+      const epicRecord=issue(query.id);
+      if (!epicRecord || epicRecord.work.item.kind!=="epic" || !epicRecord.epic_plan) {
+        throw new CoreConflictError(`Epic ${query.id} has no prepared plan`);
+      }
+      const repository=repo(epicRecord.work.item.repository);
+      const children=epicRecord.epic_plan.children.map(planned => {
+        const record=issue(planned.id);
+        if (!record || record.native_parent_id!==query.id || record.projected!==true) {
+          throw new CoreConflictError(`Prepared epic child ${planned.id} is missing`);
+        }
+        return {id:planned.id,revision:record.revision};
+      });
+      const edges=epicRecord.epic_plan.edges.map(planned => {
+        const edge=dependency.edges.get(planned.edge_id);
+        const relationship=dependency.relationships.get(planned.edge_id);
+        if (!edge || !relationship || canonicalJson(edge)!==canonicalJson(planned) ||
+            relationship.revision!==planned.revision) {
+          throw new CoreConflictError(`Prepared epic dependency ${planned.edge_id} is missing`);
+        }
+        return {edge_id:planned.edge_id,revision:planned.revision};
+      });
+      return copy({
+        kind:query.kind,source:source(repository.repository,repository.revision),
+        epic:epicRecord.work,epic_revision:epicRecord.revision,
+        plan:epicRecord.epic_plan,epic_approval:epicRecord.epic_approval ?? null,
+        children,edges,project:{id:project.id,revision:project.revision},
+      },"epic approval snapshot");
+    }
+    if (query.kind==="epic-submit") {
+      exact(query,["kind","id"],"epic submit snapshot query");
+      const epicRecord=issue(query.id);
+      if (!epicRecord || epicRecord.work.item.kind!=="epic" || !epicRecord.epic_plan) {
+        throw new CoreConflictError(`Epic ${query.id} has no prepared scope`);
+      }
+      const repository=repo(epicRecord.work.item.repository);
+      const branch=repository.branches.get(epicRecord.work.item.branch) ?? null;
+      const pullRequest=[...repository.pullRequests.values()].find(value => value.work_item_id===query.id) ?? null;
+      const children=epicRecord.epic_plan.children.flatMap(planned => {
+        const record=issue(planned.id);
+        return record ? [{
+          id:planned.id,state:record.work.issue_state,revision:record.revision,
+          item:record.work.item,native_parent_id:record.native_parent_id,
+          project_id:record.work.project.project_id,projected:record.projected,
+        }] : [];
+      });
+      const edges=epicRecord.epic_plan.edges.flatMap(planned => {
+        const edge=dependency.edges.get(planned.edge_id);
+        const relationship=dependency.relationships.get(planned.edge_id);
+        return edge && relationship ? [{edge_id:edge.edge_id,revision:edge.revision,edge,relationship,target_state:issue(edge.target)?.work.issue_state ?? "MISSING"}] : [];
+      });
+      return copy({
+        kind:query.kind,source:source(repository.repository,repository.revision),
+        epic:epicRecord.work,epic_revision:epicRecord.revision,
+        plan:epicRecord.epic_plan,epic_approval:epicRecord.epic_approval ?? null,
+        children,edges,release:epicRecord.work.release,
+        branch:branch===null ? null : {...branch},
+        pull_request:pullRequest===null ? null : {...pullRequest},
+        project:{id:project.id,revision:project.revision},
+      },"epic submit snapshot");
+    }
+    if (query.kind==="epic-accept") {
+      exact(query,["kind","id"],"epic acceptance snapshot query");
+      const epicRecord=issue(query.id);
+      if (!epicRecord || epicRecord.work.item.kind!=="epic" || !epicRecord.epic_plan) {
+        throw new CoreConflictError(`Epic ${query.id} has no prepared scope`);
+      }
+      const repository=repo(epicRecord.work.item.repository);
+      const nativePull=[...repository.pullRequests.values()].find(value => value.work_item_id===query.id) ?? null;
+      const children=epicRecord.epic_plan.children.flatMap(planned => {
+        const record=issue(planned.id);
+        return record ? [{id:planned.id,state:record.work.issue_state,revision:record.revision,item:record.work.item,native_parent_id:record.native_parent_id,project_id:record.work.project.project_id,projected:record.projected}] : [];
+      });
+      const edges=epicRecord.epic_plan.edges.flatMap(planned => {
+        const edge=dependency.edges.get(planned.edge_id);
+        const relationship=dependency.relationships.get(planned.edge_id);
+        return edge && relationship ? [{edge_id:edge.edge_id,revision:edge.revision,edge,relationship,target_state:issue(edge.target)?.work.issue_state ?? "MISSING"}] : [];
+      });
+      const pullRequest=nativePull===null ? null : {
+        id:`${repository.repository}#${nativePull.number}`,number:nativePull.number,
+        revision:nativePull.revision,head_sha:nativePull.head_sha,head:nativePull.head,
+        base:nativePull.base,head_repository:nativePull.head_repository,
+        base_repository:nativePull.base_repository,state:nativePull.state,merged_sha:nativePull.merged_sha,
+      };
+      const result=nativePull?.recorded_result ?? null;
+      const identities=new Set(nativePull ? [
+        nativePull.implementation_identity.pull_request_author,
+        ...nativePull.implementation_identity.commits.flatMap(commit => [commit.author,commit.committer]),
+      ] : []);
+      const review=result===null ? null : {
+        id:result.review_id,
+        record_revision:reviewObservationRevision({native_revision:nativePull.revision,checks:nativePull.checks,implementation_identity:nativePull.implementation_identity}),
+        reviewed_revision:result.reviewed_revision,verdict:result.verdict,
+        independent:result.reviewer.role==="independent-reviewer" && !identities.has(result.reviewer.identity),
+        formal:nativePull.formal_review?.state==="APPROVED" && nativePull.formal_review.reviewed_revision===nativePull.head_sha,
+        reviewer:result.reviewer.identity,
+      };
+      const checks=nativePull?.checks ? {...nativePull.checks,observation:sha256Canonical(nativePull.checks)} : null;
+      return copy({
+        kind:query.kind,source:source(repository.repository,repository.revision),
+        epic:epicRecord.work,epic_revision:epicRecord.revision,
+        plan:epicRecord.epic_plan,epic_approval:epicRecord.epic_approval ?? null,
+        children,edges,release:epicRecord.work.release,pull_request:pullRequest,
+        review,checks,project:{id:project.id,revision:project.revision},
+      },"epic acceptance snapshot");
+    }
+    if (query.kind==="epic-status") {
+      exact(query,["kind","id"],"epic status snapshot query");
+      const epicRecord=issue(query.id);
+      if (!epicRecord || epicRecord.work.item.kind!=="epic") {
+        throw new CoreConflictError(`Unknown governed epic ${query.id}`);
+      }
+      const repository=repo(epicRecord.work.item.repository);
+      const nativePull=[...repository.pullRequests.values()].find(value => value.work_item_id===query.id) ?? null;
+      const nativeBranch=repository.branches.get(epicRecord.work.item.branch) ?? null;
+      const plan=epicRecord.epic_plan ?? null;
+      const children=plan===null ? [] : plan.children.flatMap(planned => {
+        const record=issue(planned.id);
+        return record ? [{id:planned.id,state:record.work.issue_state,revision:record.revision,item:record.work.item,native_parent_id:record.native_parent_id,project_id:record.work.project.project_id,projected:record.projected}] : [];
+      });
+      const edges=plan===null ? [] : plan.edges.flatMap(planned => {
+        const edge=dependency.edges.get(planned.edge_id);
+        const relationship=dependency.relationships.get(planned.edge_id);
+        return edge && relationship ? [{edge_id:edge.edge_id,revision:edge.revision,edge,relationship,target_state:issue(edge.target)?.work.issue_state ?? "MISSING"}] : [];
+      });
+      const pullRequest=nativePull===null ? null : {id:`${repository.repository}#${nativePull.number}`,number:nativePull.number,revision:nativePull.revision,head_sha:nativePull.head_sha,head:nativePull.head,base:nativePull.base,head_repository:nativePull.head_repository,base_repository:nativePull.base_repository,state:nativePull.state,merged_sha:nativePull.merged_sha};
+      const result=nativePull?.recorded_result ?? null;
+      const identities=new Set(nativePull?.implementation_identity ? [nativePull.implementation_identity.pull_request_author,...nativePull.implementation_identity.commits.flatMap(commit => [commit.author,commit.committer])] : []);
+      const review=result===null ? null : {id:result.review_id,record_revision:reviewObservationRevision({native_revision:nativePull.revision,checks:nativePull.checks,implementation_identity:nativePull.implementation_identity}),reviewed_revision:result.reviewed_revision,verdict:result.verdict,independent:result.reviewer.role==="independent-reviewer" && !identities.has(result.reviewer.identity),formal:nativePull.formal_review?.state==="APPROVED" && nativePull.formal_review.reviewed_revision===nativePull.head_sha,reviewer:result.reviewer.identity};
+      const checks=nativePull?.checks ? {...nativePull.checks,observation:sha256Canonical(nativePull.checks)} : null;
+      return copy({kind:query.kind,source:source(repository.repository,repository.revision),epic:epicRecord.work,epic_revision:epicRecord.revision,plan,epic_approval:epicRecord.epic_approval ?? null,children,edges,release:epicRecord.work.release,branch:nativeBranch===null ? null : {...nativeBranch},pull_request:pullRequest,review,checks,project:{id:project.id,revision:project.revision}},"epic status snapshot");
+    }
     if (query.kind==="work-item") {
       exact(query,["kind","id"],"work snapshot query");
       const record=issue(query.id);
@@ -366,6 +529,9 @@ export function createCoreGithubFixture(options={}) {
     if (operation.resource==="pull_request") {
       const existing=operation.payload.kind==="review-record"
         ? repo(operation.repository).pullRequests.get(operation.payload.pull_request_number)
+        : operation.payload.kind==="epic-accept"
+          ? [...repo(operation.repository).pullRequests.values()].find(value =>
+            value.work_item_id===operation.payload.epic_id)
         : [...repo(operation.repository).pullRequests.values()].find(value =>
           value.work_item_id===operation.payload.work_item_id);
       if (operation.payload.kind==="review-record" && existing) {
@@ -378,6 +544,14 @@ export function createCoreGithubFixture(options={}) {
     }
     if (operation.resource==="issue" && ["dependency-add","dependency-remove"].includes(operation.payload.kind)) {
       return dependency.revision;
+    }
+    if (operation.resource==="issue" && Object.hasOwn(operation.payload,"native_parent_id")) {
+      return operation.action==="create"
+        ? repo(operation.repository).revision
+        : issue(operation.payload.work_item_id)?.revision ?? repo(operation.repository).revision;
+    }
+    if (operation.resource==="issue" && operation.payload.kind==="epic-approve") {
+      return issue(operation.payload.work.item.id)?.revision ?? repo(operation.repository).revision;
     }
     return repo(operation.repository).revision;
   }
@@ -420,6 +594,145 @@ export function createCoreGithubFixture(options={}) {
     repository.nextIssueNumber+=1;
     repository.revision=bump("repository",repository.revision);
     return repository.revision;
+  }
+
+  function applyManagedChild(operation) {
+    const repository=repo(operation.repository);
+    const payload=operation.payload;
+    exact(payload,[
+      "marker","work_item_id","native_issue_number","native_parent_id",
+      "acceptance_criteria","reserved_branch","project",
+    ],"managed epic child payload");
+    exact(payload.project,["membership","fields"],"managed epic child Project payload");
+    exact(payload.project.fields,[
+      "status","gate","repository","parent","branch","base_branch","milestone",
+    ],"managed epic child Project fields");
+    const identity=parseWorkItemId(payload.work_item_id);
+    const parent=issue(payload.native_parent_id);
+    if (payload.project.membership!=="TOSS OS" || identity.repository!==operation.repository ||
+        identity.issueNumber!==payload.native_issue_number || !parent ||
+        parent.work.item.kind!=="epic" || parent.work.item.id!==payload.native_parent_id ||
+        payload.project.fields.repository!==operation.repository ||
+        payload.project.fields.parent!==payload.native_parent_id ||
+        payload.project.fields.branch!==payload.reserved_branch ||
+        payload.project.fields.base_branch!==parent.work.item.branch ||
+        payload.project.fields.milestone!==null) {
+      throw new CoreConflictError("Managed epic child identity or governing evidence conflicts");
+    }
+    const item={
+      schema_version:"work-item.v1",id:payload.work_item_id,repository:operation.repository,
+      issue_number:payload.native_issue_number,kind:"issue",parent_id:payload.native_parent_id,
+      acceptance_criteria:structuredClone(payload.acceptance_criteria),branch:payload.reserved_branch,
+      base_branch:payload.project.fields.base_branch,milestone:null,
+      status:payload.project.fields.status,gate:payload.project.fields.gate,
+    };
+    validateCoreDocument(item,"work-item.v1");
+    const existing=repository.issues.get(identity.issueNumber);
+    if (operation.action==="create") {
+      if (existing ||
+          [...repository.issues.values()].some(record => record.marker===payload.marker)) {
+        throw new CoreConflictError("Managed epic child reservation conflicts with repository state");
+      }
+      const at=parent.work.project.fields.last_reconciled_at;
+      const childWork=initialWork(item,`PVTI_MANAGED_${identity.issueNumber}`,project.revision,at);
+      childWork.parent={id:parent.work.item.id,branch:parent.work.item.branch,revision:parent.revision};
+      repository.issues.set(identity.issueNumber,{
+        request_identity:`managed-${sha256Canonical({work_item_id:item.id})}`,marker:payload.marker,
+        title:`Managed child ${item.id}`,description:item.acceptance_criteria.join("\n"),
+        priority:null,change_class:null,labels:["issue"],affected_version:null,scope:[],work:childWork,
+        revision:`issue-${identity.issueNumber}-1`,projected:true,
+      });
+      repository.nextIssueNumber=Math.max(repository.nextIssueNumber,identity.issueNumber+1);
+    } else if (operation.action==="update") {
+      if (!existing || existing.marker!==payload.marker || existing.native_parent_id!==payload.native_parent_id) {
+        throw new CoreConflictError("Managed epic child update conflicts with native identity");
+      }
+      existing.work.item=structuredClone(item);
+      existing.work.parent={id:parent.work.item.id,branch:parent.work.item.branch,revision:parent.revision};
+      existing.revision=bump(`issue-${identity.issueNumber}`,existing.revision);
+    } else {
+      throw new CoreValidationError("Unsupported managed epic child operation");
+    }
+    const record=repository.issues.get(identity.issueNumber);
+    record.native_parent_id=payload.native_parent_id;
+    record.native_parent_revision=record.revision;
+    record.managed_project_fields=structuredClone(payload.project.fields);
+    record.visible_project_fields={
+      Status:item.status,Gate:item.gate,repository:item.repository,parent:item.parent_id,
+      branch:item.branch,base_branch:item.base_branch,milestone:item.milestone,
+      last_reconciled_at:record.work.project.fields.last_reconciled_at,
+    };
+    repository.revision=bump("repository",repository.revision);
+    project.revision=bump("project",project.revision);
+    for (const repositoryValue of repositories.values()) {
+      for (const issueRecord of repositoryValue.issues.values()) issueRecord.work.project.revision=project.revision;
+    }
+    return repository.revision;
+  }
+
+  function applyEpicPrepare(operation) {
+    const payload=operation.payload;
+    exact(payload,["kind","plan","work"],"epic preparation payload");
+    const record=issue(payload.plan.epic.id);
+    if (!record || record.work.item.kind!=="epic" ||
+        record.work.item.id!==payload.work.item.id ||
+        payload.plan.epic.id!==payload.work.item.id) {
+      throw new CoreConflictError("Epic preparation payload conflicts with native epic identity");
+    }
+    for (const plannedChild of payload.plan.children) {
+      const childRecord=issue(plannedChild.id);
+      if (!childRecord || childRecord.native_parent_id!==record.work.item.id ||
+          canonicalJson(childRecord.work.item)!==canonicalJson(plannedChild) ||
+          childRecord.projected!==true) {
+        throw new CoreConflictError("Epic preparation has missing or conflicting governed child evidence");
+      }
+    }
+    for (const plannedEdge of payload.plan.edges) {
+      const edge=dependency.edges.get(plannedEdge.edge_id);
+      const relationship=dependency.relationships.get(plannedEdge.edge_id);
+      if (!edge || !relationship || canonicalJson(edge)!==canonicalJson(plannedEdge) ||
+          relationship.source!==plannedEdge.source || relationship.target!==plannedEdge.target ||
+          relationship.revision!==plannedEdge.revision) {
+        throw new CoreConflictError("Epic preparation has missing or conflicting dependency evidence");
+      }
+    }
+    record.epic_plan=structuredClone(payload.plan);
+    record.work=structuredClone(payload.work);
+    Object.assign(record.visible_project_fields ??= {},{
+      Status:payload.work.item.status,Gate:payload.work.item.gate,
+      branch:payload.work.item.branch,base_branch:payload.work.item.base_branch,
+      last_reconciled_at:payload.work.project.fields.last_reconciled_at,
+    });
+    record.revision=bump(`issue-${record.work.item.issue_number}`,record.revision);
+    const repository=repo(operation.repository);
+    repository.revision=bump("repository",repository.revision);
+    return repository.revision;
+  }
+
+  function applyEpicApprove(operation) {
+    const payload=operation.payload;
+    exact(payload,["kind","authority_binding","plan","work"],"epic approval payload");
+    const record=issue(payload.work.item.id);
+    const expectedChildren=record?.epic_plan?.children.map(child => ({id:child.id,revision:issue(child.id)?.revision}));
+    const expectedEdges=record?.epic_plan?.edges.map(edge => ({edge_id:edge.edge_id,revision:dependency.edges.get(edge.edge_id)?.revision}));
+    if (!record || !record.epic_plan || record.epic_approval ||
+        canonicalJson(record.epic_plan)!==canonicalJson(payload.plan) ||
+        payload.authority_binding.epic.id!==record.work.item.id ||
+        payload.authority_binding.epic.revision!==record.revision ||
+        payload.authority_binding.plan.plan_id!==record.epic_plan.plan_id ||
+        payload.authority_binding.plan.content_sha256!==record.epic_plan.content_sha256 ||
+        canonicalJson(payload.authority_binding.children)!==canonicalJson(expectedChildren) ||
+        canonicalJson(payload.authority_binding.edges)!==canonicalJson(expectedEdges) ||
+        payload.authority_binding.project.id!==project.id ||
+        payload.authority_binding.project.revision!==project.revision) {
+      throw new CoreConflictError("Epic approval conflicts with the exact prepared scope");
+    }
+    record.epic_approval=structuredClone(payload.authority_binding);
+    record.work=structuredClone(payload.work);
+    record.revision=bump(`issue-${record.work.item.issue_number}`,record.revision);
+    const repository=repo(operation.repository);
+    repository.revision=bump("repository",repository.revision);
+    return record.revision;
   }
 
   function applyReviewFollowUp(operation) {
@@ -486,6 +799,9 @@ export function createCoreGithubFixture(options={}) {
 
   function applyProject(operation) {
     const payload=operation.payload;
+    if (failureMode==="fail-epic-project" && payload.kind==="work-state" && payload.fields.Status==="Done") {
+      throw new Error("injected epic Project completion failure");
+    }
     if (payload.kind==="work-item-membership") {
       exact(payload,["kind","project_id","work_item_id","fields"],"Project membership payload");
       const record=issue(payload.work_item_id);
@@ -631,6 +947,38 @@ export function createCoreGithubFixture(options={}) {
     return repository.revision;
   }
 
+  function applyEpicAccept(operation) {
+    const payload=operation.payload;
+    exact(payload,["kind","epic_id","head_sha","authority_binding","work"],"epic acceptance payload");
+    const repository=repo(operation.repository);
+    const record=issue(payload.epic_id);
+    const pullRequest=[...repository.pullRequests.values()].find(value => value.work_item_id===payload.epic_id);
+    const releaseBranch=record ? repository.branches.get(record.work.release.branch) : null;
+    if (!record || record.work.item.kind!=="epic" || !record.epic_approval || !pullRequest ||
+        pullRequest.state!=="READY" || pullRequest.head_sha!==payload.head_sha ||
+        payload.authority_binding.epic.id!==payload.epic_id ||
+        payload.authority_binding.epic.revision!==record.revision ||
+        payload.authority_binding.pull_request.revision!==pullRequest.revision ||
+        payload.authority_binding.pull_request.head_sha!==pullRequest.head_sha ||
+        !releaseBranch || pullRequest.base!==releaseBranch.name) {
+      throw new CoreConflictError("Epic acceptance conflicts with exact current merge evidence");
+    }
+    if (failureMode==="fail-epic-merge") throw new Error("injected epic merge failure");
+    releaseBranch.head_sha=pullRequest.head_sha;
+    releaseBranch.revision=bump("release",releaseBranch.revision);
+    pullRequest.state="MERGED";
+    pullRequest.merged_sha=pullRequest.head_sha;
+    pullRequest.revision=bump("pull-request",pullRequest.revision);
+    const priorProject=structuredClone(record.work.project);
+    record.work=structuredClone(payload.work);
+    record.work.project=priorProject;
+    record.work.issue_state="CLOSED";
+    record.work.pull_request={state:"MERGED",head_sha:pullRequest.head_sha,merged_sha:pullRequest.head_sha};
+    record.revision=bump(`issue-${record.work.item.issue_number}`,record.revision);
+    repository.revision=bump("repository",repository.revision);
+    return pullRequest.revision;
+  }
+
   function applyDependency(operation) {
     const payload=operation.payload;
     if (payload.kind==="dependency-add") {
@@ -666,6 +1014,16 @@ export function createCoreGithubFixture(options={}) {
     calls.push(copy({method:"apply",operations,idempotencyKey:optionsValue.idempotencyKey},"fake GitHub call"));
     if (appliedKeys.has(optionsValue.idempotencyKey)) return appliedKeys.get(optionsValue.idempotencyKey);
     const values=operations.map(assertPortOperation);
+    for (const repository of repositories.values()) {
+      const reserved=values
+        .filter(operation => operation.repository===repository.repository && operation.resource==="issue" &&
+          operation.action==="create" && Object.hasOwn(operation.payload,"native_parent_id"))
+        .map(operation => operation.payload.native_issue_number)
+        .sort((left,right) => left-right);
+      if (reserved.some((number,index) => number!==repository.nextIssueNumber+index)) {
+        throw new CoreConflictError("Managed epic child reservations are not a contiguous native issue range");
+      }
+    }
     for (const operation of values) {
       if (currentRevision(operation)!==operation.expected_revision) {
         throw new CoreConflictError(`Fake GitHub stale expected revision for ${operation.operation_id}`);
@@ -673,16 +1031,25 @@ export function createCoreGithubFixture(options={}) {
     }
     if (failureMode==="throw-apply") throw new Error("injected fake GitHub apply failure");
     const observations=[];
-    for (const operation of values) {
+    const acceptance=values.find(operation => operation.resource==="pull_request" && operation.payload.kind==="epic-accept");
+    const executionValues=acceptance===undefined
+      ? values
+      : [acceptance,...values.filter(operation => operation!==acceptance)];
+    for (const operation of executionValues) {
       let revision;
       if (operation.resource==="issue" && operation.action==="create" &&
           operation.payload.kind==="review-minor-follow-up") revision=applyReviewFollowUp(operation);
+      else if (operation.resource==="issue" && Object.hasOwn(operation.payload,"native_parent_id")) revision=applyManagedChild(operation);
       else if (operation.resource==="issue" && operation.action==="create") revision=applyIssueCreate(operation);
       else if (operation.resource==="project") revision=applyProject(operation);
       else if (operation.resource==="branch" && operation.action==="create") revision=applyBranch(operation);
       else if (operation.resource==="pull_request" && operation.action==="update" &&
           operation.payload.kind==="review-record") revision=applyReviewPullRequest(operation);
+      else if (operation.resource==="pull_request" && operation.action==="update" &&
+          operation.payload.kind==="epic-accept") revision=applyEpicAccept(operation);
       else if (operation.resource==="pull_request" && ["create","update"].includes(operation.action)) revision=applyPullRequest(operation);
+      else if (operation.resource==="issue" && operation.action==="update" && operation.payload.kind==="epic-prepare") revision=applyEpicPrepare(operation);
+      else if (operation.resource==="issue" && operation.action==="update" && operation.payload.kind==="epic-approve") revision=applyEpicApprove(operation);
       else if (operation.resource==="issue" && operation.action==="update") revision=applyDependency(operation);
       else throw new CoreValidationError(`Unsupported fake GitHub operation ${operation.resource}.${operation.action}`);
       observations.push({operation_id:operation.operation_id,repository:operation.repository,revision});
@@ -750,6 +1117,136 @@ export function createCoreGithubFixture(options={}) {
   }
 
   function setFailureMode(mode) { failureMode=mode; }
+  function assignActiveRelease(id,version) {
+    const record=issue(id);
+    if (!record || record.work.item.kind!=="epic" || !record.epic_plan || !record.epic_approval ||
+        typeof version!=="string" || !/^v\d+\.\d+\.\d+$/u.test(version)) {
+      throw new TypeError("active release assignment requires a governed epic and canonical version");
+    }
+    const repository=repo(record.work.item.repository);
+    const branch=`release/${version}`;
+    const release={assigned:true,active:true,id:`${record.work.item.repository}@${branch}`,repository:record.work.item.repository,branch,milestone:version,revision:"release-1"};
+    const releaseHead="1".repeat(40);
+    repository.branches.set(branch,{name:branch,base_branch:"main",head_sha:releaseHead,revision:"release-1"});
+    repository.branches.set(record.work.item.branch,{name:record.work.item.branch,base_branch:branch,head_sha:releaseHead,revision:"branch-1"});
+    record.work.release=structuredClone(release);
+    record.work.item.base_branch=branch;
+    record.work.item.milestone=version;
+    record.work.item.status="Blocked";
+    record.work.item.gate="DEPENDENCY_REQUIRED";
+    record.work.physical_branch={exists:true,head_sha:releaseHead};
+    record.work.project.fields.base_branch=branch;
+    record.work.project.fields.Status="Blocked";
+    record.work.project.fields.Gate="DEPENDENCY_REQUIRED";
+    record.revision=bump(`issue-${record.work.item.issue_number}`,record.revision);
+    for (const planned of record.epic_plan.children) {
+      const childRecord=issue(planned.id);
+      const blocking=record.epic_plan.edges
+        .filter(edge => edge.source===planned.id && issue(edge.target)?.work.issue_state!=="CLOSED")
+        .map(edge => edge.target).sort(compare);
+      childRecord.work.release=structuredClone(release);
+      childRecord.work.item.milestone=version;
+      childRecord.work.item.status=blocking.length===0 ? "Ready" : "Blocked";
+      childRecord.work.item.gate=blocking.length===0 ? "NONE" : "DEPENDENCY_REQUIRED";
+      childRecord.work.blocking_dependencies=blocking;
+      childRecord.work.parent.revision=record.revision;
+      childRecord.work.project.fields.Status=childRecord.work.item.status;
+      childRecord.work.project.fields.Gate=childRecord.work.item.gate;
+      childRecord.revision=bump(`issue-${childRecord.work.item.issue_number}`,childRecord.revision);
+      Object.assign(childRecord.visible_project_fields,{Status:childRecord.work.item.status,Gate:childRecord.work.item.gate,milestone:version});
+    }
+    repository.revision=bump("repository",repository.revision);
+    project.revision=bump("project",project.revision);
+    for (const repositoryValue of repositories.values()) {
+      for (const issueRecord of repositoryValue.issues.values()) issueRecord.work.project.revision=project.revision;
+    }
+  }
+  function mergeWorkPullRequest(id) {
+    const record=issue(id);
+    if (!record || !["issue","bug"].includes(record.work.item.kind)) {
+      throw new TypeError("work pull request merge requires a governed child or bounded issue");
+    }
+    const repository=repo(record.work.item.repository);
+    const pullRequest=[...repository.pullRequests.values()].find(value => value.work_item_id===id);
+    const branch=repository.branches.get(record.work.item.branch);
+    const base=repository.branches.get(record.work.item.base_branch);
+    if (!pullRequest || pullRequest.state==="MERGED" || !branch || !base ||
+        pullRequest.head!==branch.name || pullRequest.base!==base.name ||
+        pullRequest.head_sha!==branch.head_sha) {
+      throw new TypeError("work pull request merge requires the exact current governed head and base");
+    }
+    base.head_sha=pullRequest.head_sha;
+    base.revision=bump("branch",base.revision);
+    pullRequest.state="MERGED";
+    pullRequest.merged_sha=pullRequest.head_sha;
+    pullRequest.revision=bump("pull-request",pullRequest.revision);
+    record.work.issue_state="CLOSED";
+    record.work.pull_request={state:"MERGED",head_sha:pullRequest.head_sha,merged_sha:pullRequest.head_sha};
+    record.work.item.status="Done";
+    record.work.item.gate="NONE";
+    record.work.project.fields.Status="Done";
+    record.work.project.fields.Gate="NONE";
+    Object.assign(record.visible_project_fields ??= {},{Status:"Done",Gate:"NONE"});
+    record.revision=bump(`issue-${record.work.item.issue_number}`,record.revision);
+    for (const candidate of repository.issues.values()) {
+      if (candidate.work.issue_state==="CLOSED" || candidate.work.item.kind!=="issue") continue;
+      const blocking=[...dependency.edges.values()]
+        .filter(edge => edge.source===candidate.work.item.id && issue(edge.target)?.work.issue_state!=="CLOSED")
+        .map(edge => edge.target).sort(compare);
+      candidate.work.blocking_dependencies=blocking;
+      if (candidate.work.release.assigned && !candidate.work.physical_branch.exists) {
+        candidate.work.item.status=blocking.length===0 ? "Ready" : "Blocked";
+        candidate.work.item.gate=blocking.length===0 ? "NONE" : "DEPENDENCY_REQUIRED";
+        candidate.work.project.fields.Status=candidate.work.item.status;
+        candidate.work.project.fields.Gate=candidate.work.item.gate;
+      }
+    }
+    if (record.work.parent) {
+      const parent=issue(record.work.parent.id);
+      parent.work.physical_branch={exists:true,head_sha:base.head_sha};
+      parent.work.children_complete=parent.epic_plan.children.every(child => issue(child.id)?.work.issue_state==="CLOSED");
+      parent.work.item.status=parent.work.children_complete ? "In progress" : "Blocked";
+      parent.work.item.gate=parent.work.children_complete ? "NONE" : "DEPENDENCY_REQUIRED";
+      parent.work.project.fields.Status=parent.work.item.status;
+      parent.work.project.fields.Gate=parent.work.item.gate;
+      Object.assign(parent.visible_project_fields ??= {},{Status:parent.work.item.status,Gate:parent.work.item.gate});
+      parent.revision=bump(`issue-${parent.work.item.issue_number}`,parent.revision);
+    }
+    repository.revision=bump("repository",repository.revision);
+    project.revision=bump("project",project.revision);
+    for (const repositoryValue of repositories.values()) {
+      for (const issueRecord of repositoryValue.issues.values()) issueRecord.work.project.revision=project.revision;
+    }
+  }
+  function enableReviewPullRequest(repositoryName,number,evidenceInput) {
+    const evidence=copy(evidenceInput,"review enablement evidence");
+    exact(evidence,["checks","implementationIdentity"],"review enablement evidence");
+    const repository=repo(repositoryName);
+    const pullRequest=repository.pullRequests.get(number);
+    const record=pullRequest ? issue(pullRequest.work_item_id) : null;
+    if (!pullRequest || pullRequest.state!=="READY" || !record ||
+        evidence.checks.revision!==pullRequest.head_sha ||
+        evidence.implementationIdentity.revision!==pullRequest.head_sha) {
+      throw new TypeError("review enablement requires a ready governed pull request at the exact head");
+    }
+    pullRequest.body="";
+    pullRequest.formal_review={state:"NONE",review_id:null,reviewed_revision:null};
+    pullRequest.recorded_result=null;
+    pullRequest.checks=structuredClone(evidence.checks);
+    pullRequest.implementation_identity=structuredClone(evidence.implementationIdentity);
+    pullRequest.review_snapshot=true;
+    record.work.pull_request={state:"READY",head_sha:pullRequest.head_sha,merged_sha:null};
+    record.work.checks=structuredClone(evidence.checks);
+    record.work.authority.epic_acceptance_required=record.work.item.kind==="epic";
+    record.work.item.status="In review";
+    record.work.item.gate="REVIEW_REQUIRED";
+    record.work.project.fields.Status="In review";
+    record.work.project.fields.Gate="REVIEW_REQUIRED";
+    reviewProjects.set(`${repositoryName}#${number}`,{
+      project_id:project.id,item_id:record.work.project.item_id,revision:project.revision,
+      follow_up_mappings:[],reservations:[],
+    });
+  }
   function setRepositoryRevision(repository,revision) { repo(repository).revision=revision; }
   function setBranchHead(repository,name,headSha) {
     if (!SHA.test(headSha)) throw new TypeError("head must be a lowercase 40-character SHA");
@@ -836,7 +1333,7 @@ export function createCoreGithubFixture(options={}) {
 
   const github=Object.freeze({snapshot,inspect,apply});
   return Object.freeze({
-    github,seedWork,seedReviewPullRequest,setFailureMode,setRepositoryRevision,setBranchHead,
+    github,seedWork,seedReviewPullRequest,setFailureMode,assignActiveRelease,mergeWorkPullRequest,enableReviewPullRequest,setRepositoryRevision,setBranchHead,
     setPullRequestHead,setReviewChecks,setReviewImplementationIdentity,view,
   });
 }

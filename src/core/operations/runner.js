@@ -55,14 +55,31 @@ function observed(value) {
 
 function expectedAuthorityBinding(intent,now,implementationActor) {
   const revisions=new Map();
+  let authorityBinding=null;
   for (const operation of intent.operations) {
-    const target=operation.repository ?? (operation.resource==="project" ? operation.payload?.project?.node_id : null);
+    if (operation.payload && Object.hasOwn(operation.payload,"authority_binding")) {
+      const candidate=operation.payload.authority_binding;
+      if (authorityBinding!==null && canonicalJson(authorityBinding)!==canonicalJson(candidate)) {
+        throw new CoreBlockedError("Authority cannot bind unequal authority binding values");
+      }
+      authorityBinding=candidate;
+    }
+    // A Project change is always authorized against the Project node, not the
+    // incidental repository that carries the mutation.
+    const target=operation.resource==="project"
+      ? (operation.payload?.project?.node_id ?? operation.payload?.project_id)
+      : operation.repository;
     if (typeof target!=="string" || !target) throw new CoreBlockedError("Authority cannot bind an operation without an explicit target identity");
-    const binding=Object.freeze({repository:operation.repository,revision:operation.expected_revision});
+    const binding=Object.freeze({repository:operation.resource==="project" ? null : operation.repository,revision:operation.expected_revision});
     if (revisions.has(target) && canonicalJson(revisions.get(target))!==canonicalJson(binding)) throw new CoreBlockedError("Authority cannot bind conflicting expected revisions for one target");
     revisions.set(target,binding);
   }
-  const expected_revisions=[...revisions.values()].sort(compareCanonicalValue);
+  if (authorityBinding!==null) {
+    revisions.set(`binding:${sha256Canonical(authorityBinding)}`,null);
+  }
+  const expected_revisions=[...revisions.values()]
+    .filter(value => value!==null)
+    .sort(compareCanonicalValue);
   return Object.freeze({
     command:intent.command,
     targets:[...revisions.keys()].sort(compareCanonicalText),

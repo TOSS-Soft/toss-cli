@@ -484,3 +484,28 @@ test("authority binds a Project-only operation identity and revision",async () =
   const tampered=createOperationIntent({...operationInput(),command:"init",authority:authorityReference(authority),operations:[{resource:"project",action:"update",repository:null,expected_revision:"project-r1",payload:{project:{node_id:"PVT_other",number:7}}}]});
   await assert.rejects(runner.apply(tampered,{authority}),CoreBlockedError);
 });
+
+test("runner binds canonical operation authority payloads, Project identity, and repeated repository revisions",async () => {
+  const {privateKey,publicKey}=generateKeyPairSync("ed25519");
+  const binding={epic:{id:"TOSS-Soft/toss-cli#42",revision:"issue-42-1"},plan:{content_sha256:"a".repeat(64)}};
+  const target=`binding:${sha256Canonical(binding)}`;
+  const revisions=[{repository:null,revision:"project-1"},{repository:"TOSS-Soft/toss-cli",revision:"repository-1"}]
+    .sort((left,right) => canonicalJson(left).localeCompare(canonicalJson(right)));
+  const unsigned={schema_version:"authority-record.v1",document_type:"authority-record",record_id:"AUTH-20260901-0002",actor:"independent-approver",command:"init",targets:["PVT_TOSS_OS_2","TOSS-Soft/toss-cli",target].sort(),expected_revisions:revisions,policy_revision:"POLICY-0001",issued_at:"2026-09-01T07:00:00.000Z",expires_at:"2026-09-01T09:00:00.000Z"};
+  const authority={...unsigned,signature:{algorithm:"ed25519",key_id:"approver",value:sign(null,Buffer.from(canonicalJson(unsigned)),privateKey).toString("base64")}};
+  const operations=[
+    {resource:"issue",action:"update",repository:"TOSS-Soft/toss-cli",expected_revision:"repository-1",payload:{authority_binding:binding}},
+    {resource:"issue",action:"create",repository:"TOSS-Soft/toss-cli",expected_revision:"repository-1",payload:{authority_binding:binding}},
+    {resource:"project",action:"update",repository:"TOSS-Soft/toss-cli",expected_revision:"project-1",payload:{project_id:"PVT_TOSS_OS_2",authority_binding:binding}},
+  ];
+  const run=async values => {
+    const intent=createOperationIntent({...operationInput(),command:"init",authority:authorityReference(authority),operations:values});
+    const runner=createOperationRunner({control:memoryControl(),github:{async snapshot() { return {}; },async inspect(items) { return items.map(item => ({operation_id:item.operation_id,repository:item.repository,revision:item.expected_revision})); },async apply(items) { return {status:"completed",observed_revisions:items.map(item => ({operation_id:item.operation_id,repository:item.repository,revision:"next"}))}; }},authorityRegistry:{keys:[{key_id:"approver",actor:"independent-approver",public_key:publicKey.export({format:"pem",type:"spki"}).toString()}]},clock:() => "2026-09-01T08:00:00.000Z",idGenerator:() => "RECEIPT-20260901-0002",policyRevision:() => "POLICY-0001"});
+    return runner.apply(intent,{authority});
+  };
+  assert.equal((await run(operations)).status,"completed");
+  const tampered={...binding,plan:{content_sha256:"c".repeat(64)}};
+  await assert.rejects(run(operations.map(operation => ({...operation,payload:{...operation.payload,authority_binding:tampered}}))),CoreBlockedError);
+  await assert.rejects(run([...operations.slice(0,2),{...operations[2],payload:{...operations[2].payload,authority_binding:{...binding,plan:{content_sha256:"b".repeat(64)}}}}]),CoreBlockedError);
+  await assert.rejects(run([{...operations[0],expected_revision:"repository-2"},operations[1]]),CoreBlockedError);
+});
