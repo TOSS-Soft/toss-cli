@@ -722,9 +722,10 @@ test("public epic submit promotes an exact existing DRAFT pull request and statu
   const composed=await state.fixture.github.snapshot({kind:"work-item",id:EPIC});
   assert.equal(composed.work.pull_request.state,"READY");
   assert.equal(composed.work.item.status,"In review");
-  assert.equal(composed.work.item.gate,"EPIC_ACCEPTANCE_REQUIRED");
+  assert.equal(composed.work.item.gate,"REVIEW_REQUIRED");
   assert.equal(composed.work.project.fields.Status,"In review");
-  assert.equal(composed.work.project.fields.Gate,"EPIC_ACCEPTANCE_REQUIRED");
+  assert.equal(composed.work.project.fields.Gate,"REVIEW_REQUIRED");
+  assert.equal(composed.work.authority.epic_acceptance_required,true);
 
   const eventCount=state.control.events.length;
   const applyCount=state.fixture.view().calls.filter(value => value.method==="apply").length;
@@ -785,9 +786,9 @@ test("epic submit atomically projects its ready PR acceptance authority and Proj
   assert.equal(snapshot.work.authority.epic_acceptance_required,true);
   assert.equal(snapshot.work.authority.release_approval_required,false);
   assert.equal(snapshot.work.item.status,"In review");
-  assert.equal(snapshot.work.item.gate,"EPIC_ACCEPTANCE_REQUIRED");
+  assert.equal(snapshot.work.item.gate,"REVIEW_REQUIRED");
   assert.equal(snapshot.work.project.fields.Status,"In review");
-  assert.equal(snapshot.work.project.fields.Gate,"EPIC_ACCEPTANCE_REQUIRED");
+  assert.equal(snapshot.work.project.fields.Gate,"REVIEW_REQUIRED");
 });
 
 test("epic submit requires each closed child to be semantically Done at its exact merged head and Project state",async () => {
@@ -911,6 +912,16 @@ test("signed public lifecycle reviews and accepts the exact epic head before clo
   await dispatchCoreCommand(parseCoreCommand(["issue","submit",child.id,"--apply","--non-interactive"]),{services});
   fixture.mergeWorkPullRequest(child.id);
   await dispatchCoreCommand(parseCoreCommand(["epic","submit",EPIC,"--apply","--non-interactive"]),{services});
+  const pendingReview=await fixture.github.snapshot({kind:"work-item",id:EPIC});
+  assert.equal(pendingReview.work.item.status,"In review");
+  assert.equal(pendingReview.work.item.gate,"REVIEW_REQUIRED");
+  assert.equal(pendingReview.work.project.fields.Status,"In review");
+  assert.equal(pendingReview.work.project.fields.Gate,"REVIEW_REQUIRED");
+  assert.equal(pendingReview.work.authority.epic_acceptance_required,true);
+  const pendingStatus=await dispatchCoreCommand(parseCoreCommand(["epic","status",EPIC]),{services});
+  assert.equal(pendingStatus.exitCode,0,pendingStatus.result.error?.message);
+  assert.equal(pendingStatus.result.data.state.status,"In review");
+  assert.equal(pendingStatus.result.data.state.gate,"REVIEW_REQUIRED");
   const repository=fixture.view().repositories.find(value => value.repository==="TOSS-Soft/toss-cli");
   const pull=repository.pull_requests.find(value => value.work_item_id===EPIC);
   const commits=[{revision:pull.head_sha,author:"implementation-author",committer:"implementation-author"}];
@@ -928,6 +939,16 @@ test("signed public lifecycle reviews and accepts the exact epic head before clo
   };
   const reviewed=await dispatchCoreCommand(parseCoreCommand(["review","record",`TOSS-Soft/toss-cli#${pull.number}`,"--from","review.json","--apply","--non-interactive"]),{services});
   assert.equal(reviewed.exitCode,0,reviewed.result.error?.message);
+  const reviewedWork=await fixture.github.snapshot({kind:"work-item",id:EPIC});
+  assert.equal(reviewedWork.work.item.status,"In review");
+  assert.equal(reviewedWork.work.item.gate,"EPIC_ACCEPTANCE_REQUIRED");
+  assert.equal(reviewedWork.work.project.fields.Status,"In review");
+  assert.equal(reviewedWork.work.project.fields.Gate,"EPIC_ACCEPTANCE_REQUIRED");
+  assert.equal(reviewedWork.work.authority.epic_acceptance_required,true);
+  const reviewedStatus=await dispatchCoreCommand(parseCoreCommand(["epic","status",EPIC]),{services});
+  assert.equal(reviewedStatus.exitCode,0,reviewedStatus.result.error?.message);
+  assert.equal(reviewedStatus.result.data.state.status,"In review");
+  assert.equal(reviewedStatus.result.data.state.gate,"EPIC_ACCEPTANCE_REQUIRED");
   const snapshot=await fixture.github.snapshot({kind:"epic-accept",id:EPIC});
   const binding={
     epic:{id:EPIC,revision:snapshot.epic_revision},

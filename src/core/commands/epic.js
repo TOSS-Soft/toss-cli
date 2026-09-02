@@ -75,9 +75,9 @@ function submittedWork(work,headSha) {
   next.checks=null;
   next.authority={epic_acceptance_required:true,release_approval_required:false};
   next.item.status="In review";
-  next.item.gate="EPIC_ACCEPTANCE_REQUIRED";
+  next.item.gate="REVIEW_REQUIRED";
   next.project.fields.Status="In review";
-  next.project.fields.Gate="EPIC_ACCEPTANCE_REQUIRED";
+  next.project.fields.Gate="REVIEW_REQUIRED";
   projectWorkIdentity(next);
   return closedData(next,"submitted epic work");
 }

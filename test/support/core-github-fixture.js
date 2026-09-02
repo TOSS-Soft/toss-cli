@@ -955,6 +955,10 @@ export function createCoreGithubFixture(options={}) {
         .find(value => value.work.project.item_id===payload.item_id);
       if (!record) throw new CoreConflictError("Project update references a missing item");
       Object.assign(record.work.project.fields,structuredClone(payload.fields));
+      if (payload.kind==="review-work-state") {
+        if (Object.hasOwn(payload.fields,"Status")) record.work.item.status=payload.fields.Status;
+        if (Object.hasOwn(payload.fields,"Gate")) record.work.item.gate=payload.fields.Gate;
+      }
       Object.assign(record.visible_project_fields ??= {},structuredClone(payload.fields));
     } else if (payload.kind==="review-follow-up-membership") {
       exact(payload,[
