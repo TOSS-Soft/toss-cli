@@ -12,6 +12,7 @@ import {runInitCommand} from "./init.js";
 import {runDependencyCommand} from "./dependency.js";
 import {runFeatureCommand} from "./feature.js";
 import {runIssueCommand} from "./issue.js";
+import {runReviewCommand} from "./review.js";
 import {runRepositoryCommand} from "./repository.js";
 
 const TASK_4_COMMANDS=new Set([
@@ -19,7 +20,10 @@ const TASK_4_COMMANDS=new Set([
   "issue.add","issue.start","issue.submit","issue.status",
   "dependency.add","dependency.remove","dependency.graph","dependency.check",
 ]);
-const IMPLEMENTED_COMMANDS=new Set(["init","repo.add","repo.list",...TASK_4_COMMANDS]);
+const TASK_5_COMMANDS=new Set(["review.record","review.status"]);
+const IMPLEMENTED_COMMANDS=new Set([
+  "init","repo.add","repo.list",...TASK_4_COMMANDS,...TASK_5_COMMANDS,
+]);
 const CONTEXT_KEYS=new Set(["handlers","services","confirm"]);
 const BUILTIN_HANDLERS=Object.freeze({
   init:runInitCommand,
@@ -35,6 +39,8 @@ const BUILTIN_HANDLERS=Object.freeze({
   "dependency.remove":runDependencyCommand,
   "dependency.graph":runDependencyCommand,
   "dependency.check":runDependencyCommand,
+  "review.record":runReviewCommand,
+  "review.status":runReviewCommand,
 });
 
 export {CORE_EXIT_CODES,CoreCommandUsageError,parseCoreCommand};
@@ -159,7 +165,8 @@ export async function dispatchCoreCommand(command,context={}) {
     const normalized=validateParsedCoreCommand(command);
     const services=normalizeContext(context);
     if (!IMPLEMENTED_COMMANDS.has(normalized.name) ||
-        (TASK_4_COMMANDS.has(normalized.name) && !Object.hasOwn(services,"services"))) {
+        ((TASK_4_COMMANDS.has(normalized.name) || TASK_5_COMMANDS.has(normalized.name)) &&
+          !Object.hasOwn(services,"services"))) {
       return failure(
         CORE_EXIT_CODES.NOT_IMPLEMENTED,
         "COMMAND_NOT_IMPLEMENTED",

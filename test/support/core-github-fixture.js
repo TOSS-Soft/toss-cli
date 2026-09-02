@@ -35,6 +35,8 @@ function repositoryState(repository) {
     issues:new Map(),
     branches:new Map(),
     pullRequests:new Map(),
+    reviewFollowUps:new Map(),
+    reviewReservations:new Set(),
     nextPullRequestNumber:1,
   };
 }
@@ -101,6 +103,7 @@ export function createCoreGithubFixture(options={}) {
   const repositories=new Map(repositoryNames.map(name => [name,repositoryState(name)]));
   const project={id:PROJECT_ID,revision:"project-1"};
   const dependency={revision:"dependency-1",edges:new Map(),relationships:new Map(),tombstones:new Map()};
+  const reviewProjects=new Map();
   const calls=[];
   const appliedKeys=new Map();
   let failureMode=null;
@@ -227,6 +230,38 @@ export function createCoreGithubFixture(options={}) {
       exact(query,["kind","root"],"dependency snapshot query");
       return graphSnapshot(query.root);
     }
+    if (query.kind==="review") {
+      exact(query,["kind","repository","number"],"review snapshot query");
+      const repository=repo(query.repository);
+      const pullRequest=repository.pullRequests.get(query.number);
+      if (!pullRequest || pullRequest.review_snapshot!==true) {
+        throw new CoreConflictError(`Unknown governed pull request ${query.repository}#${query.number}`);
+      }
+      const record=issue(pullRequest.work_item_id);
+      if (!record) throw new CoreConflictError("Review pull request has no governed work item");
+      const work=structuredClone(record.work);
+      const branch=repository.branches.get(pullRequest.head);
+      work.physical_branch={exists:true,head_sha:branch.head_sha};
+      work.pull_request={state:"READY",head_sha:pullRequest.head_sha,merged_sha:null};
+      work.review=pullRequest.recorded_result===null ? null : {
+        verdict:pullRequest.recorded_result.verdict,
+        reviewed_revision:pullRequest.recorded_result.reviewed_revision,
+      };
+      work.checks=structuredClone(pullRequest.checks);
+      const projectEvidence=reviewProjects.get(`${query.repository}#${query.number}`);
+      return copy({
+        kind:"review",source:source(query.repository,pullRequest.revision),
+        pullRequest:{
+          repository:query.repository,number:pullRequest.number,revision:pullRequest.revision,
+          head_repository:pullRequest.head_repository,base_repository:pullRequest.base_repository,
+          head:pullRequest.head,base:pullRequest.base,head_sha:pullRequest.head_sha,
+          body:pullRequest.body,formal_review:pullRequest.formal_review,
+          recorded_result:pullRequest.recorded_result,checks:pullRequest.checks,work,
+        },
+        implementationIdentity:pullRequest.implementation_identity,
+        project:projectEvidence,
+      },"review snapshot");
+    }
     throw new CoreValidationError(`Unknown fake GitHub snapshot query ${String(query.kind)}`);
   }
 
@@ -234,8 +269,10 @@ export function createCoreGithubFixture(options={}) {
     if (operation.resource==="project") return project.revision;
     if (operation.resource==="branch") return repo(operation.repository).revision;
     if (operation.resource==="pull_request") {
-      const id=operation.payload.work_item_id;
-      const existing=[...repo(operation.repository).pullRequests.values()].find(value => value.work_item_id===id);
+      const existing=operation.payload.kind==="review-record"
+        ? repo(operation.repository).pullRequests.get(operation.payload.pull_request_number)
+        : [...repo(operation.repository).pullRequests.values()].find(value =>
+          value.work_item_id===operation.payload.work_item_id);
       return existing?.revision ?? repo(operation.repository).revision;
     }
     if (operation.resource==="issue" && ["dependency-add","dependency-remove"].includes(operation.payload.kind)) {
@@ -284,6 +321,32 @@ export function createCoreGithubFixture(options={}) {
     return repository.revision;
   }
 
+  function applyReviewFollowUp(operation) {
+    const repository=repo(operation.repository);
+    const payload=operation.payload;
+    exact(payload,[
+      "kind","issue_id","review_id","finding_id","marker","title","summary",
+      "reserved_branch","work_item","source_pull_request","source_revision","review_context",
+    ],"review follow-up issue payload");
+    const identity=parseWorkItemId(payload.issue_id);
+    if (identity.repository!==operation.repository ||
+        identity.issueNumber!==payload.work_item.issue_number ||
+        !repository.reviewReservations.has(identity.issueNumber) ||
+        repository.reviewFollowUps.has(identity.issueNumber)) {
+      throw new CoreConflictError("Review follow-up reservation conflicts with repository state");
+    }
+    repository.reviewFollowUps.set(identity.issueNumber,{
+      issue_id:payload.issue_id,review_id:payload.review_id,finding_id:payload.finding_id,
+      marker:payload.marker,title:payload.title,summary:payload.summary,
+      reserved_branch:payload.reserved_branch,work_item:structuredClone(payload.work_item),
+      revision:`issue-${identity.issueNumber}-1`,projected:false,
+    });
+    repository.reviewReservations.delete(identity.issueNumber);
+    repository.nextIssueNumber=Math.max(repository.nextIssueNumber,identity.issueNumber+1);
+    repository.revision=bump("repository",repository.revision);
+    return repository.revision;
+  }
+
   function applyProject(operation) {
     const payload=operation.payload;
     if (payload.kind==="work-item-membership") {
@@ -296,13 +359,41 @@ export function createCoreGithubFixture(options={}) {
       record.work.project.fields=Object.fromEntries(
         ["Status","Gate","branch","base_branch","last_reconciled_at"].map(key => [key,payload.fields[key]]),
       );
-    } else if (payload.kind==="work-state") {
-      exact(payload,["kind","project_id","item_id","fields"],"Project state payload");
+    } else if (payload.kind==="work-state" || payload.kind==="review-work-state") {
+      if (payload.kind==="review-work-state") {
+        exact(payload,["kind","project_id","item_id","fields","review_context"],"Review Project state payload");
+      } else {
+        exact(payload,["kind","project_id","item_id","fields"],"Project state payload");
+      }
       const record=[...repositories.values()].flatMap(value => [...value.issues.values()])
         .find(value => value.work.project.item_id===payload.item_id);
       if (!record) throw new CoreConflictError("Project update references a missing item");
       Object.assign(record.work.project.fields,structuredClone(payload.fields));
       Object.assign(record.visible_project_fields ??= {},structuredClone(payload.fields));
+    } else if (payload.kind==="review-follow-up-membership") {
+      exact(payload,[
+        "kind","project_id","issue_id","review_id","finding_id","marker","reserved_branch",
+        "fields","review_context",
+      ],"Review follow-up Project membership payload");
+      const identity=parseWorkItemId(payload.issue_id);
+      const followUp=repo(identity.repository).reviewFollowUps.get(identity.issueNumber);
+      if (!followUp || followUp.projected || followUp.marker!==payload.marker ||
+          payload.project_id!==project.id) {
+        throw new CoreConflictError("Review follow-up Project membership conflicts");
+      }
+      followUp.projected=true;
+      followUp.project_fields=structuredClone(payload.fields);
+      const projectEvidence=reviewProjects.get(payload.review_context.review_result.repository+
+        `#${payload.review_context.review_result.pull_request_number}`);
+      if (!projectEvidence) throw new CoreConflictError("Review follow-up has no Project evidence owner");
+      projectEvidence.follow_up_mappings.push({
+        review_id:payload.review_id,finding_id:payload.finding_id,issue_id:payload.issue_id,
+        repository:identity.repository,project_id:payload.project_id,
+        project_item_id:`PVTI_REVIEW_${identity.issueNumber}`,
+        issue_revision:followUp.revision,project_revision:project.revision,marker:payload.marker,
+      });
+      projectEvidence.reservations=projectEvidence.reservations.filter(value =>
+        value.finding_id!==payload.finding_id);
     } else {
       throw new CoreValidationError("Unsupported fake Project operation");
     }
@@ -311,6 +402,39 @@ export function createCoreGithubFixture(options={}) {
       for (const record of repository.issues.values()) record.work.project.revision=project.revision;
     }
     return project.revision;
+  }
+
+  function applyReviewPullRequest(operation) {
+    const repository=repo(operation.repository);
+    const payload=operation.payload;
+    exact(payload,[
+      "kind","pull_request_number","head_sha","body","formal_review","review_result",
+      "implementation_identity","checks",
+    ],"review pull request payload");
+    const pullRequest=repository.pullRequests.get(payload.pull_request_number);
+    if (!pullRequest || !pullRequest.review_snapshot || pullRequest.head_sha!==payload.head_sha) {
+      throw new CoreConflictError("Review pull request head is stale or unmanaged");
+    }
+    if (!new Set(["APPROVE","REQUEST_CHANGES"]).has(payload.formal_review.action)) {
+      throw new CoreValidationError("Formal review action is invalid");
+    }
+    pullRequest.body=payload.body;
+    pullRequest.formal_review={
+      state:payload.formal_review.action==="APPROVE" ? "APPROVED" : "CHANGES_REQUESTED",
+      review_id:payload.formal_review.review_id,
+      reviewed_revision:payload.formal_review.reviewed_revision,
+    };
+    pullRequest.recorded_result=structuredClone(payload.review_result);
+    pullRequest.implementation_identity=structuredClone(payload.implementation_identity);
+    pullRequest.checks=structuredClone(payload.checks);
+    pullRequest.revision=bump("pull-request",pullRequest.revision);
+    const record=issue(pullRequest.work_item_id);
+    record.work.review={
+      verdict:payload.review_result.verdict,
+      reviewed_revision:payload.review_result.reviewed_revision,
+    };
+    record.work.checks=structuredClone(payload.checks);
+    return pullRequest.revision;
   }
 
   function applyBranch(operation) {
@@ -404,13 +528,22 @@ export function createCoreGithubFixture(options={}) {
     const observations=[];
     for (const operation of values) {
       let revision;
-      if (operation.resource==="issue" && operation.action==="create") revision=applyIssueCreate(operation);
+      if (operation.resource==="issue" && operation.action==="create" &&
+          operation.payload.kind==="review-minor-follow-up") revision=applyReviewFollowUp(operation);
+      else if (operation.resource==="issue" && operation.action==="create") revision=applyIssueCreate(operation);
       else if (operation.resource==="project") revision=applyProject(operation);
       else if (operation.resource==="branch" && operation.action==="create") revision=applyBranch(operation);
+      else if (operation.resource==="pull_request" && operation.action==="update" &&
+          operation.payload.kind==="review-record") revision=applyReviewPullRequest(operation);
       else if (operation.resource==="pull_request" && ["create","update"].includes(operation.action)) revision=applyPullRequest(operation);
       else if (operation.resource==="issue" && operation.action==="update") revision=applyDependency(operation);
       else throw new CoreValidationError(`Unsupported fake GitHub operation ${operation.resource}.${operation.action}`);
       observations.push({operation_id:operation.operation_id,repository:operation.repository,revision});
+    }
+    for (const evidence of reviewProjects.values()) {
+      evidence.revision=project.revision;
+      for (const mapping of evidence.follow_up_mappings) mapping.project_revision=project.revision;
+      for (const reservation of evidence.reservations) reservation.project_revision=project.revision;
     }
     if (failureMode==="missing-apply-observation") observations.pop();
     if (failureMode==="duplicate-apply-observation" && observations.length>0) observations.push(observations[0]);
@@ -445,6 +578,31 @@ export function createCoreGithubFixture(options={}) {
     return work.item.id;
   }
 
+  function seedReviewPullRequest(input) {
+    const value=copy(input,"seeded review pull request");
+    exact(value,["pullRequest","result","implementationIdentity","project"],"seeded review pull request");
+    const pullRequest=value.pullRequest;
+    seedWork(pullRequest.work);
+    const repository=repo(pullRequest.repository);
+    repository.pullRequests.set(pullRequest.number,{
+      number:pullRequest.number,work_item_id:pullRequest.work.item.id,
+      head_repository:pullRequest.head_repository,base_repository:pullRequest.base_repository,
+      head:pullRequest.head,base:pullRequest.base,head_sha:pullRequest.head_sha,
+      state:"READY",merged_sha:null,revision:pullRequest.revision,
+      body:pullRequest.body,formal_review:structuredClone(pullRequest.formal_review),
+      recorded_result:structuredClone(pullRequest.recorded_result),
+      checks:structuredClone(pullRequest.checks),
+      implementation_identity:structuredClone(value.implementationIdentity),review_snapshot:true,
+    });
+    repository.nextPullRequestNumber=Math.max(repository.nextPullRequestNumber,pullRequest.number+1);
+    reviewProjects.set(`${pullRequest.repository}#${pullRequest.number}`,structuredClone(value.project));
+    const reservedNumbers=value.project.reservations
+      .filter(candidate => candidate.repository===pullRequest.repository)
+      .map(candidate => candidate.issue_number);
+    for (const number of reservedNumbers) repository.reviewReservations.add(number);
+    return `${pullRequest.repository}#${pullRequest.number}`;
+  }
+
   function setFailureMode(mode) { failureMode=mode; }
   function setRepositoryRevision(repository,revision) { repo(repository).revision=revision; }
   function setBranchHead(repository,name,headSha) {
@@ -454,6 +612,46 @@ export function createCoreGithubFixture(options={}) {
     branch.head_sha=headSha;
     branch.revision=bump("branch",branch.revision);
   }
+  function setPullRequestHead(repositoryName,number,headSha,{checks="PENDING",reconcileProject=false}={}) {
+    if (!SHA.test(headSha) || !new Set(["PENDING","PASSED","FAILED"]).has(checks)) {
+      throw new TypeError("review pull request head/checks are invalid");
+    }
+    const repository=repo(repositoryName);
+    const pullRequest=repository.pullRequests.get(number);
+    if (!pullRequest?.review_snapshot) throw new TypeError("review pull request does not exist");
+    const branch=repository.branches.get(pullRequest.head);
+    branch.head_sha=headSha;
+    branch.revision=bump("branch",branch.revision);
+    pullRequest.head_sha=headSha;
+    pullRequest.checks={state:checks,revision:headSha};
+    pullRequest.revision=bump("pull-request",pullRequest.revision);
+    pullRequest.implementation_identity.revision=headSha;
+    if (!pullRequest.implementation_identity.commits.some(value => value.revision===headSha)) {
+      pullRequest.implementation_identity.commits.push({
+        revision:headSha,author:pullRequest.implementation_identity.pull_request_author,
+        committer:pullRequest.implementation_identity.pull_request_author,
+      });
+    }
+    const record=issue(pullRequest.work_item_id);
+    record.work.physical_branch={exists:true,head_sha:headSha};
+    record.work.pull_request={state:"READY",head_sha:headSha,merged_sha:null};
+    record.work.checks={state:checks,revision:headSha};
+    if (reconcileProject) {
+      record.work.project.fields.Status="In review";
+      record.work.project.fields.Gate="REVIEW_REQUIRED";
+      project.revision=bump("project",project.revision);
+      for (const repositoryValue of repositories.values()) {
+        for (const issueRecord of repositoryValue.issues.values()) {
+          issueRecord.work.project.revision=project.revision;
+        }
+      }
+      for (const evidence of reviewProjects.values()) {
+        evidence.revision=project.revision;
+        for (const mapping of evidence.follow_up_mappings) mapping.project_revision=project.revision;
+        for (const reserved of evidence.reservations) reserved.project_revision=project.revision;
+      }
+    }
+  }
   function view() {
     return copy({
       project,
@@ -461,14 +659,19 @@ export function createCoreGithubFixture(options={}) {
         repository:value.repository,revision:value.revision,next_issue_number:value.nextIssueNumber,
         issues:[...value.issues.values()],branches:[...value.branches.values()],
         pull_requests:[...value.pullRequests.values()],
+        review_follow_ups:[...value.reviewFollowUps.values()],
       })).sort((left,right) => compare(left.repository,right.repository)),
       dependency:{revision:dependency.revision,edges:[...dependency.edges.values()],relationships:[...dependency.relationships.values()],tombstones:[...dependency.tombstones.values()]},
+      review_projects:[...reviewProjects.entries()].map(([pull_request,value]) => ({pull_request,...value})),
       calls,
     },"fake GitHub fixture view");
   }
 
   const github=Object.freeze({snapshot,inspect,apply});
-  return Object.freeze({github,seedWork,setFailureMode,setRepositoryRevision,setBranchHead,view});
+  return Object.freeze({
+    github,seedWork,seedReviewPullRequest,setFailureMode,setRepositoryRevision,setBranchHead,
+    setPullRequestHead,view,
+  });
 }
 
 export const CORE_GITHUB_FIXTURE_SOURCE_SHA=SOURCE_SHA;
