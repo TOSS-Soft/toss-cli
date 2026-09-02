@@ -1,0 +1,63 @@
+{
+  "candidates": [
+    {
+      "id": "TOSS-Soft/toss-cli#10",
+      "repository": "TOSS-Soft/toss-cli",
+      "approved": true,
+      "version": null,
+      "decomposed": true,
+      "priority": 10,
+      "risk": "medium",
+      "outcome": "organizational-lifecycle",
+      "change_class": "backward_compatible_feature",
+      "dependencies": ["TOSS-Soft/toss-console#4"]
+    },
+    {
+      "id": "TOSS-Soft/toss-console#4",
+      "repository": "TOSS-Soft/toss-console",
+      "approved": true,
+      "version": null,
+      "decomposed": true,
+      "priority": 6,
+      "risk": "low",
+      "outcome": "console-contract",
+      "change_class": "backward_compatible_feature",
+      "dependencies": []
+    },
+    {
+      "id": "TOSS-Soft/toss-cli#20",
+      "repository": "TOSS-Soft/toss-cli",
+      "approved": true,
+      "version": null,
+      "decomposed": true,
+      "priority": 9,
+      "risk": "low",
+      "outcome": "runtime-improvement",
+      "change_class": "breaking",
+      "dependencies": []
+    },
+    {
+      "id": "TOSS-Soft/toss-cli#30",
+      "repository": "TOSS-Soft/toss-cli",
+      "approved": false,
+      "version": null,
+      "decomposed": true,
+      "priority": 20,
+      "risk": "low",
+      "outcome": "unapproved-outcome",
+      "change_class": "backward_compatible_feature",
+      "dependencies": []
+    }
+  ],
+  "completed": [],
+  "repositories": [
+    {
+      "repository": "TOSS-Soft/toss-cli",
+      "latest_published_version": "2.1.2"
+    },
+    {
+      "repository": "TOSS-Soft/toss-console",
+      "latest_published_version": "1.3.2"
+    }
+  ]
+}

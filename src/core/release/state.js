@@ -30,6 +30,12 @@ const ACTIVATION_KEYS=Object.freeze([
 const ACTIVE_CONCURRENCY_PHASES=Object.freeze(new Set([
   "ACTIVE","READY_FOR_APPROVAL","PUBLISHING",
 ]));
+const VERSION_REASON_ORDER=Object.freeze(new Map([
+  ["breaking_public_boundary",0],
+  ["backward_compatible_feature",1],
+  ["published_product_fix",2],
+  ["unreleased_defect_excluded",3],
+]));
 const REVISION=/^REV-(?:000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3,})$/;
 const RECEIPT=/^RECEIPT-[0-9]{8}-[0-9]{4,}$/;
 const RFC3339_DATE_TIME=/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-](\d{2}):(\d{2}))$/;
@@ -297,6 +303,7 @@ export function transitionRepositoryRelease(releaseInput,eventInput) {
 function assertProgramSemantics(program) {
   const repositories=new Set();
   const releaseIds=new Set();
+  const releasesByRepository=new Map();
   let previousRepository;
   for (const releaseInput of program.repository_releases) {
     const release=normalizeRepositoryRelease(releaseInput,`Program ${program.program_id} repository release`);
@@ -315,10 +322,15 @@ function assertProgramSemantics(program) {
     }
     repositories.add(release.repository);
     releaseIds.add(release.release_id);
+    releasesByRepository.set(release.repository,release);
     previousRepository=release.repository;
   }
 
-  assertAsciiOrderedUnique(program.selected_scope,`Program ${program.program_id} selected scope`);
+  assertIdentityOrderedUnique(
+    program.selected_scope,
+    selected => selected.epic_id,
+    `Program ${program.program_id} selected scope by epic id`,
+  );
   assertIdentityOrderedUnique(
     program.deferred_scope,
     deferred => deferred.epic_id,
@@ -330,6 +342,61 @@ function assertProgramSemantics(program) {
       `Program ${program.program_id} deferred scope ${deferred.epic_id} blocking ids`,
     );
   }
+
+  assertIdentityOrderedUnique(
+    program.rationale,
+    rationale => rationale.repository,
+    `Program ${program.program_id} rationale by repository`,
+  );
+  if (program.rationale.length!==program.repository_releases.length) {
+    invalid(`Program ${program.program_id} rationale must describe every repository release exactly once`);
+  }
+  for (const rationale of program.rationale) {
+    const release=releasesByRepository.get(rationale.repository);
+    if (release===undefined) {
+      invalid(`Program ${program.program_id} rationale references unknown repository ${rationale.repository}`);
+    }
+    if (release.phase!=="DRAFT" && rationale.version!==release.version) {
+      invalid(`Program ${program.program_id} rationale version must equal the materialized repository release version`);
+    }
+
+    let previousReason=-1;
+    const reasonScope=new Set();
+    for (const reason of rationale.reasons) {
+      const reasonOrder=VERSION_REASON_ORDER.get(reason.rule);
+      if (reasonOrder<=previousReason) {
+        invalid(`Program ${program.program_id} rationale reasons must use Task 2 canonical rule order`);
+      }
+      previousReason=reasonOrder;
+      assertAsciiOrderedUnique(
+        reason.scope_ids,
+        `Program ${program.program_id} rationale ${rationale.repository} ${reason.rule} scope ids`,
+      );
+      for (const scopeId of reason.scope_ids) {
+        if (parseWorkItemId(scopeId).repository!==rationale.repository) {
+          invalid(`Program ${program.program_id} rationale scope ${scopeId} must belong to ${rationale.repository}`);
+        }
+        if (reasonScope.has(scopeId)) {
+          invalid(`Program ${program.program_id} rationale repeats scope ${scopeId}`);
+        }
+        reasonScope.add(scopeId);
+      }
+    }
+    const expectedChangeClass=rationale.reasons[0]?.rule==="breaking_public_boundary"
+      ? "major"
+      : rationale.reasons.some(reason => reason.rule==="backward_compatible_feature")
+        ? "minor"
+        : rationale.reasons.some(reason => reason.rule==="published_product_fix")
+          ? "patch"
+          : null;
+    if (rationale.change_class!==expectedChangeClass) {
+      invalid(`Program ${program.program_id} rationale change class must preserve Task 2 selection precedence`);
+    }
+    if (release.scope.some(scopeId => !reasonScope.has(scopeId))) {
+      invalid(`Program ${program.program_id} rationale must explain every repository release scope item`);
+    }
+  }
+
   let previousStage=0;
   const stagedReleases=new Set();
   for (const stage of program.dependency_stages) {
@@ -359,7 +426,8 @@ function assertProgramSemantics(program) {
       scoped.add(scopeId);
     }
   }
-  if (canonicalJson([...scoped].sort(compareCanonicalText))!==canonicalJson(program.selected_scope)) {
+  const selectedIds=program.selected_scope.map(selected => selected.epic_id);
+  if (canonicalJson([...scoped].sort(compareCanonicalText))!==canonicalJson(selectedIds)) {
     invalid(`Program ${program.program_id} selected scope must equal its repository release scope`);
   }
 }

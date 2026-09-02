@@ -157,11 +157,27 @@ function releaseProgram({
       stage:1,
       repository_release_ids:releases.map(release => release.release_id),
     }],
-    selected_scope:releases.flatMap(release => release.scope),
+    selected_scope:releases.flatMap(release => release.scope.map(epicId => ({
+      epic_id:epicId,
+      outcome:"organizational-lifecycle",
+      eligibility:{
+        approved:true,
+        unversioned:true,
+        decomposed:true,
+        registered_repository:true,
+        unassigned:true,
+      },
+    }))),
     deferred_scope:deferredScope,
-    rationale:releases.length===0 ? ["No eligible approved epic is available."] : [
-      "Selected the highest-priority coherent outcome.",
-    ],
+    rationale:releases.map(release => ({
+      repository:release.repository,
+      version:release.version ?? (release.repository==="TOSS-Soft/toss-cli" ? "2.2.0" : "1.4.0"),
+      change_class:"minor",
+      reasons:[{
+        rule:"backward_compatible_feature",
+        scope_ids:[...release.scope],
+      }],
+    })),
     interrupts,
     created_at:"2026-09-02T09:00:00.000Z",
     updated_at:"2026-09-02T10:00:00.000Z",
@@ -202,6 +218,56 @@ test("release contracts accept closed release, program, and publication evidence
   }
 });
 
+test("program contracts preserve structured selected eligibility and lossless version rationale",async () => {
+  const {assertRepositoryConcurrency}=await releaseState();
+  const draft=releaseProgram({
+    phase:"DRAFT",
+    releases:[repositoryRelease()],
+  });
+
+  assert.equal(validateDocument(draft,"release-program.v1").valid,true);
+  assert.equal(assertRepositoryConcurrency([draft]),true);
+  assert.deepEqual(draft.selected_scope,[{
+    epic_id:"TOSS-Soft/toss-cli#42",
+    outcome:"organizational-lifecycle",
+    eligibility:{
+      approved:true,
+      unversioned:true,
+      decomposed:true,
+      registered_repository:true,
+      unassigned:true,
+    },
+  }]);
+  assert.deepEqual(draft.rationale,[{
+    repository:"TOSS-Soft/toss-cli",
+    version:"2.2.0",
+    change_class:"minor",
+    reasons:[{
+      rule:"backward_compatible_feature",
+      scope_ids:["TOSS-Soft/toss-cli#42"],
+    }],
+  }]);
+  assert.equal(draft.repository_releases[0].version,null);
+});
+
+test("program contracts reject legacy and lossy planning rationale shapes",() => {
+  const program=releaseProgram();
+  for (const candidate of [
+    {...program,selected_scope:["TOSS-Soft/toss-cli#42"]},
+    {...program,rationale:["Selected the highest-priority coherent outcome."]},
+    {...program,rationale:[{
+      ...program.rationale[0],
+      reasons:["backward_compatible_feature:TOSS-Soft/toss-cli#42"],
+    }]},
+    {...program,selected_scope:[{
+      ...program.selected_scope[0],
+      eligibility:{...program.selected_scope[0].eligibility,approved:false},
+    }]},
+  ]) {
+    assert.equal(validateDocument(candidate,"release-program.v1").valid,false);
+  }
+});
+
 test("Draft and waiting records own no activated repository release resources",() => {
   const draft=repositoryRelease();
   assert.equal(validateDocument(draft,"repository-release.v1").valid,true);
@@ -224,9 +290,10 @@ test("Draft and waiting records own no activated repository release resources",(
       ? [repositoryRelease()]
       : field==="dependency_stages"
         ? [{stage:1,repository_release_ids:["REL-toss-cli-2.2.0"]}]
-        : ["TOSS-Soft/toss-cli#42"]};
+        : [releaseProgram().selected_scope[0]]};
     assert.equal(validateDocument(populated,"release-program.v1").valid,false,field);
   }
+  assert.deepEqual(waiting.rationale,[]);
 });
 
 test("release contract nested records fail closed",() => {
@@ -262,6 +329,20 @@ test("release contract nested records fail closed",() => {
       explanation:"Approval is missing.",
       blocking_ids:[],
       unexpected:true,
+    }],
+  },"release-program.v1").valid,false);
+  assert.equal(validateDocument({
+    ...program,
+    selected_scope:[{
+      ...program.selected_scope[0],
+      eligibility:{...program.selected_scope[0].eligibility,unexpected:true},
+    }],
+  },"release-program.v1").valid,false);
+  assert.equal(validateDocument({
+    ...program,
+    rationale:[{
+      ...program.rationale[0],
+      reasons:[{...program.rationale[0].reasons[0],unexpected:true}],
     }],
   },"release-program.v1").valid,false);
 });
@@ -675,6 +756,90 @@ test("nested set-like release collections require canonical logical identity ord
       },
     ],
   })]),true);
+});
+
+test("program version rationale is repository-bound lossless and raw-order canonical",async () => {
+  const {assertRepositoryConcurrency}=await releaseState();
+  const cli=repositoryRelease({
+    phase:"ACTIVE",
+    scope:["TOSS-Soft/toss-cli#41","TOSS-Soft/toss-cli#42"],
+  });
+  const consoleRelease=repositoryRelease({
+    repository:"TOSS-Soft/toss-console",
+    releaseId:"REL-toss-console-1.4.0",
+    phase:"ACTIVE",
+    version:"1.4.0",
+    scope:["TOSS-Soft/toss-console#7"],
+  });
+  const multi=releaseProgram({releases:[cli,consoleRelease]});
+  const single=releaseProgram({releases:[cli]});
+  const withExcludedDefect={
+    ...single,
+    rationale:[{
+      ...single.rationale[0],
+      reasons:[
+        ...single.rationale[0].reasons,
+        {
+          rule:"unreleased_defect_excluded",
+          scope_ids:["TOSS-Soft/toss-cli#99"],
+        },
+      ],
+    }],
+  };
+  assert.equal(assertRepositoryConcurrency([withExcludedDefect]),true);
+
+  const cases=[
+    {...multi,rationale:[...multi.rationale].reverse()},
+    {...single,rationale:[
+      single.rationale[0],
+      {...single.rationale[0],version:"2.3.0"},
+    ]},
+    {...single,rationale:[{...single.rationale[0],version:"2.3.0"}]},
+    {...single,rationale:[{
+      ...single.rationale[0],
+      reasons:[{
+        rule:"backward_compatible_feature",
+        scope_ids:["TOSS-Soft/toss-console#7"],
+      }],
+    }]},
+    {...single,rationale:[{
+      ...single.rationale[0],
+      reasons:[{
+        rule:"backward_compatible_feature",
+        scope_ids:["TOSS-Soft/toss-cli#42","TOSS-Soft/toss-cli#41"],
+      }],
+    }]},
+    {...single,rationale:[{
+      ...single.rationale[0],
+      reasons:[{
+        rule:"backward_compatible_feature",
+        scope_ids:["TOSS-Soft/toss-cli#41"],
+      }],
+    }]},
+    {...single,rationale:[{
+      ...single.rationale[0],
+      reasons:[
+        {rule:"breaking_public_boundary",scope_ids:["TOSS-Soft/toss-cli#41"]},
+        {rule:"backward_compatible_feature",scope_ids:["TOSS-Soft/toss-cli#41","TOSS-Soft/toss-cli#42"]},
+      ],
+    }]},
+    {...single,rationale:[{...single.rationale[0],change_class:"patch"}]},
+    {...single,rationale:[{
+      ...single.rationale[0],
+      change_class:"major",
+      reasons:[
+        {rule:"backward_compatible_feature",scope_ids:["TOSS-Soft/toss-cli#42"]},
+        {rule:"breaking_public_boundary",scope_ids:["TOSS-Soft/toss-cli#41"]},
+      ],
+    }]},
+  ];
+
+  for (const program of cases) {
+    assert.throws(
+      () => assertRepositoryConcurrency([program]),
+      error => error instanceof CoreValidationError && error.exitCode===5,
+    );
+  }
 });
 
 test("patch concurrency binds the exact paused program, release, and revision",async () => {
