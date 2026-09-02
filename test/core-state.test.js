@@ -66,6 +66,8 @@ function snapshot(kind="issue") {
     release:{
       assigned:true,
       active:true,
+      id:`${REPOSITORY}@release/v2.2.0`,
+      repository:REPOSITORY,
       branch:"release/v2.2.0",
       milestone:"v2.2.0",
       revision:"release-v2.2.0@3",
@@ -322,7 +324,7 @@ test("Ready requires exact governing branch and assigned release evidence",() =>
   for (const kind of ["issue","epic","bug"]) {
     const backlog=snapshot(kind);
     backlog.release={
-      assigned:false,active:false,branch:null,milestone:null,revision:null,
+      assigned:false,active:false,id:null,repository:null,branch:null,milestone:null,revision:null,
     };
     if (kind!=="issue") backlog.item.base_branch=null;
     backlog.item.milestone=null;
@@ -384,6 +386,36 @@ test("governing parent and release evidence is exact and revision-bound",() => {
     unexpectedParent,unassignedWithRelease,assignedWithoutBranch,
     mismatchedReleaseMilestone,missingReleaseRevision,itemReleaseMismatch,
     childMilestoneMismatch,
+  ]) {
+    assert.throws(
+      () => deriveWorkItemState(value),
+      error => error instanceof CoreValidationError && error.exitCode===5,
+    );
+  }
+});
+
+test("assigned release evidence must identify its repository before Ready",() => {
+  assert.equal(deriveWorkItemState(snapshot("epic")).status,"Ready");
+  assert.equal(deriveWorkItemState(snapshot("bug")).status,"Ready");
+
+  const missingId=snapshot("epic");
+  missingId.release.id=null;
+
+  const missingRepository=snapshot("bug");
+  missingRepository.release.repository=null;
+
+  const crossRepository=snapshot("epic");
+  crossRepository.release.id="TOSS-Soft/toss-console@release/v2.2.0";
+  crossRepository.release.repository="TOSS-Soft/toss-console";
+
+  const mismatchedRepositoryId=snapshot("bug");
+  mismatchedRepositoryId.release.id="TOSS-Soft/toss-console@release/v2.2.0";
+
+  const mismatchedBranchId=snapshot("epic");
+  mismatchedBranchId.release.id=`${REPOSITORY}@release/v2.1.3`;
+
+  for (const value of [
+    missingId,missingRepository,crossRepository,mismatchedRepositoryId,mismatchedBranchId,
   ]) {
     assert.throws(
       () => deriveWorkItemState(value),
@@ -491,7 +523,7 @@ test("impossible snapshots fail validation before any decision rule",() => {
 
   const activeUnassigned=snapshot();
   activeUnassigned.release={
-    assigned:false,active:true,branch:null,milestone:null,revision:null,
+    assigned:false,active:true,id:null,repository:null,branch:null,milestone:null,revision:null,
   };
 
   const approvedUnprepared=snapshot("epic");

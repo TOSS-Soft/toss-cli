@@ -3,7 +3,8 @@ import {types} from "node:util";
 import {canonicalJson} from "../../contracts/acp.js";
 import {validateCoreDocument} from "../contracts.js";
 import {CoreValidationError} from "../errors.js";
-import {parseReservedBranch,parseWorkItemId} from "./identity.js";
+import {requiredBaseBranch} from "./branching.js";
+import {parseWorkItemId} from "./identity.js";
 
 const SNAPSHOT_KEYS=Object.freeze([
   "schema_version","item","issue_state","drifted","epic_required","prepared",
@@ -174,30 +175,29 @@ function validateParentEvidence(item,parent) {
   if (parent.id!==item.parent_id) {
     invalid("Governing parent identity must equal the child parent identity");
   }
-  let branch;
-  try {
-    branch=parseReservedBranch(parent.branch);
-  } catch (error) {
-    invalid("Governing parent branch must be a canonical reserved epic branch",{cause:error});
-  }
-  if (branch.kind!=="epic" || branch.issueNumber!==parentId.issueNumber) {
-    invalid("Governing parent identity and reserved epic branch must agree");
-  }
-  if (item.base_branch!==parent.branch) {
+  const expectedBase=requiredBaseBranch(item,{
+    parent:Object.freeze({
+      id:parent.id,
+      repository:item.repository,
+      branch:parent.branch,
+    }),
+  });
+  if (parentId.repository!==item.repository || item.base_branch!==expectedBase) {
     invalid("Child issue base must equal the exact revision-bound parent branch");
   }
 }
 
 function validateReleaseEvidence(item,release) {
   exactKeys(release,[
-    "assigned","active","branch","milestone","revision",
+    "assigned","active","id","repository","branch","milestone","revision",
   ],"Work state release evidence");
   boolean(release.assigned,"Release assigned flag");
   boolean(release.active,"Release active flag");
   if (release.active && !release.assigned) invalid("An active release must be assigned");
   if (!release.assigned) {
-    if (release.branch!==null || release.milestone!==null || release.revision!==null) {
-      invalid("An unassigned release cannot carry branch, milestone, or revision evidence");
+    if ([release.id,release.repository,release.branch,release.milestone,release.revision]
+      .some(field => field!==null)) {
+      invalid("An unassigned release cannot carry identity, branch, milestone, or revision evidence");
     }
     if (item.milestone!==null || (item.kind!=="issue" && item.base_branch!==null)) {
       invalid("Unassigned work cannot retain release base or milestone assignment");
@@ -208,12 +208,26 @@ function validateReleaseEvidence(item,release) {
   if (!match || release.milestone!==match[1]) {
     invalid("Assigned release branch and milestone must identify the same exact version");
   }
+  if (release.repository!==item.repository ||
+      release.id!==`${release.repository}@${release.branch}`) {
+    invalid("Assigned release identity must bind the exact work repository and release branch");
+  }
   nonEmptyText(release.revision,"Assigned release revision");
   if (item.milestone!==release.milestone) {
     invalid("Assigned work milestone must equal the exact release milestone");
   }
-  if (item.kind!=="issue" && item.base_branch!==release.branch) {
-    invalid("Epic and bounded bug base must equal the exact revision-bound release branch");
+  if (item.kind!=="issue") {
+    const relation=Object.freeze({
+      id:release.id,
+      repository:release.repository,
+      branch:release.branch,
+    });
+    const expectedBase=requiredBaseBranch(item,item.kind==="epic"
+      ? {release:relation}
+      : {patch_release:relation});
+    if (item.base_branch!==expectedBase) {
+      invalid("Epic and bounded bug base must equal the exact revision-bound release branch");
+    }
   }
 }
 
