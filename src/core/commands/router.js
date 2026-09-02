@@ -9,14 +9,32 @@ import {
   parseCoreCommand,
 } from "./options.js";
 import {runInitCommand} from "./init.js";
+import {runDependencyCommand} from "./dependency.js";
+import {runFeatureCommand} from "./feature.js";
+import {runIssueCommand} from "./issue.js";
 import {runRepositoryCommand} from "./repository.js";
 
-const FOUNDATION_COMMANDS=new Set(["init","repo.add","repo.list"]);
+const TASK_4_COMMANDS=new Set([
+  "feature.add","feature.status",
+  "issue.add","issue.start","issue.submit","issue.status",
+  "dependency.add","dependency.remove","dependency.graph","dependency.check",
+]);
+const IMPLEMENTED_COMMANDS=new Set(["init","repo.add","repo.list",...TASK_4_COMMANDS]);
 const CONTEXT_KEYS=new Set(["handlers","services","confirm"]);
 const BUILTIN_HANDLERS=Object.freeze({
   init:runInitCommand,
   "repo.add":runRepositoryCommand,
   "repo.list":runRepositoryCommand,
+  "feature.add":runFeatureCommand,
+  "feature.status":runFeatureCommand,
+  "issue.add":runIssueCommand,
+  "issue.start":runIssueCommand,
+  "issue.submit":runIssueCommand,
+  "issue.status":runIssueCommand,
+  "dependency.add":runDependencyCommand,
+  "dependency.remove":runDependencyCommand,
+  "dependency.graph":runDependencyCommand,
+  "dependency.check":runDependencyCommand,
 });
 
 export {CORE_EXIT_CODES,CoreCommandUsageError,parseCoreCommand};
@@ -108,7 +126,7 @@ function normalizeContext(context) {
     normalized.services=Object.freeze(capability);
   }
   if (Object.hasOwn(record,"handlers")) {
-    const handlers=dataRecord(record.handlers,"core command handlers",FOUNDATION_COMMANDS);
+    const handlers=dataRecord(record.handlers,"core command handlers",IMPLEMENTED_COMMANDS);
     for (const [name,handler] of Object.entries(handlers)) {
       if (typeof handler!=="function" || utilTypes.isProxy(handler)) {
         throw new TypeError("Core command handler must be a non-proxy function: "+name);
@@ -140,7 +158,8 @@ export async function dispatchCoreCommand(command,context={}) {
   try {
     const normalized=validateParsedCoreCommand(command);
     const services=normalizeContext(context);
-    if (!FOUNDATION_COMMANDS.has(normalized.name)) {
+    if (!IMPLEMENTED_COMMANDS.has(normalized.name) ||
+        (TASK_4_COMMANDS.has(normalized.name) && !Object.hasOwn(services,"services"))) {
       return failure(
         CORE_EXIT_CODES.NOT_IMPLEMENTED,
         "COMMAND_NOT_IMPLEMENTED",

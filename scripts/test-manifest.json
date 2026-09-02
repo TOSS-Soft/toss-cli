@@ -37,6 +37,7 @@
       "test/command-store-fixture.test.js",
       "test/core-control-store.test.js",
       "test/core-operation-runner.test.js",
+      "test/core-work-commands.test.js",
       "test/design-orchestration.test.js",
       "test/design-store-boundary.test.js",
       "test/feature-store-boundary.test.js",
