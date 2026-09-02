@@ -17,6 +17,7 @@ const PLANNER_KEYS=Object.freeze([
   "programId","candidates","completed","repositories","activePrograms","clock",
 ]);
 const REPOSITORY_KEYS=Object.freeze(["repository","latest_published_version"]);
+const RANK_KEYS=Object.freeze(["id","priority","risk","dependency_fanout"]);
 const PROGRAM_KEYS=Object.freeze([
   "schema_version","program_id","phase","revision","repository_releases",
   "dependency_stages","selected_scope","deferred_scope","rationale","interrupts",
@@ -221,7 +222,27 @@ export function eligibleEpic(epicInput,activeAssignmentsInput) {
   );
 }
 
-export function candidateOrder(left,right) {
+function normalizeCandidateRank(input,label) {
+  const value=shallowExactRecord(input,RANK_KEYS,label);
+  const id=canonicalWorkItemId(value.id,`${label}.id`);
+  if (!Number.isSafeInteger(value.priority) || value.priority<0) {
+    invalid(`${label}.priority must be a nonnegative safe integer`);
+  }
+  if (!Number.isSafeInteger(value.dependency_fanout) || value.dependency_fanout<0) {
+    invalid(`${label}.dependency_fanout must be a nonnegative safe integer`);
+  }
+  if (!RISKS.has(value.risk)) invalid(`${label}.risk must be low, medium, or high`);
+  return Object.freeze({
+    id,
+    priority:value.priority,
+    risk:value.risk,
+    dependency_fanout:value.dependency_fanout,
+  });
+}
+
+export function candidateOrder(leftInput,rightInput) {
+  const left=normalizeCandidateRank(leftInput,"Left candidate rank");
+  const right=normalizeCandidateRank(rightInput,"Right candidate rank");
   if (left.priority!==right.priority) return left.priority>right.priority ? -1 : 1;
   if (left.dependency_fanout!==right.dependency_fanout) {
     return left.dependency_fanout>right.dependency_fanout ? -1 : 1;
@@ -341,6 +362,8 @@ function closureFor(seeds,byId,completed,reports) {
   const pending=[...selected].sort(compareCanonicalText);
   const missing=new Set();
   const ineligible=new Set();
+  const missingIntroducers=new Map();
+  const ineligibleIntroducers=new Map();
   while (pending.length>0) {
     const id=pending.shift();
     const candidate=byId.get(id);
@@ -349,8 +372,14 @@ function closureFor(seeds,byId,completed,reports) {
       const required=byId.get(dependency);
       if (required===undefined) {
         missing.add(dependency);
+        const blockers=missingIntroducers.get(id) ?? new Set();
+        blockers.add(dependency);
+        missingIntroducers.set(id,blockers);
       } else if (!reports.get(dependency).eligible) {
         ineligible.add(dependency);
+        const blockers=ineligibleIntroducers.get(id) ?? new Set();
+        blockers.add(dependency);
+        ineligibleIntroducers.set(id,blockers);
       } else if (!selected.has(dependency)) {
         selected.add(dependency);
         pending.push(dependency);
@@ -362,7 +391,27 @@ function closureFor(seeds,byId,completed,reports) {
     selected:Object.freeze([...selected].sort(compareCanonicalText)),
     missing:Object.freeze([...missing].sort(compareCanonicalText)),
     ineligible:Object.freeze([...ineligible].sort(compareCanonicalText)),
+    missingIntroducers:freezeIntroducers(missingIntroducers),
+    ineligibleIntroducers:freezeIntroducers(ineligibleIntroducers),
   });
+}
+
+function freezeIntroducers(introducers) {
+  return Object.freeze([...introducers]
+    .sort(([left],[right]) => compareCanonicalText(left,right))
+    .map(([epicId,blockingIds]) => Object.freeze({
+      epic_id:epicId,
+      blocking_ids:Object.freeze([...blockingIds].sort(compareCanonicalText)),
+    })));
+}
+
+function outcomeBlockerExplanation(option,kind) {
+  const introducers=kind==="missing"
+    ? option.missingIntroducers
+    : option.ineligibleIntroducers;
+  const detail=introducers.map(entry =>
+    `${entry.epic_id} -> ${entry.blocking_ids.join(", ")}`).join("; ");
+  return `Outcome ${JSON.stringify(option.outcome)} is not selectable because mandatory dependencies are ${kind}: ${detail}.`;
 }
 
 function outcomeOptions(candidates,byId,completed,reports,fanout) {
@@ -375,7 +424,9 @@ function outcomeOptions(candidates,byId,completed,reports,fanout) {
   }
   return [...groups].map(([outcome,seeds]) => {
     const ranked=seeds.map(candidate => Object.freeze({
-      ...candidate,
+      id:candidate.id,
+      priority:candidate.priority,
+      risk:candidate.risk,
       dependency_fanout:fanout.get(candidate.id),
     })).sort(candidateOrder);
     const closure=closureFor(seeds,byId,completed,reports);
@@ -399,14 +450,14 @@ function deferredFor(candidate,report,option,selectedIds,programId) {
   if (option.missing.length>0) {
     return reason(
       "DEPENDENCY_MISSING",
-      `Epic ${candidate.id} has missing mandatory dependencies: ${option.missing.join(", ")}.`,
+      outcomeBlockerExplanation(option,"missing"),
       option.missing,
     );
   }
   if (option.ineligible.length>0) {
     return reason(
       "DEPENDENCY_INELIGIBLE",
-      `Epic ${candidate.id} has ineligible mandatory dependencies: ${option.ineligible.join(", ")}.`,
+      outcomeBlockerExplanation(option,"ineligible"),
       option.ineligible,
     );
   }

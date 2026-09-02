@@ -41,6 +41,22 @@ function candidate(number,overrides={}) {
   };
 }
 
+function rank(number,overrides={}) {
+  return {
+    id:`${CLI}#${number}`,
+    priority:1,
+    risk:"medium",
+    dependency_fanout:0,
+    ...overrides,
+  };
+}
+
+function deepRecord(depth) {
+  let value={leaf:true};
+  for (let index=0;index<depth;index+=1) value={next:value};
+  return value;
+}
+
 function repository(repository=CLI,latestPublishedVersion="2.1.2") {
   return {repository,latest_published_version:latestPublishedVersion};
 }
@@ -315,7 +331,7 @@ test("missing and ineligible mandatory dependencies defer exact blockers",() => 
   assert.deepEqual(missing.deferred_scope,[{
     epic_id:source.id,
     reason_code:"DEPENDENCY_MISSING",
-    explanation:`Epic ${source.id} has missing mandatory dependencies: ${missingId}.`,
+    explanation:`Outcome "blocked" is not selectable because mandatory dependencies are missing: ${source.id} -> ${missingId}.`,
     blocking_ids:[missingId],
   }]);
 
@@ -329,7 +345,7 @@ test("missing and ineligible mandatory dependencies defer exact blockers",() => 
     {
       epic_id:ineligibleSource.id,
       reason_code:"DEPENDENCY_INELIGIBLE",
-      explanation:`Epic ${ineligibleSource.id} has ineligible mandatory dependencies: ${dependency.id}.`,
+      explanation:`Outcome "blocked" is not selectable because mandatory dependencies are ineligible: ${ineligibleSource.id} -> ${dependency.id}.`,
       blocking_ids:[dependency.id],
     },
     {
@@ -416,10 +432,104 @@ test("candidate ties resolve by priority then direct incoming fan-out then risk 
     candidate(10,{priority:5,risk:"low",outcome:"earlier-id"}),
   ])),[`${CLI}#10`]);
 
-  assert.ok(candidateOrder(
-    {...candidate(1),dependency_fanout:2},
-    {...candidate(2),dependency_fanout:1},
-  )<0);
+  assert.ok(candidateOrder(rank(1,{dependency_fanout:2}),rank(2,{
+    dependency_fanout:1,
+  }))<0);
+});
+
+test("candidateOrder accepts only exact descriptor-safe rank projections",() => {
+  let getterCalls=0;
+  const accessor=rank(1);
+  Object.defineProperty(accessor,"priority",{
+    enumerable:true,
+    get() { getterCalls+=1; throw new Error("priority getter"); },
+  });
+  assert.throws(
+    () => candidateOrder(accessor,rank(2)),
+    error => error instanceof CoreValidationError && error.exitCode===5,
+  );
+  assert.equal(getterCalls,0);
+
+  let traps=0;
+  const hostile=new Proxy(rank(1),{
+    get() { traps+=1; throw new Error("get trap"); },
+    getOwnPropertyDescriptor() { traps+=1; throw new Error("descriptor trap"); },
+    getPrototypeOf() { traps+=1; throw new Error("prototype trap"); },
+    ownKeys() { traps+=1; throw new Error("keys trap"); },
+  });
+  assert.throws(() => candidateOrder(hostile,rank(2)),CoreValidationError);
+  assert.equal(traps,0);
+  assert.throws(
+    () => candidateOrder({...rank(1),outcome:"not-a-rank-field"},rank(2)),
+    CoreValidationError,
+  );
+});
+
+test("planner deep known fields fail typed and unknown roots are rejected before traversal",() => {
+  const epic=candidate(1);
+  const deep=deepRecord(12_000);
+  const assigned=activeProgram(epic.id);
+  const calls=[
+    () => planReleaseProgram(plannerInput({
+      candidates:[epic],
+      repositories:[repository()],
+      activePrograms:[{...assigned,phase:deep}],
+    })),
+    () => planReleaseProgram(plannerInput({
+      candidates:[epic],
+      repositories:[repository()],
+      clock:() => deep,
+    })),
+  ];
+  for (const invoke of calls) {
+    assert.throws(
+      invoke,
+      error => error instanceof CoreValidationError && error.exitCode===5 &&
+        !(error instanceof RangeError),
+    );
+  }
+  assert.throws(
+    () => assertRepositoryConcurrency([{...assigned,unexpected:deep}]),
+    error => error instanceof CoreValidationError && error.exitCode===5 &&
+      /exact closed shape/i.test(error.message),
+  );
+});
+
+test("shared nonviable outcome explanations identify only blocker-introducing epics",() => {
+  const missingId=`${CONSOLE}#99`;
+  const blocker=candidate(1,{outcome:"shared",dependencies:[missingId]});
+  const peer=candidate(2,{outcome:"shared"});
+  const missing=planReleaseProgram(plannerInput({
+    candidates:[blocker,peer],
+    repositories:[repository()],
+  }));
+  const missingExplanation=`Outcome "shared" is not selectable because mandatory dependencies are missing: ${blocker.id} -> ${missingId}.`;
+  assert.deepEqual(missing.deferred_scope,[
+    {
+      epic_id:blocker.id,
+      reason_code:"DEPENDENCY_MISSING",
+      explanation:missingExplanation,
+      blocking_ids:[missingId],
+    },
+    {
+      epic_id:peer.id,
+      reason_code:"DEPENDENCY_MISSING",
+      explanation:missingExplanation,
+      blocking_ids:[missingId],
+    },
+  ]);
+
+  const dependency=candidate(3,{approved:false,outcome:"dependency"});
+  const ineligibleBlocker={...blocker,dependencies:[dependency.id]};
+  const ineligible=planReleaseProgram(plannerInput({
+    candidates:[ineligibleBlocker,peer,dependency],
+    repositories:[repository()],
+  }));
+  const ineligibleExplanation=`Outcome "shared" is not selectable because mandatory dependencies are ineligible: ${blocker.id} -> ${dependency.id}.`;
+  assert.equal(
+    ineligible.deferred_scope.find(entry => entry.epic_id===peer.id).explanation,
+    ineligibleExplanation,
+  );
 });
 
 test("shuffled candidates dependencies and repositories produce byte-identical canonical manifests",() => {

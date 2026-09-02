@@ -596,7 +596,7 @@ test("repository concurrency permits independent repositories and a retained pau
     version:"1.4.0",
   });
   assert.equal(assertRepositoryConcurrency([
-    releaseProgram({releases:[cli,consoleRelease]}),
+    releaseProgram({phase:"PUBLISHING",releases:[cli,consoleRelease]}),
   ]),true);
 
   const paused=repositoryRelease({phase:"PAUSED"});
@@ -666,13 +666,13 @@ test("nested set-like release collections require canonical logical identity ord
     releaseProgram({deferredScope:[
       {
         epic_id:"TOSS-Soft/toss-cli#99",
-        reason_code:"DEPENDENCY",
+        reason_code:"DEPENDENCY_MISSING",
         blocking_ids:[],
         explanation:"Later work first.",
       },
       {
         epic_id:"TOSS-Soft/toss-cli#98",
-        reason_code:"CAPACITY",
+        reason_code:"OUTCOME_NOT_SELECTED",
         blocking_ids:[],
         explanation:"Earlier work second.",
       },
@@ -680,26 +680,26 @@ test("nested set-like release collections require canonical logical identity ord
     releaseProgram({deferredScope:[
       {
         epic_id:"TOSS-Soft/toss-cli#99",
-        reason_code:"DEPENDENCY",
+        reason_code:"DEPENDENCY_MISSING",
         blocking_ids:[],
         explanation:"First explanation.",
       },
       {
         epic_id:"TOSS-Soft/toss-cli#99",
-        reason_code:"CAPACITY",
+        reason_code:"OUTCOME_NOT_SELECTED",
         blocking_ids:[],
         explanation:"Different object with the same identity.",
       },
     ]}),
     releaseProgram({deferredScope:[{
       epic_id:"TOSS-Soft/toss-cli#99",
-      reason_code:"DEPENDENCY",
+      reason_code:"DEPENDENCY_MISSING",
       blocking_ids:["TOSS-Soft/toss-cli#42","TOSS-Soft/toss-cli#41"],
       explanation:"Blocking identities are descending.",
     }]}),
     releaseProgram({deferredScope:[{
       epic_id:"TOSS-Soft/toss-cli#99",
-      reason_code:"DEPENDENCY",
+      reason_code:"DEPENDENCY_MISSING",
       blocking_ids:["TOSS-Soft/toss-cli#41","TOSS-Soft/toss-cli#41"],
       explanation:"Blocking identities are duplicated.",
     }]}),
@@ -740,17 +740,18 @@ test("nested set-like release collections require canonical logical identity ord
     ]}),
   });
   assert.equal(assertRepositoryConcurrency([releaseProgram({
+    phase:"RELEASED",
     releases:[canonicalRelease],
     deferredScope:[
       {
         epic_id:"TOSS-Soft/toss-cli#98",
-        reason_code:"CAPACITY",
+        reason_code:"OUTCOME_NOT_SELECTED",
         blocking_ids:[],
         explanation:"Earlier epic first.",
       },
       {
         epic_id:"TOSS-Soft/toss-cli#99",
-        reason_code:"DEPENDENCY",
+        reason_code:"DEPENDENCY_MISSING",
         blocking_ids:["TOSS-Soft/toss-cli#41","TOSS-Soft/toss-cli#42"],
         explanation:"Later epic second.",
       },
@@ -840,6 +841,195 @@ test("program version rationale is repository-bound lossless and raw-order canon
       error => error instanceof CoreValidationError && error.exitCode===5,
     );
   }
+});
+
+test("only selected work may determine the first selectable rationale rule",async () => {
+  const {assertRepositoryConcurrency}=await releaseState();
+  const release=repositoryRelease({
+    phase:"DRAFT",
+    scope:["TOSS-Soft/toss-cli#41","TOSS-Soft/toss-cli#42"],
+  });
+  const base=releaseProgram({phase:"DRAFT",releases:[release]});
+  const invalidPrograms=[
+    {
+      ...base,
+      rationale:[{
+        repository:"TOSS-Soft/toss-cli",
+        version:"3.0.0",
+        change_class:"major",
+        reasons:[
+          {rule:"breaking_public_boundary",scope_ids:["TOSS-Soft/toss-cli#99"]},
+          {rule:"backward_compatible_feature",scope_ids:["TOSS-Soft/toss-cli#41","TOSS-Soft/toss-cli#42"]},
+        ],
+      }],
+    },
+    {
+      ...base,
+      rationale:[{
+        repository:"TOSS-Soft/toss-cli",
+        version:"2.3.0",
+        change_class:"minor",
+        reasons:[
+          {rule:"backward_compatible_feature",scope_ids:["TOSS-Soft/toss-cli#99"]},
+          {rule:"published_product_fix",scope_ids:["TOSS-Soft/toss-cli#41","TOSS-Soft/toss-cli#42"]},
+        ],
+      }],
+    },
+    {
+      ...base,
+      rationale:[{
+        repository:"TOSS-Soft/toss-cli",
+        version:"2.3.0",
+        change_class:"minor",
+        reasons:[
+          {rule:"backward_compatible_feature",scope_ids:["TOSS-Soft/toss-cli#41","TOSS-Soft/toss-cli#42"]},
+          {rule:"published_product_fix",scope_ids:["TOSS-Soft/toss-cli#99"]},
+        ],
+      }],
+    },
+    {
+      ...base,
+      rationale:[{
+        repository:"TOSS-Soft/toss-cli",
+        version:"2.2.1",
+        change_class:"patch",
+        reasons:[
+          {rule:"backward_compatible_feature",scope_ids:["TOSS-Soft/toss-cli#41"]},
+          {rule:"published_product_fix",scope_ids:["TOSS-Soft/toss-cli#42"]},
+        ],
+      }],
+    },
+  ];
+  for (const program of invalidPrograms) {
+    assert.throws(
+      () => assertRepositoryConcurrency([program]),
+      error => error instanceof CoreValidationError && error.exitCode===5 &&
+        /selected scope|selection precedence/i.test(error.message),
+    );
+  }
+
+  const withExcluded={
+    ...base,
+    rationale:[{
+      ...base.rationale[0],
+      reasons:[
+        ...base.rationale[0].reasons,
+        {rule:"unreleased_defect_excluded",scope_ids:["TOSS-Soft/toss-cli#99"]},
+      ],
+    }],
+  };
+  assert.equal(assertRepositoryConcurrency([withExcluded]),true);
+});
+
+test("selected and deferred program scope identities are disjoint",async () => {
+  const {assertRepositoryConcurrency}=await releaseState();
+  const program=releaseProgram({deferredScope:[{
+    epic_id:"TOSS-Soft/toss-cli#42",
+    reason_code:"DEPENDENCY_MISSING",
+    explanation:"The selected epic must not also be deferred.",
+    blocking_ids:["TOSS-Soft/toss-console#99"],
+  }]});
+  assert.throws(
+    () => assertRepositoryConcurrency([program]),
+    error => error instanceof CoreValidationError && error.exitCode===5,
+  );
+});
+
+test("program and repository release phases obey the staged coherence matrix",async () => {
+  const {assertRepositoryConcurrency}=await releaseState();
+  const repositories=["TOSS-Soft/toss-a","TOSS-Soft/toss-b"];
+  const programFor=(programPhase,trackPhases) => {
+    const releases=trackPhases.map((phase,index) => {
+      const repository=repositories[index];
+      const releaseId=`REL-${repository.slice(repository.indexOf("/")+1)}-1.4.0`;
+      return repositoryRelease({
+        repository,
+        releaseId,
+        phase,
+        version:"1.4.0",
+        evidence:phase==="RELEASED" ? publicationEvidence({
+          repository,
+          releaseId,
+          version:"1.4.0",
+        }) : null,
+      });
+    });
+    return releaseProgram({phase:programPhase,releases});
+  };
+
+  for (const [programPhase,trackPhases] of [
+    ["DRAFT",["DRAFT","DRAFT"]],
+    ["ACTIVE",["DRAFT","ACTIVE"]],
+    ["ACTIVE",["ACTIVE","READY_FOR_APPROVAL"]],
+    ["ACTIVE",["RELEASED","DRAFT"]],
+    ["PAUSED",["PAUSED","DRAFT"]],
+    ["PAUSED",["PAUSED","ACTIVE"]],
+    ["PAUSED",["PAUSED","READY_FOR_APPROVAL"]],
+    ["PAUSED",["PAUSED","RELEASED"]],
+    ["PUBLISHING",["PUBLISHING","DRAFT"]],
+    ["PUBLISHING",["PUBLISHING","ACTIVE"]],
+    ["PUBLISHING",["PUBLISHING","PAUSED"]],
+    ["PUBLISHING",["PUBLISHING","READY_FOR_APPROVAL"]],
+    ["PUBLISHING",["PUBLISHING","PUBLISHING"]],
+    ["PUBLISHING",["PUBLISHING","RELEASED"]],
+    ["RELEASED",["RELEASED","RELEASED"]],
+  ]) {
+    assert.equal(
+      assertRepositoryConcurrency([programFor(programPhase,trackPhases)]),
+      true,
+      `${programPhase}: ${trackPhases.join(",")}`,
+    );
+  }
+
+  for (const [programPhase,trackPhases] of [
+    ["DRAFT",["DRAFT","ACTIVE"]],
+    ["RELEASED",["RELEASED","ACTIVE"]],
+    ["ACTIVE",["DRAFT","DRAFT"]],
+    ["ACTIVE",["RELEASED","RELEASED"]],
+    ["ACTIVE",["PUBLISHING","DRAFT"]],
+    ["ACTIVE",["PAUSED","DRAFT"]],
+    ["PAUSED",["DRAFT","ACTIVE"]],
+    ["PAUSED",["PAUSED","PUBLISHING"]],
+    ["PUBLISHING",["DRAFT","ACTIVE"]],
+  ]) {
+    assert.throws(
+      () => assertRepositoryConcurrency([programFor(programPhase,trackPhases)]),
+      error => error instanceof CoreValidationError && error.exitCode===5,
+      `${programPhase}: ${trackPhases.join(",")}`,
+    );
+  }
+});
+
+test("program rationale versions enforce Task 2 safe-integer SemVer",async () => {
+  const {assertRepositoryConcurrency}=await releaseState();
+  const draft=releaseProgram({phase:"DRAFT",releases:[repositoryRelease()]});
+  const unsafe={
+    ...draft,
+    rationale:[{
+      ...draft.rationale[0],
+      version:"9007199254740992.0.0",
+    }],
+  };
+  assert.equal(validateDocument(unsafe,"release-program.v1").valid,true);
+  assert.throws(
+    () => assertRepositoryConcurrency([unsafe]),
+    error => error instanceof CoreValidationError && error.exitCode===5,
+  );
+});
+
+test("deferred reason codes use only the exact Task 3 vocabulary",async () => {
+  const {assertRepositoryConcurrency}=await releaseState();
+  const program=releaseProgram({deferredScope:[{
+    epic_id:"TOSS-Soft/toss-cli#99",
+    reason_code:"CAPACITY",
+    explanation:"An arbitrary extension code is not a Task 3 reason.",
+    blocking_ids:[],
+  }]});
+  assert.equal(validateDocument(program,"release-program.v1").valid,false);
+  assert.throws(
+    () => assertRepositoryConcurrency([program]),
+    error => error instanceof CoreValidationError && error.exitCode===5,
+  );
 });
 
 test("patch concurrency binds the exact paused program, release, and revision",async () => {

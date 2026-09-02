@@ -5,6 +5,7 @@ import {compareCanonicalText} from "../canonical-order.js";
 import {validateCoreDocument} from "../contracts.js";
 import {parseWorkItemId} from "../domain/identity.js";
 import {CoreConflictError,CoreValidationError} from "../errors.js";
+import {parseSemVer} from "./semver.js";
 
 export const REPOSITORY_RELEASE_PHASES=Object.freeze([
   "DRAFT","ACTIVE","PAUSED","READY_FOR_APPROVAL","PUBLISHING","RELEASED",
@@ -27,8 +28,30 @@ const EVENT_KEYS=Object.freeze([
 const ACTIVATION_KEYS=Object.freeze([
   "version","milestone","branch","release_pr_intent",
 ]);
+const PROGRAM_KEYS=Object.freeze([
+  "schema_version","program_id","phase","revision","repository_releases",
+  "dependency_stages","selected_scope","deferred_scope","rationale","interrupts",
+  "created_at","updated_at",
+]);
+const REPOSITORY_RELEASE_KEYS=Object.freeze([
+  "schema_version","release_id","program_id","repository","phase","revision",
+  "version","milestone","branch","release_pr_intent","scope","publication_evidence",
+  "transitions",
+]);
 const ACTIVE_CONCURRENCY_PHASES=Object.freeze(new Set([
   "ACTIVE","READY_FOR_APPROVAL","PUBLISHING",
+]));
+const PROGRAM_TRACK_PHASES=Object.freeze(new Map([
+  ["DRAFT",Object.freeze(new Set(["DRAFT"]))],
+  ["ACTIVE",Object.freeze(new Set([
+    "DRAFT","ACTIVE","READY_FOR_APPROVAL","RELEASED",
+  ]))],
+  ["PAUSED",Object.freeze(new Set([
+    "DRAFT","ACTIVE","PAUSED","READY_FOR_APPROVAL","RELEASED",
+  ]))],
+  ["PUBLISHING",Object.freeze(new Set(REPOSITORY_RELEASE_PHASES))],
+  ["RELEASED",Object.freeze(new Set(["RELEASED"]))],
+  ["WAITING_FOR_EPIC",Object.freeze(new Set())],
 ]));
 const VERSION_REASON_ORDER=Object.freeze(new Map([
   ["breaking_public_boundary",0],
@@ -36,9 +59,20 @@ const VERSION_REASON_ORDER=Object.freeze(new Map([
   ["published_product_fix",2],
   ["unreleased_defect_excluded",3],
 ]));
+const SELECTABLE_CHANGE_CLASS=Object.freeze(new Map([
+  ["breaking_public_boundary","major"],
+  ["backward_compatible_feature","minor"],
+  ["published_product_fix","patch"],
+]));
+const DEFERRED_REASON_CODES=Object.freeze(new Set([
+  "EPIC_UNAPPROVED","EPIC_ALREADY_VERSIONED","EPIC_NOT_DECOMPOSED",
+  "REPOSITORY_UNREGISTERED","ACTIVE_PROGRAM_ASSIGNMENT","DEPENDENCY_MISSING",
+  "DEPENDENCY_INELIGIBLE","OUTCOME_NOT_SELECTED",
+]));
 const REVISION=/^REV-(?:000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3,})$/;
 const RECEIPT=/^RECEIPT-[0-9]{8}-[0-9]{4,}$/;
 const RFC3339_DATE_TIME=/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-](\d{2}):(\d{2}))$/;
+const MAX_CLOSED_DATA_DEPTH=64;
 
 function invalid(message,options={}) {
   throw new CoreValidationError(message,options);
@@ -53,7 +87,58 @@ function defineData(target,key,value) {
   });
 }
 
-function copyClosed(value,label,ancestors=new Set()) {
+function shallowExactRecord(value,keys,label) {
+  if (value===null || typeof value!=="object" || Array.isArray(value) ||
+      types.isProxy(value)) {
+    invalid(`${label} must be a plain non-proxy record`);
+  }
+  const prototype=Object.getPrototypeOf(value);
+  const descriptors=Object.getOwnPropertyDescriptors(value);
+  const ownKeys=Reflect.ownKeys(descriptors);
+  if (![Object.prototype,null].includes(prototype) || ownKeys.length!==keys.length ||
+      ownKeys.some(key => typeof key!=="string") ||
+      keys.some(key => !Object.hasOwn(descriptors,key))) {
+    invalid(`${label} must use the exact closed shape`);
+  }
+  const captured=Object.create(null);
+  for (const key of keys) {
+    const descriptor=descriptors[key];
+    if (!descriptor.enumerable || !("value" in descriptor)) {
+      invalid(`${label}.${key} must be an own enumerable data property`);
+    }
+    captured[key]=descriptor.value;
+  }
+  return captured;
+}
+
+function shallowDenseArray(value,label) {
+  if (value===null || typeof value!=="object" || types.isProxy(value) ||
+      !Array.isArray(value) || Object.getPrototypeOf(value)!==Array.prototype) {
+    invalid(`${label} must be a dense plain array`);
+  }
+  const descriptors=Object.getOwnPropertyDescriptors(value);
+  const keys=Reflect.ownKeys(descriptors);
+  const lengthDescriptor=descriptors.length;
+  const length=lengthDescriptor?.value;
+  if (!lengthDescriptor || !("value" in lengthDescriptor) || lengthDescriptor.enumerable ||
+      !Number.isSafeInteger(length) || length<0 || keys.length!==length+1) {
+    invalid(`${label} must be a dense plain array`);
+  }
+  const captured=[];
+  for (let index=0;index<length;index+=1) {
+    const descriptor=descriptors[String(index)];
+    if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) {
+      invalid(`${label} must contain dense own data`);
+    }
+    captured.push(descriptor.value);
+  }
+  return captured;
+}
+
+function copyClosed(value,label,ancestors=new Set(),depth=0) {
+  if (depth>MAX_CLOSED_DATA_DEPTH) {
+    invalid(`${label} exceeds the maximum closed-data depth`);
+  }
   if (value===null || typeof value==="string" || typeof value==="boolean") return value;
   if (typeof value==="number") {
     if (!Number.isFinite(value)) invalid(`${label} must contain only finite JSON numbers`);
@@ -84,7 +169,7 @@ function copyClosed(value,label,ancestors=new Set()) {
         if (!descriptor || !descriptor.enumerable || !("value" in descriptor)) {
           invalid(`${label} arrays must be dense own data`);
         }
-        result.push(copyClosed(descriptor.value,`${label}[${index}]`,ancestors));
+        result.push(copyClosed(descriptor.value,`${label}[${index}]`,ancestors,depth+1));
       }
       return Object.freeze(result);
     }
@@ -97,7 +182,7 @@ function copyClosed(value,label,ancestors=new Set()) {
       if (typeof key!=="string" || !descriptor.enumerable || !("value" in descriptor)) {
         invalid(`${label} objects must contain only own enumerable data`);
       }
-      defineData(result,key,copyClosed(descriptor.value,`${label}.${key}`,ancestors));
+      defineData(result,key,copyClosed(descriptor.value,`${label}.${key}`,ancestors,depth+1));
     }
     return Object.freeze(result);
   } finally {
@@ -204,7 +289,7 @@ function assertReleaseIdentities(release) {
 }
 
 function normalizeRepositoryRelease(input,label="Repository release") {
-  const release=copyClosed(input,label);
+  const release=copyClosed(shallowExactRecord(input,REPOSITORY_RELEASE_KEYS,label),label);
   validateCoreDocument(release,"repository-release.v1");
   parseRevision(release.revision,`${label} revision`);
   assertReleaseIdentities(release);
@@ -234,9 +319,30 @@ function normalizeRepositoryRelease(input,label="Repository release") {
   return release;
 }
 
+function assertProgramTrackPhaseCoherence(program,releases) {
+  const allowed=PROGRAM_TRACK_PHASES.get(program.phase);
+  if (releases.some(release => !allowed.has(release.phase))) {
+    invalid(`Program ${program.program_id} phase ${program.phase} contains an incoherent repository release phase`);
+  }
+  if (program.phase==="ACTIVE" &&
+      (releases.every(release => release.phase==="DRAFT") ||
+       releases.every(release => release.phase==="RELEASED"))) {
+    invalid(`Program ${program.program_id} ACTIVE phase must be between all-DRAFT and all-RELEASED`);
+  }
+  if (program.phase==="PAUSED" && !releases.some(release => release.phase==="PAUSED")) {
+    invalid(`Program ${program.program_id} PAUSED phase requires a paused repository release`);
+  }
+  if (program.phase==="PUBLISHING" &&
+      !releases.some(release => release.phase==="PUBLISHING")) {
+    invalid(`Program ${program.program_id} PUBLISHING phase requires a publishing repository release`);
+  }
+}
+
 function normalizeEvent(input) {
-  const event=copyClosed(input,"Repository release event");
-  exactKeys(event,EVENT_KEYS,"Repository release event");
+  const event=copyClosed(
+    shallowExactRecord(input,EVENT_KEYS,"Repository release event"),
+    "Repository release event",
+  );
   if (typeof event.event!=="string") {
     invalid("Repository release event name must be a string");
   }
@@ -325,18 +431,27 @@ function assertProgramSemantics(program) {
     releasesByRepository.set(release.repository,release);
     previousRepository=release.repository;
   }
+  assertProgramTrackPhaseCoherence(program,[...releasesByRepository.values()]);
 
   assertIdentityOrderedUnique(
     program.selected_scope,
     selected => selected.epic_id,
     `Program ${program.program_id} selected scope by epic id`,
   );
+  const selectedIds=program.selected_scope.map(selected => selected.epic_id);
+  const selectedIdSet=new Set(selectedIds);
   assertIdentityOrderedUnique(
     program.deferred_scope,
     deferred => deferred.epic_id,
     `Program ${program.program_id} deferred scope by epic id`,
   );
   for (const deferred of program.deferred_scope) {
+    if (!DEFERRED_REASON_CODES.has(deferred.reason_code)) {
+      invalid(`Program ${program.program_id} deferred scope uses an unknown Task 3 reason code`);
+    }
+    if (selectedIdSet.has(deferred.epic_id)) {
+      invalid(`Program ${program.program_id} scope ${deferred.epic_id} cannot be both selected and deferred`);
+    }
     assertAsciiOrderedUnique(
       deferred.blocking_ids,
       `Program ${program.program_id} deferred scope ${deferred.epic_id} blocking ids`,
@@ -356,12 +471,16 @@ function assertProgramSemantics(program) {
     if (release===undefined) {
       invalid(`Program ${program.program_id} rationale references unknown repository ${rationale.repository}`);
     }
+    parseSemVer(rationale.version);
     if (release.phase!=="DRAFT" && rationale.version!==release.version) {
       invalid(`Program ${program.program_id} rationale version must equal the materialized repository release version`);
     }
 
     let previousReason=-1;
     const reasonScope=new Set();
+    const selectedScope=new Set(release.scope);
+    const selectedReasonScope=new Set();
+    let firstSelectableRule;
     for (const reason of rationale.reasons) {
       const reasonOrder=VERSION_REASON_ORDER.get(reason.rule);
       if (reasonOrder<=previousReason) {
@@ -372,27 +491,27 @@ function assertProgramSemantics(program) {
         reason.scope_ids,
         `Program ${program.program_id} rationale ${rationale.repository} ${reason.rule} scope ids`,
       );
+      const selectable=SELECTABLE_CHANGE_CLASS.has(reason.rule);
+      if (selectable && firstSelectableRule===undefined) firstSelectableRule=reason.rule;
       for (const scopeId of reason.scope_ids) {
         if (parseWorkItemId(scopeId).repository!==rationale.repository) {
           invalid(`Program ${program.program_id} rationale scope ${scopeId} must belong to ${rationale.repository}`);
+        }
+        if (selectable && !selectedScope.has(scopeId)) {
+          invalid(`Program ${program.program_id} rationale selectable scope ${scopeId} must belong to selected scope in ${rationale.repository}`);
         }
         if (reasonScope.has(scopeId)) {
           invalid(`Program ${program.program_id} rationale repeats scope ${scopeId}`);
         }
         reasonScope.add(scopeId);
+        if (selectable) selectedReasonScope.add(scopeId);
       }
     }
-    const expectedChangeClass=rationale.reasons[0]?.rule==="breaking_public_boundary"
-      ? "major"
-      : rationale.reasons.some(reason => reason.rule==="backward_compatible_feature")
-        ? "minor"
-        : rationale.reasons.some(reason => reason.rule==="published_product_fix")
-          ? "patch"
-          : null;
+    const expectedChangeClass=SELECTABLE_CHANGE_CLASS.get(firstSelectableRule) ?? null;
     if (rationale.change_class!==expectedChangeClass) {
       invalid(`Program ${program.program_id} rationale change class must preserve Task 2 selection precedence`);
     }
-    if (release.scope.some(scopeId => !reasonScope.has(scopeId))) {
+    if (release.scope.some(scopeId => !selectedReasonScope.has(scopeId))) {
       invalid(`Program ${program.program_id} rationale must explain every repository release scope item`);
     }
   }
@@ -426,14 +545,14 @@ function assertProgramSemantics(program) {
       scoped.add(scopeId);
     }
   }
-  const selectedIds=program.selected_scope.map(selected => selected.epic_id);
   if (canonicalJson([...scoped].sort(compareCanonicalText))!==canonicalJson(selectedIds)) {
     invalid(`Program ${program.program_id} selected scope must equal its repository release scope`);
   }
 }
 
 function normalizeProgram(input,index) {
-  const program=copyClosed(input,`Release program ${index}`);
+  const label=`Release program ${index}`;
+  const program=copyClosed(shallowExactRecord(input,PROGRAM_KEYS,label),label);
   validateCoreDocument(program,"release-program.v1");
   parseRevision(program.revision,`Release program ${program.program_id} revision`);
   assertProgramSemantics(program);
@@ -441,8 +560,7 @@ function normalizeProgram(input,index) {
 }
 
 export function assertRepositoryConcurrency(programsInput) {
-  const programs=copyClosed(programsInput,"Release programs");
-  if (!Array.isArray(programs)) invalid("Release programs must be an array");
+  const programs=shallowDenseArray(programsInput,"Release programs");
   const byProgramId=new Set();
   const activeByRepository=new Map();
   const normalizedPrograms=[];

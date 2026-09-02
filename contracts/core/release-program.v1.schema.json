@@ -141,7 +141,7 @@
       "required": ["epic_id", "reason_code", "explanation", "blocking_ids"],
       "properties": {
         "epic_id": {"$ref": "#/$defs/work_item_id"},
-        "reason_code": {"type": "string", "pattern": "^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*$"},
+        "reason_code": {"enum": ["ACTIVE_PROGRAM_ASSIGNMENT", "DEPENDENCY_INELIGIBLE", "DEPENDENCY_MISSING", "EPIC_ALREADY_VERSIONED", "EPIC_NOT_DECOMPOSED", "EPIC_UNAPPROVED", "OUTCOME_NOT_SELECTED", "REPOSITORY_UNREGISTERED"]},
         "explanation": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"},
         "blocking_ids": {
           "type": "array",
