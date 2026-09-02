@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://toss.software/schemas/core/publication-evidence.v1.schema.json",
+  "title": "TOSS Core Publication Evidence v1",
+  "description": "Closed independently verifiable tag, package, GitHub Release, and receipt evidence for one repository release.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "evidence_id", "release_id", "repository", "version", "expected_revision", "tag", "package", "github_release", "evidence_sha256", "source_receipt", "verified_at"],
+  "properties": {
+    "schema_version": {"const": "publication-evidence.v1"},
+    "evidence_id": {"type": "string", "pattern": "^PUB-[0-9]{8}-[0-9]{4,}$"},
+    "release_id": {"$ref": "#/$defs/release_id"},
+    "repository": {"$ref": "#/$defs/repository"},
+    "version": {"$ref": "#/$defs/version"},
+    "expected_revision": {"$ref": "#/$defs/commit_revision"},
+    "tag": {"$ref": "#/$defs/tag"},
+    "package": {"$ref": "#/$defs/package"},
+    "github_release": {"$ref": "#/$defs/github_release"},
+    "evidence_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "source_receipt": {"$ref": "#/$defs/receipt_id"},
+    "verified_at": {"type": "string", "format": "rfc3339-date-time"}
+  },
+  "$defs": {
+    "release_id": {"type": "string", "pattern": "^REL-[A-Za-z0-9][A-Za-z0-9._-]*$"},
+    "repository": {"type": "string", "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?/[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$"},
+    "version": {"type": "string", "pattern": "^(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)$"},
+    "commit_revision": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+    "receipt_id": {"type": "string", "pattern": "^RECEIPT-[0-9]{8}-[0-9]{4,}$"},
+    "tag": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "target_revision"],
+      "properties": {
+        "name": {"type": "string", "pattern": "^v(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)$"},
+        "target_revision": {"$ref": "#/$defs/commit_revision"}
+      }
+    },
+    "package": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "integrity"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"},
+        "version": {"$ref": "#/$defs/version"},
+        "integrity": {"type": "string", "pattern": "^sha512-[A-Za-z0-9+/]+={0,2}$"}
+      }
+    },
+    "asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "sha256"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"},
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      }
+    },
+    "github_release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["release_id", "tag_name", "target_revision", "draft", "prerelease", "assets"],
+      "properties": {
+        "release_id": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"},
+        "tag_name": {"type": "string", "pattern": "^v(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)$"},
+        "target_revision": {"$ref": "#/$defs/commit_revision"},
+        "draft": {"type": "boolean"},
+        "prerelease": {"type": "boolean"},
+        "assets": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/asset"}}
+      }
+    }
+  }
+}

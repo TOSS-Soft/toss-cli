@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://toss.software/schemas/core/repository-release.v1.schema.json",
+  "title": "TOSS Core Repository Release v1",
+  "description": "A closed revision-bound release track for one independently versioned repository.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "release_id", "program_id", "repository", "phase", "revision", "version", "milestone", "branch", "release_pr_intent", "scope", "publication_evidence", "transitions"],
+  "properties": {
+    "schema_version": {"const": "repository-release.v1"},
+    "release_id": {"$ref": "#/$defs/release_id"},
+    "program_id": {"$ref": "#/$defs/program_id"},
+    "repository": {"$ref": "#/$defs/repository"},
+    "phase": {"$ref": "#/$defs/phase"},
+    "revision": {"$ref": "#/$defs/revision"},
+    "version": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/version"}]},
+    "milestone": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/milestone"}]},
+    "branch": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/release_branch"}]},
+    "release_pr_intent": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/release_pr_intent"}]},
+    "scope": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/work_item_id"}
+    },
+    "publication_evidence": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "https://toss.software/schemas/core/publication-evidence.v1.schema.json"}
+      ]
+    },
+    "transitions": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/transition"}
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"phase": {"const": "DRAFT"}}},
+      "then": {
+        "properties": {
+          "version": {"type": "null"},
+          "milestone": {"type": "null"},
+          "branch": {"type": "null"},
+          "release_pr_intent": {"type": "null"},
+          "publication_evidence": {"type": "null"}
+        }
+      },
+      "else": {
+        "properties": {
+          "version": {"$ref": "#/$defs/version"},
+          "milestone": {"$ref": "#/$defs/milestone"},
+          "branch": {"$ref": "#/$defs/release_branch"},
+          "release_pr_intent": {"$ref": "#/$defs/release_pr_intent"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"phase": {"const": "RELEASED"}}},
+      "then": {
+        "properties": {
+          "publication_evidence": {"$ref": "https://toss.software/schemas/core/publication-evidence.v1.schema.json"}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "release_id": {"type": "string", "pattern": "^REL-[A-Za-z0-9][A-Za-z0-9._-]*$"},
+    "program_id": {"type": "string", "pattern": "^TOSS-OS-R[0-9]{4,}$"},
+    "repository": {"type": "string", "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?/[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$"},
+    "phase": {"enum": ["ACTIVE", "DRAFT", "PAUSED", "PUBLISHING", "READY_FOR_APPROVAL", "RELEASED"]},
+    "revision": {"type": "string", "pattern": "^REV-(?:000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3,})$"},
+    "version": {"type": "string", "pattern": "^(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)$"},
+    "milestone": {"type": "string", "pattern": "^v(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)$"},
+    "release_branch": {"type": "string", "pattern": "^release/v(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)$"},
+    "work_item_id": {"type": "string", "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?/[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?#[1-9][0-9]*$"},
+    "receipt_id": {"type": "string", "pattern": "^RECEIPT-[0-9]{8}-[0-9]{4,}$"},
+    "release_pr_intent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["intent_id", "head", "base", "expected_head_revision", "recorded_at"],
+      "properties": {
+        "intent_id": {"type": "string", "pattern": "^RELEASE-PR-INTENT-[0-9]{4,}$"},
+        "head": {"$ref": "#/$defs/release_branch"},
+        "base": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"},
+        "expected_head_revision": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
+        "recorded_at": {"type": "string", "format": "rfc3339-date-time"}
+      }
+    },
+    "transition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["event", "source_phase", "target_phase", "timestamp", "source_receipt"],
+      "properties": {
+        "event": {"enum": ["ACTIVATE", "APPROVE", "PAUSE_FOR_PATCH", "RESUME_AFTER_PATCH", "SCOPE_DONE", "VERIFY_PUBLICATION"]},
+        "source_phase": {"$ref": "#/$defs/phase"},
+        "target_phase": {"$ref": "#/$defs/phase"},
+        "timestamp": {"type": "string", "format": "rfc3339-date-time"},
+        "source_receipt": {"$ref": "#/$defs/receipt_id"}
+      }
+    }
+  }
+}

@@ -11,6 +11,7 @@
       "test/core-contracts.test.js",
       "test/core-dependencies.test.js",
       "test/core-foundation-commands.test.js",
+      "test/core-release-state.test.js",
       "test/core-state.test.js",
       "test/decisions.test.js",
       "test/design-auditor.test.js",

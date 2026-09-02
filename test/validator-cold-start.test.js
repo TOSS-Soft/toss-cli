@@ -79,14 +79,14 @@ function validCatalog() {
 }
 
 test("the contract catalog is closed, complete, sorted, unique, and immutable",async () => {
-  assert.equal(CONTRACT_SCHEMA_CATALOG.length,46);
+  assert.equal(CONTRACT_SCHEMA_CATALOG.length,49);
   assert.deepEqual(
     CONTRACT_SCHEMA_CATALOG.map(row => row.schemaId),
     [...CONTRACT_SCHEMA_CATALOG.map(row => row.schemaId)].sort(),
   );
-  assert.equal(new Set(CONTRACT_SCHEMA_CATALOG.map(row => row.schemaId)).size,46);
-  assert.equal(new Set(CONTRACT_SCHEMA_CATALOG.map(row => row.uri)).size,46);
-  assert.equal(new Set(CONTRACT_SCHEMA_CATALOG.map(row => row.relativePath)).size,46);
+  assert.equal(new Set(CONTRACT_SCHEMA_CATALOG.map(row => row.schemaId)).size,49);
+  assert.equal(new Set(CONTRACT_SCHEMA_CATALOG.map(row => row.uri)).size,49);
+  assert.equal(new Set(CONTRACT_SCHEMA_CATALOG.map(row => row.relativePath)).size,49);
   assert.equal(Object.isFrozen(CONTRACT_SCHEMA_CATALOG),true);
   assert.ok(CONTRACT_SCHEMA_CATALOG.every(Object.isFrozen));
   for (const row of CONTRACT_SCHEMA_CATALOG) {

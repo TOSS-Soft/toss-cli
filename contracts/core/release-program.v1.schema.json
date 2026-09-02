@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://toss.software/schemas/core/release-program.v1.schema.json",
+  "title": "TOSS Core Release Program v1",
+  "description": "A closed organization program coordinating zero or one independently versioned release track per repository.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "program_id", "phase", "revision", "repository_releases", "dependency_stages", "selected_scope", "deferred_scope", "rationale", "interrupts", "created_at", "updated_at"],
+  "properties": {
+    "schema_version": {"const": "release-program.v1"},
+    "program_id": {"$ref": "#/$defs/program_id"},
+    "phase": {"enum": ["ACTIVE", "DRAFT", "PAUSED", "PUBLISHING", "RELEASED", "WAITING_FOR_EPIC"]},
+    "revision": {"$ref": "#/$defs/revision"},
+    "repository_releases": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "https://toss.software/schemas/core/repository-release.v1.schema.json"}
+    },
+    "dependency_stages": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/dependency_stage"}
+    },
+    "selected_scope": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/work_item_id"}
+    },
+    "deferred_scope": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/deferred_scope"}
+    },
+    "rationale": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"}
+    },
+    "interrupts": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/interruption"}
+      ]
+    },
+    "created_at": {"type": "string", "format": "rfc3339-date-time"},
+    "updated_at": {"type": "string", "format": "rfc3339-date-time"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"phase": {"const": "WAITING_FOR_EPIC"}}},
+      "then": {
+        "properties": {
+          "repository_releases": {"type": "array", "maxItems": 0},
+          "dependency_stages": {"type": "array", "maxItems": 0},
+          "selected_scope": {"type": "array", "maxItems": 0},
+          "interrupts": {"type": "null"}
+        }
+      },
+      "else": {
+        "properties": {
+          "repository_releases": {"type": "array", "minItems": 1}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "program_id": {"type": "string", "pattern": "^TOSS-OS-R[0-9]{4,}$"},
+    "release_id": {"type": "string", "pattern": "^REL-[A-Za-z0-9][A-Za-z0-9._-]*$"},
+    "revision": {"type": "string", "pattern": "^REV-(?:000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3,})$"},
+    "work_item_id": {"type": "string", "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?/[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?#[1-9][0-9]*$"},
+    "dependency_stage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stage", "repository_release_ids"],
+      "properties": {
+        "stage": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+        "repository_release_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/release_id"}
+        }
+      }
+    },
+    "deferred_scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["epic_id", "reason_code", "explanation", "blocking_ids"],
+      "properties": {
+        "epic_id": {"$ref": "#/$defs/work_item_id"},
+        "reason_code": {"type": "string", "pattern": "^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*$"},
+        "explanation": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"},
+        "blocking_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/work_item_id"}
+        }
+      }
+    },
+    "interruption": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["program_id", "repository_release_id", "paused_release_revision"],
+      "properties": {
+        "program_id": {"$ref": "#/$defs/program_id"},
+        "repository_release_id": {"$ref": "#/$defs/release_id"},
+        "paused_release_revision": {"$ref": "#/$defs/revision"}
+      }
+    }
+  }
+}
