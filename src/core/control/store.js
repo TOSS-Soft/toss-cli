@@ -3,6 +3,7 @@ import {types} from "node:util";
 import {canonicalJson,sha256Canonical} from "../../contracts/acp.js";
 import {validateCoreDocument} from "../contracts.js";
 import {createOperationIntent} from "../operations/plan.js";
+import {assertRepositoryConcurrency} from "../release/state.js";
 import {
   closeDocumentPaths,
   closeRootSnapshot,
@@ -46,6 +47,13 @@ export function repositoryFilename(identity) {
 
 export function repositoryPath(identity) {
   return `${CONTROL_PATHS.repositories}/${repositoryFilename(identity)}`;
+}
+
+export function programPath(identity) {
+  if (typeof identity!=="string" || !/^TOSS-OS-R[0-9]{4,}$/u.test(identity)) {
+    throw new TypeError("release program identity must be canonical");
+  }
+  return `${CONTROL_PATHS.programs}/${identity}/manifest.yaml`;
 }
 
 function ownDataFunction(value,key) {
@@ -475,6 +483,49 @@ export function createCoreControlStore({repository}) {
     });
   }
 
+  async function loadReleaseProgramsAt(validated) {
+    if (validated.classification==="absent") return Object.freeze([]);
+    const paths=documentsUnder(validated.currentPaths,CONTROL_PATHS.programs).sort(rawCompare);
+    const programs=[];
+    const identities=new Set();
+    try {
+      for (const path of paths) {
+        const match=/^programs\/(TOSS-OS-R[0-9]{4,})\/manifest\.yaml$/u.exec(path);
+        if (!match) throw new TypeError(`unexpected release program manifest path: ${path}`);
+        const document=await readAt(path,validated.revision);
+        if (document===null) throw new TypeError(`listed release program manifest is absent: ${path}`);
+        const program=validateCoreDocument(document,"release-program.v1");
+        if (programPath(program.program_id)!==path || match[1]!==program.program_id || identities.has(program.program_id)) {
+          throw new TypeError(`release program identity does not match its unique path: ${path}`);
+        }
+        identities.add(program.program_id);
+        programs.push(program);
+      }
+      programs.sort((left,right) => rawCompare(left.program_id,right.program_id));
+      assertRepositoryConcurrency(programs);
+      return frozenCanonicalCopy(programs);
+    } catch (error) {
+      throw error?.code==="CONTROL_LEDGER_CONFLICT"
+        ? error
+        : ledgerConflict("release program manifest ledger is corrupt",{cause:error});
+    }
+  }
+
+  async function loadReleasePlanningState() {
+    const validated=await loadValidatedLedgerAt(await head());
+    if (validated.classification==="absent") {
+      return frozenCanonicalCopy({revision:validated.revision,organization:null,repositories:[],programs:[],intents:[],receipts:[]});
+    }
+    return frozenCanonicalCopy({
+      revision:validated.revision,
+      organization:validated.currentBaseline.organization,
+      repositories:validated.currentRepositories,
+      programs:await loadReleaseProgramsAt(validated),
+      intents:validated.intentRecords.map(record => record.document),
+      receipts:validated.receiptRecords.map(record => record.document),
+    });
+  }
+
   function findReceiptInLedger(intent,validated) {
     const valid=validateCoreDocument(intent,"operation-intent.v1");
     const matches=validated.receiptRecords.filter(record =>
@@ -641,6 +692,100 @@ export function createCoreControlStore({repository}) {
     });
   }
 
+  function nextReleaseRevision(value) {
+    const match=/^REV-([0-9]{4,})$/u.exec(value);
+    if (!match) throw new TypeError("release program expected revision must be canonical");
+    const number=Number(match[1]);
+    if (!Number.isSafeInteger(number) || number<1 || number===Number.MAX_SAFE_INTEGER) {
+      throw new TypeError("release program revision cannot be incremented safely");
+    }
+    const next=String(number+1);
+    return `REV-${next.padStart(Math.max(4,match[1].length),"0")}`;
+  }
+
+  async function releaseProgramMutation(operation,validated) {
+    if (!operation || typeof operation!=="object" || Array.isArray(operation) || types.isProxy(operation) ||
+        canonicalJson(Object.keys(operation).sort())!==canonicalJson([
+          "action","expected_revision","operation_id","payload","repository","resource",
+        ])) {
+      throw new TypeError("release program operation must use the exact persisted operation shape");
+    }
+    const payload=operation.payload;
+    if (!payload || typeof payload!=="object" || Array.isArray(payload) || types.isProxy(payload) ||
+        canonicalJson(Object.keys(payload).sort())!==canonicalJson([
+          "expected_program_revision","kind","program",
+        ]) || payload.kind!=="release-program-manifest") {
+      throw new TypeError("release program operation payload must use the exact closed shape");
+    }
+    const program=validateCoreDocument(payload.program,"release-program.v1");
+    if (operation.resource!=="repository" || operation.action!=="commit" ||
+        operation.repository!==validated.currentBaseline.organization.control_repository ||
+        operation.expected_revision!==payload.expected_program_revision ||
+        !(payload.expected_program_revision===null || typeof payload.expected_program_revision==="string")) {
+      throw new TypeError("release program operation does not bind the control repository and logical revision");
+    }
+    const programs=await loadReleaseProgramsAt(validated);
+    const current=programs.find(value => value.program_id===program.program_id) ?? null;
+    if ((current?.revision ?? null)!==payload.expected_program_revision) {
+      throw ledgerConflict(`release program expected revision conflict: ${program.program_id}`);
+    }
+    if (current===null) {
+      if (program.revision!=="REV-0001") throw new TypeError("new release program must begin at REV-0001");
+    } else if (program.revision!==nextReleaseRevision(current.revision) ||
+        program.created_at!==current.created_at) {
+      throw new TypeError("release program update must advance once and retain its creation time");
+    }
+    const resulting=[...programs.filter(value => value.program_id!==program.program_id),program]
+      .sort((left,right) => rawCompare(left.program_id,right.program_id));
+    assertRepositoryConcurrency(resulting);
+    return Object.freeze({program:frozenCanonicalCopy(program),current,programs:Object.freeze(resulting)});
+  }
+
+  async function inspectReleaseProgramOperation(operation) {
+    const validated=await loadValidatedLedgerAt(await head());
+    if (validated.classification==="absent") throw ledgerConflict("release program mutation requires a bootstrapped control repository");
+    const mutation=await releaseProgramMutation(operation,validated);
+    return frozenCanonicalCopy({
+      operation_id:operation.operation_id,
+      repository:operation.repository,
+      revision:mutation.current?.revision ?? null,
+    });
+  }
+
+  async function commitReleaseProgramReceipt({expectedHead,operation,receipt}) {
+    const current=await head();
+    if (current!==expectedHead) {
+      throw ledgerConflict(`control repository expected head conflict: expected ${String(expectedHead)}, found ${String(current)}`);
+    }
+    const validated=await loadValidatedLedgerAt(current);
+    if (validated.classification==="absent") throw ledgerConflict("release program mutation requires a bootstrapped control repository");
+    const mutation=await releaseProgramMutation(operation,validated);
+    const validReceipt=validateCoreDocument(receipt,"operation-receipt.v1");
+    if (validReceipt.status!=="completed") throw new TypeError("release program finalization requires a completed receipt");
+    if (validated.receiptRecords.some(record => record.document.receipt_id===validReceipt.receipt_id)) {
+      throw ledgerConflict(`receipt identity is immutable and already exists: ${validReceipt.receipt_id}`);
+    }
+    await assertReceiptBinding(validReceipt,current);
+    const persistedIntents=validated.intentRecords.filter(record => record.document.intent_id===validReceipt.intent_id);
+    const persistedOperation=persistedIntents[0]?.document.operations.find(value => value.operation_id===operation.operation_id);
+    if (persistedIntents.length!==1 || !persistedOperation || !equivalent(persistedOperation,operation)) {
+      throw ledgerConflict("release program operation does not equal its persisted intent operation");
+    }
+    const observations=validReceipt.observed_revisions.filter(value => value.operation_id===operation.operation_id);
+    if (observations.length!==1 || observations[0].repository!==operation.repository ||
+        observations[0].revision!==mutation.program.revision) {
+      throw new TypeError("release program receipt must observe the exact logical program revision");
+    }
+    return commitFiles({
+      expectedHead:current,
+      message:`core: record release program ${mutation.program.program_id}`,
+      files:{
+        [programPath(mutation.program.program_id)]:mutation.program,
+        [receiptPath(validReceipt)]:validReceipt,
+      },
+    });
+  }
+
   async function commitBootstrap({expectedHead,files}) {
     if (expectedHead!==null) throw new TypeError("bootstrap is permitted only for an unborn control repository");
     const current=await head();
@@ -699,9 +844,12 @@ export function createCoreControlStore({repository}) {
     listRepositories,
     loadRegistryState,
     loadOperationState,
+    loadReleasePlanningState,
     findCompletedRepositoryRegistration,
     commitIntent,
     commitReceipt,
+    inspectReleaseProgramOperation,
+    commitReleaseProgramReceipt,
     commitBootstrap,
     commitConfiguration,
     head,

@@ -175,5 +175,5 @@ test("core router dispatches only foundation handlers without importing later fa
   const dispatched=await dispatchCoreCommand(command(["init"]),{services:services({control:unbornControl(),github:githubFor()})});
   assert.equal(dispatched.exitCode,0);
   assert.equal(dispatched.result.data.command,"init");
-  assert.equal((await dispatchCoreCommand(command(["release","status","v1.0.0"]),{services:{}})).exitCode,69);
+  assert.equal((await dispatchCoreCommand(command(["release","approve","REL-future"]),{services:{}})).exitCode,69);
 });

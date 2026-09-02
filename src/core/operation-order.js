@@ -1,6 +1,16 @@
 import {canonicalJson} from "../contracts/acp.js";
 import {compareCanonicalText} from "./canonical-order.js";
 
+const RELEASE_OPERATION_RANK=Object.freeze(new Map([
+  ["release-milestone",10],
+  ["release-branch",20],
+  ["release-program-manifest",30],
+  ["release-pull-request",40],
+  ["release-assignment",50],
+  ["release-epic-branch",60],
+  ["release-project-state",70],
+]));
+
 function nullFirst(left,right) {
   if (left===right) return 0;
   if (left===null) return -1;
@@ -9,6 +19,13 @@ function nullFirst(left,right) {
 }
 
 export function compareOperations(left,right) {
+  const leftRank=RELEASE_OPERATION_RANK.get(left.payload?.kind);
+  const rightRank=RELEASE_OPERATION_RANK.get(right.payload?.kind);
+  if (leftRank!==undefined || rightRank!==undefined) {
+    if (leftRank===undefined) return -1;
+    if (rightRank===undefined) return 1;
+    if (leftRank!==rightRank) return leftRank-rightRank;
+  }
   for (const [a,b] of [[left.repository,right.repository],[left.resource,right.resource],[left.action,right.action]]) {
     const comparison=nullFirst(a,b);
     if (comparison!==0) return comparison;

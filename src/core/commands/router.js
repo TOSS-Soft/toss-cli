@@ -15,6 +15,8 @@ import {runIssueCommand} from "./issue.js";
 import {runReviewCommand} from "./review.js";
 import {runRepositoryCommand} from "./repository.js";
 import {runEpicCommand} from "./epic.js";
+import {runProgramCommand} from "./program.js";
+import {runReleaseCommand} from "./release.js";
 
 const TASK_4_COMMANDS=new Set([
   "feature.add","feature.status",
@@ -23,8 +25,12 @@ const TASK_4_COMMANDS=new Set([
 ]);
 const TASK_5_COMMANDS=new Set(["review.record","review.status"]);
 const TASK_6_COMMANDS=new Set(["epic.prepare","epic.approve","epic.submit","epic.accept","epic.status"]);
+const RELEASE_PROGRAM_COMMANDS=new Set([
+  "release.plan","release.activate","release.status","program.status",
+]);
 const IMPLEMENTED_COMMANDS=new Set([
   "init","repo.add","repo.list",...TASK_4_COMMANDS,...TASK_5_COMMANDS,...TASK_6_COMMANDS,
+  ...RELEASE_PROGRAM_COMMANDS,
 ]);
 const CONTEXT_KEYS=new Set(["handlers","services","confirm"]);
 const BUILTIN_HANDLERS=Object.freeze({
@@ -48,6 +54,10 @@ const BUILTIN_HANDLERS=Object.freeze({
   "epic.submit":runEpicCommand,
   "epic.accept":runEpicCommand,
   "epic.status":runEpicCommand,
+  "release.plan":runReleaseCommand,
+  "release.activate":runReleaseCommand,
+  "release.status":runReleaseCommand,
+  "program.status":runProgramCommand,
 });
 
 export {CORE_EXIT_CODES,CoreCommandUsageError,parseCoreCommand};
@@ -172,7 +182,7 @@ export async function dispatchCoreCommand(command,context={}) {
     const normalized=validateParsedCoreCommand(command);
     const services=normalizeContext(context);
     if (!IMPLEMENTED_COMMANDS.has(normalized.name) ||
-        ((TASK_4_COMMANDS.has(normalized.name) || TASK_5_COMMANDS.has(normalized.name) || TASK_6_COMMANDS.has(normalized.name)) &&
+        ((TASK_4_COMMANDS.has(normalized.name) || TASK_5_COMMANDS.has(normalized.name) || TASK_6_COMMANDS.has(normalized.name) || RELEASE_PROGRAM_COMMANDS.has(normalized.name)) &&
           !Object.hasOwn(services,"services"))) {
       return failure(
         CORE_EXIT_CODES.NOT_IMPLEMENTED,

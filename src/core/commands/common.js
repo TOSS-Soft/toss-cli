@@ -4,7 +4,12 @@ import {canonicalJson,sha256Canonical} from "../../contracts/acp.js";
 import {validateCoreDocument} from "../contracts.js";
 import {CoreBlockedError,CoreConflictError,CoreValidationError} from "../errors.js";
 
-export function closedData(value,label,path="$",ancestors=new Set()) {
+const MAX_CLOSED_DATA_DEPTH=64;
+
+export function closedData(value,label,path="$",ancestors=new Set(),depth=0) {
+  if (depth>MAX_CLOSED_DATA_DEPTH) {
+    throw new CoreValidationError(`${label} ${path} exceeds the maximum closed-data depth`);
+  }
   if (value===null || ["string","boolean"].includes(typeof value)) return value;
   if (typeof value==="number") {
     if (!Number.isFinite(value)) throw new CoreValidationError(`${label} ${path} must be finite`);
@@ -39,7 +44,7 @@ export function closedData(value,label,path="$",ancestors=new Set()) {
              (descriptor.writable!==false || descriptor.configurable!==false))) {
           throw new CoreValidationError(`${label} ${path} must contain dense own data`);
         }
-        output.push(closedData(descriptor.value,label,`${path}[${index}]`,ancestors));
+        output.push(closedData(descriptor.value,label,`${path}[${index}]`,ancestors,depth+1));
       }
       return Object.freeze(output);
     }
@@ -51,7 +56,7 @@ export function closedData(value,label,path="$",ancestors=new Set()) {
     for (const key of keys) {
       const descriptor=Object.getOwnPropertyDescriptor(descriptors,key)?.value;
       if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) throw new CoreValidationError(`${label} ${path}.${key} contains an accessor or hidden property`);
-      output[key]=closedData(descriptor.value,label,`${path}.${key}`,ancestors);
+      output[key]=closedData(descriptor.value,label,`${path}.${key}`,ancestors,depth+1);
     }
     return Object.freeze(output);
   } finally { ancestors.delete(value); }

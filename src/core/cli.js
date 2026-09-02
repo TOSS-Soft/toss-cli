@@ -120,7 +120,8 @@ export async function runCoreCli(argv,{cwd,stdin,stdout,stderr,runtimeProvider}=
     const request=Object.freeze({cwd,stdin,command});
     const context=await coreContext(runtimeProvider,request);
     const {prompt,...dispatchContext}=context;
-    if (command.options.apply && command.interactive && ["init","repo.add"].includes(command.name)) {
+    if (command.options.apply && command.interactive &&
+        ["init","repo.add","release.plan","release.activate"].includes(command.name)) {
       if (typeof prompt!=="function") {
         throw new CoreCliError(
           "CONFIRMATION_REQUIRED",

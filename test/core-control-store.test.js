@@ -23,6 +23,7 @@ import {
   receiptPath,
   repositoryFilename,
   repositoryPath,
+  programPath,
 } from "../src/core/control/store.js";
 
 const execFile=promisify(childExecFile);
@@ -1650,4 +1651,80 @@ test("bootstrap state returns a deeply frozen root proof",async t => {
   assert.equal(Object.isFrozen(state.lifecycle),true);
   assert.equal(Object.isFrozen(state.intent.operations),true);
   assert.equal(Object.isFrozen(state.receipt.observed_revisions),true);
+});
+
+test("release program finalization atomically CAS-writes the manifest and its logical-revision receipt",async t => {
+  const {store,bootstrap,head}=await createBootstrappedStore(t);
+  const configuration=repositoryConfig();
+  const configured=await store.commitConfiguration({
+    expectedHead:head,
+    files:{
+      [CONTROL_PATHS.organization]:{...bootstrap.organization,repositories:[configuration.repository]},
+      [repositoryPath(configuration.repository)]:configuration,
+    },
+  });
+  const releaseId="REL-TOSS-OS-R0001-cli";
+  const program={
+    schema_version:"release-program.v1",program_id:"TOSS-OS-R0001",phase:"DRAFT",
+    revision:"REV-0001",
+    repository_releases:[{
+      schema_version:"repository-release.v1",release_id:releaseId,
+      program_id:"TOSS-OS-R0001",repository:configuration.repository,phase:"DRAFT",
+      revision:"REV-0001",version:null,milestone:null,branch:null,release_pr_intent:null,
+      scope:[`${configuration.repository}#10`],publication_evidence:null,transitions:[],
+    }],
+    dependency_stages:[{stage:1,repository_release_ids:[releaseId]}],
+    selected_scope:[{epic_id:`${configuration.repository}#10`,outcome:"release-store",
+      eligibility:{approved:true,unversioned:true,decomposed:true,registered_repository:true,unassigned:true}}],
+    deferred_scope:[],
+    rationale:[{repository:configuration.repository,version:"2.2.0",change_class:"minor",
+      reasons:[{rule:"backward_compatible_feature",scope_ids:[`${configuration.repository}#10`]}]}],
+    interrupts:null,created_at:"2026-09-03T08:00:00.000Z",updated_at:"2026-09-03T08:00:00.000Z",
+  };
+  const ordinaryIntent=createOperationIntent({
+    intent_id:"INTENT-20260901-0002",created_at:"2026-09-01T08:00:00.000Z",
+    command:"repo.add",policy_revision:"POLICY-0001",
+    source:{repository:bootstrap.organization.control_repository,revision:configured.commit_sha,sha256:"b".repeat(64)},
+    authority:null,operations:[{resource:"repository",action:"update",
+      repository:configuration.repository,expected_revision:"repository-1",payload:{kind:"ordinary"}}],
+  });
+  const ordinaryIntentCommit=await store.commitIntent({
+    expectedHead:configured.commit_sha,intent:ordinaryIntent,
+  });
+  const ordinaryReceipt=receiptForIntent(ordinaryIntent,{number:"0002"});
+  const ordinaryReceiptCommit=await store.commitReceipt({
+    expectedHead:ordinaryIntentCommit.commit_sha,receipt:ordinaryReceipt,
+  });
+  const planned=createOperationIntent({
+    intent_id:"INTENT-20260903-0001",created_at:"2026-09-03T08:00:00.000Z",
+    command:"release.plan",policy_revision:"POLICY-0001",
+    source:{repository:bootstrap.organization.control_repository,revision:ordinaryReceiptCommit.commit_sha,sha256:"a".repeat(64)},
+    authority:null,
+    operations:[{resource:"repository",action:"commit",repository:bootstrap.organization.control_repository,
+      expected_revision:null,payload:{kind:"release-program-manifest",expected_program_revision:null,program}}],
+  });
+  const intentCommit=await store.commitIntent({expectedHead:ordinaryReceiptCommit.commit_sha,intent:planned});
+  const observation=await store.inspectReleaseProgramOperation(planned.operations[0]);
+  assert.deepEqual(observation,{operation_id:"OP-0001",repository:bootstrap.organization.control_repository,revision:null});
+  const recorded=receiptForIntent(planned,{number:"0001",observed_revisions:[{
+    operation_id:"OP-0001",repository:bootstrap.organization.control_repository,revision:"REV-0001",
+  }]});
+  for (const existing of [bootstrap.receipt,ordinaryReceipt]) {
+    const colliding={...recorded,receipt_id:existing.receipt_id,created_at:existing.created_at};
+    await assert.rejects(store.commitReleaseProgramReceipt({
+      expectedHead:intentCommit.commit_sha,operation:planned.operations[0],receipt:colliding,
+    }),error => error?.code==="CONTROL_LEDGER_CONFLICT");
+    assert.equal(await store.head(),intentCommit.commit_sha);
+  }
+  assert.deepEqual((await store.loadBootstrapState()).receipt,bootstrap.receipt);
+  await store.commitReleaseProgramReceipt({
+    expectedHead:intentCommit.commit_sha,operation:planned.operations[0],receipt:recorded,
+  });
+
+  const state=await store.loadReleasePlanningState();
+  assert.equal(state.programs[0].program_id,"TOSS-OS-R0001");
+  assert.equal(state.programs[0].revision,"REV-0001");
+  assert.equal(state.receipts.some(value => value.receipt_id===recorded.receipt_id),true);
+  assert.equal(programPath(program.program_id),"programs/TOSS-OS-R0001/manifest.yaml");
+  assertDeeplyFrozen(state);
 });

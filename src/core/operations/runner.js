@@ -15,6 +15,14 @@ function ownFunction(value,key,label) {
   return descriptor.value;
 }
 
+function optionalOwnFunction(value,key,label) {
+  if (!value || typeof value!=="object" || types.isProxy(value)) throw new CoreValidationError(`${label} must be a non-proxy object`);
+  const descriptor=Object.getOwnPropertyDescriptor(value,key);
+  if (!descriptor) return null;
+  if (!("value" in descriptor) || typeof descriptor.value!=="function" || types.isProxy(descriptor.value)) throw new CoreValidationError(`${label}.${key} must be an own-data non-proxy function when provided`);
+  return descriptor.value;
+}
+
 function clone(value,path="$",ancestors=new Set()) {
   if (value===null || ["string","number","boolean"].includes(typeof value)) return value;
   if (typeof value!=="object" || types.isProxy(value) || ancestors.has(value)) throw new CoreValidationError(`Remote ${path} must be a closed non-proxy JSON value`);
@@ -90,10 +98,10 @@ function expectedAuthorityBinding(intent,now,implementationActor) {
   });
 }
 
-function inspectMatches(intent,values) {
+function inspectMatches(operations,values) {
   const byId=new Map(values.map(value => [value.operation_id,value]));
   if (byId.size!==values.length) throw new CoreValidationError("GitHub inspection has duplicate operation observations");
-  for (const operation of intent.operations) {
+  for (const operation of operations) {
     const inspection=byId.get(operation.operation_id);
     if (!inspection || inspection.repository!==operation.repository || inspection.revision!==operation.expected_revision) throw new CoreConflictError(`Operation ${operation.operation_id} has a stale expected revision`);
   }
@@ -108,15 +116,15 @@ function receiptFor(intent,{receipt_id,created_at,status,observed_revisions}) {
   return receipt;
 }
 
-function remoteResult(value,intent) {
+function remoteResult(value,operations) {
   const result=clone(value,"apply result");
   exact(result,["status","observed_revisions"],"GitHub apply result");
   if (!["completed","failed"].includes(result.status)) throw new CoreValidationError("GitHub apply result status is invalid");
   const observedRevisions=observed(result.observed_revisions);
   if (result.status==="completed") {
     const byOperation=new Map(observedRevisions.map(item => [item.operation_id,item]));
-    if (byOperation.size!==observedRevisions.length || byOperation.size!==intent.operations.length ||
-        intent.operations.some(operation => byOperation.get(operation.operation_id)?.repository!==operation.repository)) {
+    if (byOperation.size!==observedRevisions.length || byOperation.size!==operations.length ||
+        operations.some(operation => byOperation.get(operation.operation_id)?.repository!==operation.repository)) {
       return Object.freeze({status:"failed",observed_revisions:observedRevisions});
     }
   }
@@ -155,6 +163,9 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
   const findReceipt=ownFunction(control,"findReceipt","control");
   const commitIntent=ownFunction(control,"commitIntent","control");
   const commitReceipt=ownFunction(control,"commitReceipt","control");
+  const inspectReleaseProgramOperation=optionalOwnFunction(control,"inspectReleaseProgramOperation","control");
+  const commitReleaseProgramReceipt=optionalOwnFunction(control,"commitReleaseProgramReceipt","control");
+  if ((inspectReleaseProgramOperation===null)!==(commitReleaseProgramReceipt===null)) throw new CoreValidationError("control release-program operation methods must be provided together");
   ownFunction(github,"snapshot","github");
   const inspect=ownFunction(github,"inspect","github");
   const applyRemote=ownFunction(github,"apply","github");
@@ -162,6 +173,14 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
   if (typeof clock!=="function" || types.isProxy(clock) || typeof idGenerator!=="function" || types.isProxy(idGenerator) || typeof policyRevision!=="function" || types.isProxy(policyRevision) || typeof implementationActor!=="string" || !/\S/u.test(implementationActor)) throw new CoreValidationError("Operation runner providers must be explicit non-proxy functions");
 
   async function preview(intent) { return operationPreview(intent); }
+
+  function reserveReceiptId() {
+    const value=idGenerator("receipt");
+    if (typeof value!=="string" || !/^RECEIPT-[0-9]{8}-[0-9]{4,}$/u.test(value)) {
+      throw new CoreValidationError("Operation receipt id generator returned a non-canonical receipt identity");
+    }
+    return value;
+  }
 
   function verifyAuthorityFor(intent,authority) {
     const valid=validateCoreDocument(clone(intent,"intent"),"operation-intent.v1");
@@ -172,13 +191,26 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
     return verified;
   }
 
-  async function persistFailed(intent,expectedHead,observed_revisions=[]) {
-    const receipt=receiptFor(intent,{receipt_id:idGenerator("receipt"),created_at:clock(),status:"failed",observed_revisions});
-    await commitReceipt({expectedHead,receipt});
+  async function persistFailed(intent,expectedHead,receiptId,observed_revisions=[]) {
+    const receipt=receiptFor(intent,{receipt_id:receiptId,created_at:clock(),status:"failed",observed_revisions});
+    try {
+      await commitReceipt({expectedHead,receipt});
+    } catch (error) {
+      const current=await head();
+      if (current===expectedHead) throw error;
+      const existing=exactReceipt(await findReceipt(intent),intent);
+      if (existing!==null) {
+        if (existing.receipt_id!==receiptId) {
+          throw new CoreConflictError("Operation receipt identity conflicts with concurrent evidence");
+        }
+        return existing;
+      }
+      await commitReceipt({expectedHead:current,receipt});
+    }
     return receipt;
   }
 
-  async function apply(intent,{authority}={}) {
+  async function applyIntent(intent,{authority,receiptId=null}={}) {
     const valid=validateCoreDocument(clone(intent,"intent"),"operation-intent.v1");
     let storedReceipt;
     try { storedReceipt=exactReceipt(await findReceipt(valid),valid); } catch (error) {
@@ -187,6 +219,7 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
       throw error;
     }
     if (storedReceipt) {
+      if (receiptId!==null && storedReceipt.receipt_id!==receiptId) throw new CoreConflictError("Operation receipt identity conflicts with caller-bound evidence");
       if (storedReceipt.status==="failed") throw new CoreRemoteError("Operation has a recorded failed receipt");
       return storedReceipt;
     }
@@ -195,6 +228,11 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
     } else if (authority!==null && authority!==undefined) {
       throw new CoreBlockedError("Operation intent does not declare authority");
     }
+    const localOperations=valid.operations.filter(operation => operation.payload?.kind==="release-program-manifest");
+    if (localOperations.length>1 || (localOperations.length===1 && inspectReleaseProgramOperation===null)) {
+      throw new CoreValidationError("Operation intent contains an unsupported release-program manifest mutation");
+    }
+    const remoteOperations=valid.operations.filter(operation => operation.payload?.kind!=="release-program-manifest");
     let prior;
     try { prior=await findIntent(valid); } catch (error) {
       const conflict=ledgerConflict(error,"intent lookup");
@@ -209,6 +247,9 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
       if (sha256Canonical(storedIntent)!==sha256Canonical(valid)) throw new CoreConflictError("Intent identity conflicts with the ledger");
     }
     let revision=await head();
+    if (prior===null && localOperations.length===1 && revision!==valid.source.revision) {
+      throw new CoreConflictError("Release operation source control revision is stale");
+    }
     try {
       if (prior===null) revision=(await commitIntent({expectedHead:revision,intent:valid})).commit_sha;
     } catch (error) {
@@ -217,20 +258,42 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
       if (error instanceof CoreValidationError || error instanceof CoreBlockedError) throw error;
       throw new CoreInternalError("Control ledger intent commit failed",{cause:error});
     }
+    const selectedReceiptId=receiptId ?? reserveReceiptId();
     let inspected=[];
     try {
-      inspected=observed(await inspect(valid.operations));
-      inspectMatches(valid,inspected);
+      const remoteInspected=remoteOperations.length===0 ? [] : observed(await inspect(remoteOperations));
+      const localInspected=localOperations.length===0 ? [] : [await inspectReleaseProgramOperation(localOperations[0])];
+      inspected=observed([...remoteInspected,...localInspected]);
+      inspectMatches(valid.operations,inspected);
     } catch (error) {
-      try { await persistFailed(valid,revision,inspected); } catch (persistenceError) { throw new CoreRemoteError("GitHub inspection failed and failed receipt could not be persisted",{cause:persistenceError}); }
+      try {
+        const recovered=await persistFailed(valid,revision,selectedReceiptId,inspected);
+        if (recovered.status==="completed") return recovered;
+      } catch (persistenceError) { throw new CoreRemoteError("GitHub inspection failed and failed receipt could not be persisted",{cause:persistenceError}); }
       if (error instanceof CoreConflictError) throw error;
       if (error instanceof CoreValidationError) throw error;
       throw new CoreRemoteError("GitHub inspection failed",{cause:error});
     }
+    let appliedObservations=[];
     try {
-      const result=remoteResult(await applyRemote(valid.operations,{idempotencyKey:sha256Canonical(valid)}),valid);
-      const receipt=receiptFor(valid,{receipt_id:idGenerator("receipt"),created_at:clock(),status:result.status,observed_revisions:result.observed_revisions});
-      await commitReceipt({expectedHead:revision,receipt});
+      const result=remoteOperations.length===0
+        ? Object.freeze({status:"completed",observed_revisions:Object.freeze([])})
+        : remoteResult(await applyRemote(remoteOperations,{idempotencyKey:sha256Canonical(valid)}),remoteOperations);
+      appliedObservations=result.observed_revisions;
+      const localObserved=localOperations.map(operation => Object.freeze({
+        operation_id:operation.operation_id,
+        repository:operation.repository,
+        revision:operation.payload.program.revision,
+      }));
+      const completedObservations=result.status==="completed"
+        ? observed([...result.observed_revisions,...localObserved])
+        : result.observed_revisions;
+      const receipt=receiptFor(valid,{receipt_id:selectedReceiptId,created_at:clock(),status:result.status,observed_revisions:completedObservations});
+      if (localOperations.length===1 && result.status==="completed") {
+        await commitReleaseProgramReceipt({expectedHead:revision,operation:localOperations[0],receipt});
+      } else {
+        await commitReceipt({expectedHead:revision,receipt});
+      }
       if (result.status==="failed") {
         const error=new CoreRemoteError("GitHub apply reported an incomplete or failed outcome");
         persistedFailureErrors.add(error);
@@ -239,11 +302,18 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
       return receipt;
     } catch (error) {
       if (error && typeof error==="object" && persistedFailureErrors.has(error)) throw error;
-      try { await persistFailed(valid,revision,[]); } catch (persistenceError) { throw new CoreRemoteError("GitHub apply failed and failed receipt could not be persisted",{cause:persistenceError}); }
+      try {
+        const recovered=await persistFailed(valid,revision,selectedReceiptId,appliedObservations);
+        if (recovered.status==="completed") return recovered;
+      } catch (persistenceError) { throw new CoreRemoteError("GitHub apply failed and failed receipt could not be persisted",{cause:persistenceError}); }
       if (error instanceof CoreRemoteError) throw error;
       if (error instanceof CoreValidationError || error instanceof CoreConflictError) throw error;
       throw new CoreRemoteError("GitHub apply failed",{cause:error});
     }
+  }
+
+  async function apply(intent,{authority}={}) {
+    return applyIntent(intent,{authority});
   }
 
   async function execute(input) {
@@ -264,10 +334,12 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
     }
     const request=clone(clean,"execute request");
     const requestKeys=Object.keys(request).sort();
-    const allowed=["authority","command","operations","source"];
-    if (canonicalJson(requestKeys)!==canonicalJson(allowed)) {
+    const required=["authority","command","operations","source"];
+    const allowed=[...required,"receipt_id"].sort();
+    if (required.some(key => !Object.hasOwn(request,key)) || requestKeys.some(key => !allowed.includes(key))) {
       throw new CoreValidationError("Operation execute request must use an exact closed shape");
     }
+    if (Object.hasOwn(request,"receipt_id") && (typeof request.receipt_id!=="string" || !/^RECEIPT-[0-9]{8}-[0-9]{4,}$/u.test(request.receipt_id))) throw new CoreValidationError("Operation execute receipt identity must be canonical");
     let commandValue;
     try { commandValue=validateParsedCoreCommand(request.command); } catch (error) {
       throw new CoreValidationError("Operation command is not an exact normalized core command",{cause:error});
@@ -279,7 +351,7 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
     const previewValue=await preview(intent);
     if (!commandValue.options.apply || commandValue.options.dryRun) return previewValue;
     if (confirmation!==undefined && await Reflect.apply(confirmation,undefined,[previewValue])!==true) throw new CoreBlockedError("Interactive apply was not confirmed");
-    return apply(intent,{authority:suppliedAuthority});
+    return applyIntent(intent,{authority:suppliedAuthority,receiptId:request.receipt_id ?? null});
   }
-  return Object.freeze({preview,apply,execute,verifyAuthorityFor});
+  return Object.freeze({preview,apply,execute,reserveReceiptId,verifyAuthorityFor});
 }

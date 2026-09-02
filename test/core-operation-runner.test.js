@@ -30,6 +30,36 @@ test("operation intents canonicalize logical operation order before hashing",() 
   assert.equal(operationPreview(first).intent_sha256,operationPreview(second).intent_sha256);
 });
 
+test("mixed legacy and release operations retain one transitive canonical order",() => {
+  const common={
+    intent_id:"INTENT-20260901-0002",created_at:"2026-09-01T08:00:00.000Z",
+    command:"release.activate",policy_revision:"POLICY-0001",
+    source:{repository:"TOSS-Soft/control",revision:"control-1",sha256:"a".repeat(64)},
+    authority:null,
+  };
+  const operations=[
+    {resource:"milestone",action:"create",repository:"TOSS-Soft/z",expected_revision:"z-1",
+      payload:{kind:"release-milestone"}},
+    {resource:"branch",action:"create",repository:"TOSS-Soft/a",expected_revision:"a-1",
+      payload:{kind:"release-branch"}},
+    {resource:"issue",action:"update",repository:"TOSS-Soft/m",expected_revision:"m-1",
+      payload:{kind:"legacy-work"}},
+  ];
+  const permutations=[
+    operations,
+    [operations[0],operations[2],operations[1]],
+    [operations[1],operations[0],operations[2]],
+    [operations[1],operations[2],operations[0]],
+    [operations[2],operations[0],operations[1]],
+    [operations[2],operations[1],operations[0]],
+  ];
+  const canonical=permutations.map(values => createOperationIntent({...common,operations:values}).operations);
+  for (const value of canonical.slice(1)) assert.deepEqual(value,canonical[0]);
+  assert.deepEqual(canonical[0].map(value => value.payload.kind),[
+    "legacy-work","release-milestone","release-branch",
+  ]);
+});
+
 test("an expected revision changes the deterministic operation intent hash",() => {
   const first=createOperationIntent(operationInput({expected_revision:"rev-1"}));
   const second=createOperationIntent(operationInput({expected_revision:"rev-2"}));
@@ -508,4 +538,46 @@ test("runner binds canonical operation authority payloads, Project identity, and
   await assert.rejects(run(operations.map(operation => ({...operation,payload:{...operation.payload,authority_binding:tampered}}))),CoreBlockedError);
   await assert.rejects(run([...operations.slice(0,2),{...operations[2],payload:{...operations[2].payload,authority_binding:{...binding,plan:{content_sha256:"b".repeat(64)}}}}]),CoreBlockedError);
   await assert.rejects(run([{...operations[0],expected_revision:"repository-2"},operations[1]]),CoreBlockedError);
+});
+
+test("runner reserves and uses one caller-bound receipt id for completed evidence",async () => {
+  const events=[];
+  const runner=createOperationRunner({
+    control:memoryControl(events),
+    github:{
+      async snapshot() { return {}; },
+      async inspect(operations) {
+        return operations.map(operation => ({
+          operation_id:operation.operation_id,
+          repository:operation.repository,
+          revision:operation.expected_revision,
+        }));
+      },
+      async apply(operations) {
+        return {status:"completed",observed_revisions:operations.map(operation => ({
+          operation_id:operation.operation_id,
+          repository:operation.repository,
+          revision:"rev-2",
+        }))};
+      },
+    },
+    authorityRegistry:null,
+    clock:() => "2026-09-01T08:01:00.000Z",
+    idGenerator:kind => kind==="intent"
+      ? "INTENT-20260901-0001"
+      : "RECEIPT-20260901-0042",
+    policyRevision:() => "POLICY-0001",
+  });
+  const receiptId=runner.reserveReceiptId();
+  assert.equal(receiptId,"RECEIPT-20260901-0042");
+
+  const receipt=await runner.execute({
+    command:parseCoreCommand(["repo","add","TOSS-Soft/toss-cli","--apply","--non-interactive"]),
+    source:operationInput().source,
+    operations:operationInput().operations,
+    authority:null,
+    receipt_id:receiptId,
+  });
+  assert.equal(receipt.receipt_id,receiptId);
+  assert.deepEqual(events,["intent","receipt"]);
 });

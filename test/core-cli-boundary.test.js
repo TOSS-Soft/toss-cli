@@ -303,6 +303,44 @@ test("interactive init and repo add confirm their exact previews before any writ
   assert.equal(prompts.length,2); assert.equal(prompts[0].preview.operations.length,7); assert.equal(prompts[1].preview.operations.length,1);
 });
 
+test("interactive release mutations receive the shared CLI confirmation bridge",async t => {
+  const {root}=await controlRepository(t);
+  const prompts=[];
+  const previews=[];
+  const provider=async () => ({
+    services:{},
+    handlers:{
+      "release.plan":async (command,services) => {
+        const preview={schema_version:"operation-preview.v1",intent_id:"INTENT-20260903-0001",
+          intent_sha256:"a".repeat(64),command:command.name,operations:[]};
+        previews.push(preview);
+        assert.equal(await services.confirm(preview),true);
+        return {status:"confirmed"};
+      },
+      "release.activate":async (command,services) => {
+        const preview={schema_version:"operation-preview.v1",intent_id:"INTENT-20260903-0002",
+          intent_sha256:"b".repeat(64),command:command.name,operations:[]};
+        previews.push(preview);
+        assert.equal(await services.confirm(preview),true);
+        return {status:"confirmed"};
+      },
+    },
+    prompt:async request => { prompts.push(request); return true; },
+  });
+
+  for (const argv of [
+    ["release","plan","--apply","--json"],
+    ["release","activate","TOSS-OS-R0001","--apply","--json"],
+  ]) {
+    const result=await runProgrammatic(argv,{cwd:root,runtimeProvider:provider});
+    assert.equal(result.exitCode,0,result.stderr);
+  }
+  assert.equal(prompts.length,2);
+  assert.deepEqual(prompts.map(value => value.kind),["confirm-apply","confirm-apply"]);
+  assert.deepEqual(prompts.map(value => value.command.name),["release.plan","release.activate"]);
+  assert.deepEqual(prompts.map(value => value.preview),previews);
+});
+
 test("interactive decline receives the exact preview and performs no init or repo-add write",async t => {
   const {root,control}=await controlRepository(t);
   const signer=authoritySigner();
