@@ -3,7 +3,7 @@ import {types} from "node:util";
 import {canonicalJson} from "../../contracts/acp.js";
 import {validateCoreDocument} from "../contracts.js";
 import {CoreValidationError} from "../errors.js";
-import {parseWorkItemId} from "./identity.js";
+import {parseReservedBranch,parseWorkItemId} from "./identity.js";
 
 const SNAPSHOT_KEYS=Object.freeze([
   "schema_version","item","issue_state","drifted","epic_required","prepared",
@@ -31,6 +31,7 @@ const NEXT_COMMANDS=Object.freeze([
   "toss-core release approve",
 ]);
 const SHA=/^[a-f0-9]{40}$/;
+const RELEASE_BRANCH=/^release\/(v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))$/;
 const RFC3339_DATE_TIME=/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-](\d{2}):(\d{2}))$/;
 
 function invalid(message,options={}) {
@@ -162,6 +163,29 @@ function validateProject(project,item) {
   if (item.repository.length===0) invalid("Work state item repository must be non-empty");
 }
 
+function validateAssignedReleaseEvidence(item) {
+  if (item.base_branch===null || item.milestone===null) {
+    invalid("Assigned release work requires an exact governing base branch and milestone");
+  }
+  if (item.kind==="issue") {
+    const parent=validateWorkId(item.parent_id,"Child issue parent");
+    let base;
+    try {
+      base=parseReservedBranch(item.base_branch);
+    } catch (error) {
+      invalid("Child issue base must be the exact native parent epic branch",{cause:error});
+    }
+    if (base.kind!=="epic" || base.issueNumber!==parent.issueNumber) {
+      invalid("Child issue base must be the exact native parent epic branch");
+    }
+    return;
+  }
+  const release=RELEASE_BRANCH.exec(item.base_branch);
+  if (!release || item.milestone!==release[1]) {
+    invalid("Epic and bounded bug milestone must match the exact governing release branch version");
+  }
+}
+
 function validateSnapshot(input) {
   const value=copyClosed(input,"Work state snapshot");
   exactKeys(value,SNAPSHOT_KEYS,"Work state snapshot");
@@ -196,6 +220,7 @@ function validateSnapshot(input) {
   if (value.release.active && !value.release.assigned) {
     invalid("An active release must be assigned");
   }
+  if (value.release.assigned) validateAssignedReleaseEvidence(value.item);
 
   if (!Array.isArray(value.blocking_dependencies)) {
     invalid("Blocking dependencies must be an array");
@@ -266,9 +291,16 @@ function validateSnapshot(input) {
   if (value.authority.epic_acceptance_required && value.item.kind!=="epic") {
     invalid("Epic acceptance authority applies only to an epic");
   }
+  if (value.authority.release_approval_required && value.item.kind==="epic") {
+    invalid("A work-item epic is governed by epic acceptance, not release approval");
+  }
   if ((value.authority.epic_acceptance_required ||
       value.authority.release_approval_required) && value.pull_request?.state!=="READY") {
     invalid("Merge authority requirements apply only to a ready pull request");
+  }
+  if (value.item.kind==="epic" && value.pull_request?.state==="READY" &&
+      value.children_complete && !value.authority.epic_acceptance_required) {
+    invalid("A complete ready epic pull request cannot suppress epic acceptance authority");
   }
 
   validateProject(value.project,value.item);

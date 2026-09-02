@@ -276,6 +276,47 @@ test("first-match precedence follows lifecycle authority instead of incidental e
   assert.equal(deriveWorkItemState(drift).gate,"RECONCILE_REQUIRED");
 });
 
+test("Ready requires exact governing branch and assigned release evidence",() => {
+  const wrongParentBranch=snapshot();
+  wrongParentBranch.item.base_branch="epic/99-wrong-parent";
+
+  const missingChildBase=snapshot();
+  missingChildBase.item.base_branch=null;
+
+  const missingChildMilestone=snapshot();
+  missingChildMilestone.item.milestone=null;
+
+  const missingEpicBase=snapshot("epic");
+  missingEpicBase.item.base_branch=null;
+
+  const missingBugMilestone=snapshot("bug");
+  missingBugMilestone.item.milestone=null;
+
+  const wrongEpicVersion=snapshot("epic");
+  wrongEpicVersion.item.milestone="v2.2.1";
+
+  const wrongBugVersion=snapshot("bug");
+  wrongBugVersion.item.base_branch="release/v2.1.3";
+
+  for (const value of [
+    wrongParentBranch,missingChildBase,missingChildMilestone,missingEpicBase,
+    missingBugMilestone,wrongEpicVersion,wrongBugVersion,
+  ]) {
+    assert.throws(
+      () => deriveWorkItemState(value),
+      error => error instanceof CoreValidationError && error.exitCode===5,
+    );
+  }
+
+  for (const kind of ["issue","epic","bug"]) {
+    const backlog=snapshot(kind);
+    backlog.release={assigned:false,active:false};
+    backlog.item.base_branch=null;
+    backlog.item.milestone=null;
+    assert.equal(deriveWorkItemState(backlog).gate,"RELEASE_PLANNING",kind);
+  }
+});
+
 test("epic child completion controls submit and acceptance eligibility",() => {
   const incomplete=withPhysicalBranch(snapshot("epic"));
   incomplete.children_complete=false;
@@ -296,6 +337,28 @@ test("epic child completion controls submit and acceptance eligibility",() => {
   assert.equal(deriveWorkItemState(submitted).gate,"DEPENDENCY_REQUIRED");
   submitted.children_complete=true;
   assert.equal(deriveWorkItemState(submitted).gate,"EPIC_ACCEPTANCE_REQUIRED");
+});
+
+test("a complete ready epic PR cannot suppress acceptance authority",() => {
+  const suppressed=withCurrentApproval(withPullRequest(snapshot("epic")));
+  assert.throws(
+    () => deriveWorkItemState(suppressed),
+    error => error instanceof CoreValidationError && error.exitCode===5,
+  );
+
+  const valid=withCurrentApproval(withPullRequest(snapshot("epic")));
+  valid.authority.epic_acceptance_required=true;
+  assert.deepEqual(
+    Object.fromEntries(Object.entries(deriveWorkItemState(valid)).filter(([key]) => key!=="reason")),
+    {
+      status:"In review",
+      gate:"EPIC_ACCEPTANCE_REQUIRED",
+      next_command:"toss-core epic accept",
+    },
+  );
+
+  valid.review.reviewed_revision=HEAD_B;
+  assert.equal(deriveWorkItemState(valid).gate,"REVIEW_REQUIRED");
 });
 
 test("merged closed evidence wins over stale readiness review and release flags",() => {
