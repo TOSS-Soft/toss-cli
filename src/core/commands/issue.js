@@ -13,6 +13,7 @@ import {
 import {
   applyReconciliationGate,closedData,ownDataFunction,ownDataValue,reconciliationEvidence,
 } from "./common.js";
+import {runPatchInterruptionStep} from "./release.js";
 
 function confirmation(command,services) {
   if (!command.options.apply || !command.interactive) return undefined;
@@ -26,11 +27,16 @@ function assertUngated(command) {
   if (command.options.authority!==null) throw new CoreValidationError("Issue commands do not accept an authority record");
 }
 
-async function execute(command,services,snapshot,decision,label) {
+async function execute(command,services,snapshot,decision,label,continuation=null) {
   if (decision.operations.length===0) return closedData({status:"already-reconciled",work_item:decision.work.item,state:decision.state ?? null},label);
+  const operations=continuation===null
+    ? decision.operations
+    : [...continuation.operations,...decision.operations];
   const confirm=confirmation(command,services);
   return ownDataFunction(ownDataValue(services,"operations","services"),"execute","operations")({
-    command,source:closedData(snapshot,"issue mutation snapshot").source,operations:decision.operations,authority:null,
+    command,source:continuation?.source ?? closedData(snapshot,"issue mutation snapshot").source,
+    operations,authority:null,
+    ...(continuation===null ? {} : {receipt_id:continuation.receipt_id}),
     ...(confirm===undefined ? {} : {confirm}),
   });
 }
@@ -57,8 +63,21 @@ async function start(command,services) {
   const snapshot=reconciliation.required
     ? closedData({...observed,work:applyReconciliationGate(observed.work,reconciliation)},"reconciliation-gated issue start snapshot")
     : observed;
+  const controlDescriptor=services && typeof services==="object" && !types.isProxy(services)
+    ? Object.getOwnPropertyDescriptor(services,"control") : null;
+  const releaseControlAvailable=controlDescriptor?.enumerable===true &&
+    "value" in controlDescriptor && controlDescriptor.value!==null;
+  let continuation=null;
+  if (!snapshot.work.release.assigned || releaseControlAvailable) {
+    const patchResult=await runPatchInterruptionStep(command,services,snapshot);
+    if (patchResult!==null && patchResult.continue_issue_start!==true) return patchResult;
+    continuation=patchResult;
+  }
   const decision=issueStartOperations({id,snapshot,reconciled_at:ownDataFunction(services,"clock","services")()});
-  return execute(command,services,snapshot,decision,"issue start replay result");
+  const result=await execute(command,services,snapshot,decision,"issue start replay result",continuation);
+  return snapshot.work.item.kind==="bug"
+    ? closedData({...result,next_command:`toss-core issue start ${id}`},"patch bug start result")
+    : result;
 }
 
 async function submit(command,services) {

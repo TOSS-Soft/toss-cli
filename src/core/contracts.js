@@ -1,5 +1,6 @@
 import {types} from "node:util";
 
+import {canonicalJson} from "../contracts/acp.js";
 import {validateDocument} from "../contracts/validator.js";
 
 import {CoreValidationError} from "./errors.js";
@@ -11,6 +12,10 @@ const RELEASE_PRECONDITION_KINDS=Object.freeze(new Map([
   ["release-plan-precondition",{resource:"project",repository:null,
     keys:["kind","project_id","query","snapshot_sha256"]}],
   ["release-activation-precondition",{resource:"project",repository:null,
+    keys:["kind","project_id","query","snapshot_sha256"]}],
+  ["release-patch-precondition",{resource:"project",repository:null,
+    keys:["kind","project_id","query","snapshot_sha256"]}],
+  ["release-patch-completion-precondition",{resource:"project",repository:null,
     keys:["kind","project_id","query","snapshot_sha256"]}],
   ["release-repository-precondition",{resource:"repository",
     keys:["kind","program_id","release_id","snapshot_sha256"]}],
@@ -120,6 +125,107 @@ function assertAggregateQuery(payload) {
     }
     return;
   }
+  if (payload.kind==="release-patch-precondition") {
+    exactOwnKeys(query,["kind","control_revision","bug_id","feature_program",
+      "patch_programs","programs","ledger_sha256","transition_evidence","organization","repositories","repository_configuration",
+      "project"],"release patch query");
+    if (query.kind!=="patch-interruption") {
+      throw new CoreValidationError("Invalid core contract operation-intent.v1: release patch query kind is malformed");
+    }
+    contractString(query.control_revision,"release patch control revision");
+    contractString(query.bug_id,"release patch bug identity");
+    nestedDocument(query.feature_program,"release-program.v1","release patch feature program");
+    nestedDocument(query.organization,"organization-config.v1","release patch organization");
+    nestedDocument(query.repository_configuration,"repository-config.v1","release patch repository");
+    exactOwnKeys(query.project,["node_id","number"],"release patch Project");
+    contractString(query.project.node_id,"release patch Project identity");
+    if (!Number.isSafeInteger(query.project.number) || query.project.number<1 ||
+        !Array.isArray(query.patch_programs) || !Array.isArray(query.programs) ||
+        !Array.isArray(query.repositories) || !/^[a-f0-9]{64}$/u.test(query.ledger_sha256) ||
+        !(query.transition_evidence===null || typeof query.transition_evidence==="object")) {
+      throw new CoreValidationError("Invalid core contract operation-intent.v1: release patch query is malformed");
+    }
+    for (const program of query.programs) nestedDocument(program,"release-program.v1","release patch program");
+    for (const repository of query.repositories) nestedDocument(repository,"repository-config.v1","release patch repository registry");
+    for (const program of query.patch_programs) nestedDocument(program,"release-program.v1","release patch linked program");
+    if (query.transition_evidence!==null) {
+      exactOwnKeys(query.transition_evidence,["program_id","release_id","event","intent","receipt"],
+        "release patch transition evidence");
+      contractString(query.transition_evidence.program_id,"release patch transition program");
+      contractString(query.transition_evidence.release_id,"release patch transition release");
+      if (!(query.transition_evidence.event===null || typeof query.transition_evidence.event==="string") ||
+          !(query.transition_evidence.intent===null || typeof query.transition_evidence.intent==="object") ||
+          !(query.transition_evidence.receipt===null || typeof query.transition_evidence.receipt==="object")) {
+        throw new CoreValidationError("Invalid core contract operation-intent.v1: release patch transition evidence is malformed");
+      }
+      if (query.transition_evidence.intent!==null) nestedDocument(query.transition_evidence.intent,
+        "operation-intent.v1","release patch transition intent");
+      if (query.transition_evidence.receipt!==null) nestedDocument(query.transition_evidence.receipt,
+        "operation-receipt.v1","release patch transition receipt");
+    }
+    assertCanonicalIdentities(query.programs.map(value => value.program_id),"release patch program ids");
+    assertCanonicalIdentities(query.patch_programs.map(value => value.program_id),"release patch linked program ids");
+    const persisted=query.programs.find(value => value.program_id===query.feature_program.program_id);
+    const patches=query.programs.filter(value => value.interrupts!==null);
+    if (canonicalJson(persisted)!==canonicalJson(query.feature_program) ||
+        canonicalJson(patches)!==canonicalJson(query.patch_programs) ||
+        canonicalJson(query.repositories.map(value => value.repository))!==
+          canonicalJson(query.organization.repositories) ||
+        canonicalJson(query.repositories.find(value =>
+          value.repository===query.repository_configuration.repository))!==
+          canonicalJson(query.repository_configuration) ||
+        query.repository_configuration.repository!==query.bug_id.split("#")[0] ||
+        !query.feature_program.repository_releases.some(value =>
+          value.repository===query.repository_configuration.repository) ||
+        payload.project_id!==query.project.node_id ||
+        canonicalJson(query.project)!==canonicalJson(query.organization.project)) {
+      throw new CoreValidationError("Invalid core contract operation-intent.v1: release patch query scope is inconsistent");
+    }
+    return;
+  }
+  if (payload.kind==="release-patch-completion-precondition") {
+    exactOwnKeys(query,["kind","control_revision","control_repository","organization",
+      "repositories","programs","ledger_sha256","patch_program","paused_program",
+      "publication","repository_configuration","project"],"release patch completion query");
+    if (query.kind!=="patch-completion") {
+      throw new CoreValidationError("Invalid core contract operation-intent.v1: release patch completion query kind is malformed");
+    }
+    contractString(query.control_revision,"release patch completion control revision");
+    contractString(query.control_repository,"release patch completion control repository");
+    contractString(query.ledger_sha256,"release patch completion ledger digest",{pattern:/^[a-f0-9]{64}$/u});
+    nestedDocument(query.organization,"organization-config.v1","release patch completion organization");
+    nestedDocument(query.patch_program,"release-program.v1","release patch completion program");
+    nestedDocument(query.paused_program,"release-program.v1","release patch completion paused program");
+    nestedDocument(query.publication,"publication-evidence.v1","release patch completion publication");
+    nestedDocument(query.repository_configuration,"repository-config.v1","release patch completion repository");
+    if (!Array.isArray(query.repositories) || !Array.isArray(query.programs)) {
+      throw new CoreValidationError("Invalid core contract operation-intent.v1: release patch completion registry is malformed");
+    }
+    for (const repository of query.repositories) nestedDocument(repository,
+      "repository-config.v1","release patch completion repository registry");
+    for (const program of query.programs) nestedDocument(program,
+      "release-program.v1","release patch completion program registry");
+    assertCanonicalIdentities(query.repositories.map(value => value.repository),
+      "release patch completion repositories");
+    assertCanonicalIdentities(query.programs.map(value => value.program_id),
+      "release patch completion program ids");
+    exactOwnKeys(query.project,["node_id","number"],"release patch completion Project");
+    if (query.patch_program.interrupts?.program_id!==query.paused_program.program_id ||
+        query.publication.repository!==query.repository_configuration.repository ||
+        query.control_repository!==query.organization.control_repository ||
+        canonicalJson(query.project)!==canonicalJson(query.organization.project) ||
+        canonicalJson(query.repositories.map(value => value.repository))!==canonicalJson(query.organization.repositories) ||
+        canonicalJson(query.repositories.find(value =>
+          value.repository===query.repository_configuration.repository))!==canonicalJson(query.repository_configuration) ||
+        canonicalJson(query.programs.find(value =>
+          value.program_id===query.patch_program.program_id))!==canonicalJson(query.patch_program) ||
+        canonicalJson(query.programs.find(value =>
+          value.program_id===query.paused_program.program_id))!==canonicalJson(query.paused_program) ||
+        payload.project_id!==query.project.node_id) {
+      throw new CoreValidationError("Invalid core contract operation-intent.v1: release patch completion query scope is inconsistent");
+    }
+    return;
+  }
   exactOwnKeys(query,["kind","control_revision","program","repository","repository_configurations","project"],"release activation query");
   if (query.kind!=="release-activation") throw new CoreValidationError("Invalid core contract operation-intent.v1: release activation query kind is malformed");
   contractString(query.control_revision,"release activation control revision");
@@ -177,7 +283,8 @@ function assertReleasePreconditionPayload(operation) {
   if (Object.hasOwn(payload,"draft") && typeof payload.draft!=="boolean") {
     throw new CoreValidationError(`Invalid core contract operation-intent.v1: ${kind}.draft is malformed`);
   }
-  if (["release-plan-precondition","release-activation-precondition"].includes(kind)) {
+  if (["release-plan-precondition","release-activation-precondition",
+    "release-patch-precondition","release-patch-completion-precondition"].includes(kind)) {
     assertAggregateQuery(payload);
   }
 }
@@ -186,11 +293,15 @@ function assertOperationIntentSemantics(value) {
   if (value.schema_version!=="operation-intent.v1") return;
   for (const operation of value.operations) {
     assertReleasePreconditionPayload(operation);
-    if (["release-plan-precondition","release-activation-precondition"].includes(
+    if (["release-plan-precondition","release-activation-precondition",
+      "release-patch-precondition","release-patch-completion-precondition"].includes(
       operation.payload?.kind)) {
       if (operation.payload.query.control_revision!==value.source.revision ||
-          (operation.payload.kind==="release-plan-precondition" &&
-            operation.payload.query.organization.control_repository!==value.source.repository)) {
+          (["release-plan-precondition","release-patch-precondition"].includes(
+            operation.payload.kind) &&
+            operation.payload.query.organization.control_repository!==value.source.repository) ||
+          (operation.payload.kind==="release-patch-completion-precondition" &&
+            operation.payload.query.control_repository!==value.source.repository)) {
         throw new CoreValidationError("Invalid core contract operation-intent.v1: aggregate query does not bind the immutable intent source");
       }
     }

@@ -9,6 +9,7 @@ import YAML from "yaml";
 
 import {canonicalJson,sha256Canonical} from "../src/contracts/acp.js";
 import {createOperationIntent} from "../src/core/operations/plan.js";
+import {createOperationRunner} from "../src/core/operations/runner.js";
 import {createGitControlRepository} from "../src/core/control/git-repository.js";
 import {
   closeDocumentPaths,
@@ -1761,4 +1762,94 @@ test("release program finalization atomically CAS-writes the manifest and its lo
   assert.equal(state.receipts.some(value => value.receipt_id===recorded.receipt_id),true);
   assert.equal(programPath(program.program_id),"programs/TOSS-OS-R0001/manifest.yaml");
   assertDeeplyFrozen(state);
+});
+
+test("release program finalization records an exact unchanged manifest as a receipt-only commit",async t => {
+  const {root,store,bootstrap,head}=await createBootstrappedStore(t);
+  const configuration=repositoryConfig();
+  const configured=await store.commitConfiguration({
+    expectedHead:head,
+    files:{
+      [CONTROL_PATHS.organization]:{...bootstrap.organization,repositories:[configuration.repository]},
+      [repositoryPath(configuration.repository)]:configuration,
+    },
+  });
+  const releaseId="REL-TOSS-OS-R0001-cli";
+  const program={
+    schema_version:"release-program.v1",program_id:"TOSS-OS-R0001",phase:"DRAFT",
+    revision:"REV-0001",
+    repository_releases:[{
+      schema_version:"repository-release.v1",release_id:releaseId,
+      program_id:"TOSS-OS-R0001",repository:configuration.repository,phase:"DRAFT",
+      revision:"REV-0001",version:null,milestone:null,branch:null,release_pr_intent:null,
+      scope:[`${configuration.repository}#10`],publication_evidence:null,transitions:[],
+    }],
+    dependency_stages:[{stage:1,repository_release_ids:[releaseId]}],
+    selected_scope:[{epic_id:`${configuration.repository}#10`,outcome:"release-store",
+      eligibility:{approved:true,unversioned:true,decomposed:true,registered_repository:true,
+        unassigned:true}}],
+    deferred_scope:[],
+    rationale:[{repository:configuration.repository,version:"2.2.0",change_class:"minor",
+      reasons:[{rule:"backward_compatible_feature",scope_ids:[`${configuration.repository}#10`]}]}],
+    interrupts:null,created_at:"2026-09-03T08:00:00.000Z",updated_at:"2026-09-03T08:00:00.000Z",
+  };
+  const manifestIntent=({number,sourceRevision,expectedRevision,nextProgram}) =>
+    createOperationIntent({
+      intent_id:`INTENT-20260903-${number}`,
+      created_at:"2026-09-03T08:00:00.000Z",
+      command:"release.plan",policy_revision:"POLICY-0001",
+      source:{repository:bootstrap.organization.control_repository,
+        revision:sourceRevision,sha256:"a".repeat(64)},
+      authority:null,planned_receipt_id:`RECEIPT-20260903-${number}`,
+      operations:[{resource:"repository",action:"commit",
+        repository:bootstrap.organization.control_repository,
+        expected_revision:expectedRevision,
+        payload:{kind:"release-program-manifest",
+          expected_program_revision:expectedRevision,program:nextProgram}}],
+    });
+  const github={
+    async snapshot() { throw new Error("manifest-only execution must not snapshot GitHub"); },
+    async inspect() { throw new Error("manifest-only execution must not inspect GitHub"); },
+    async apply() { throw new Error("manifest-only execution must not mutate GitHub"); },
+  };
+  const runner=createOperationRunner({
+    control:store,github,authorityRegistry:{keys:[]},
+    clock:() => "2026-09-03T08:00:00.000Z",
+    idGenerator:() => "RECEIPT-20260903-9999",
+    policyRevision:() => "POLICY-0001",
+  });
+
+  const initial=manifestIntent({number:"0100",sourceRevision:configured.commit_sha,
+    expectedRevision:null,nextProgram:program});
+  const initialReceipt=await runner.apply(initial);
+  assert.equal(initialReceipt.status,"completed");
+
+  const beforeUnchanged=await store.head();
+  const unchanged=manifestIntent({number:"0101",sourceRevision:beforeUnchanged,
+    expectedRevision:"REV-0001",nextProgram:program});
+  const unchangedReceipt=await runner.apply(unchanged);
+  const afterUnchanged=await store.head();
+
+  assert.equal(unchangedReceipt.status,"completed");
+  assert.notEqual(afterUnchanged,beforeUnchanged);
+  assert.deepEqual((await store.loadReleasePlanningState()).programs,[program]);
+  assert.equal(canonicalJson(await store.findReceipt(unchanged)),canonicalJson(unchangedReceipt));
+  assert.equal((await git(root,["diff-tree","--no-commit-id","--name-only","-r",afterUnchanged])).stdout,
+    `${receiptPath(unchangedReceipt)}\n`);
+
+  const drifted={...program,updated_at:"2026-09-03T08:01:00.000Z"};
+  const drift=manifestIntent({number:"0102",sourceRevision:afterUnchanged,
+    expectedRevision:"REV-0001",nextProgram:drifted});
+  await assert.rejects(store.inspectReleaseProgramOperation(drift.operations[0]),error =>
+    error?.code==="CONTROL_LEDGER_CONFLICT");
+  assert.equal(await store.head(),afterUnchanged);
+
+  const advanced={...program,revision:"REV-0002",updated_at:"2026-09-03T08:01:00.000Z"};
+  const next=manifestIntent({number:"0103",sourceRevision:afterUnchanged,
+    expectedRevision:"REV-0001",nextProgram:advanced});
+  const nextReceipt=await runner.apply(next);
+  const finalState=await store.loadReleasePlanningState();
+  assert.equal(nextReceipt.status,"completed");
+  assert.equal(finalState.programs[0].revision,"REV-0002");
+  assert.equal(finalState.receipts.some(value => value.receipt_id===nextReceipt.receipt_id),true);
 });

@@ -9,6 +9,7 @@ import {
   releaseReconciliationEvidence,
   releaseStatusResult,
 } from "../release/operations.js";
+import {planPatchInterruption} from "../release/patch.js";
 import {closedData,ownDataFunction,ownDataValue} from "./common.js";
 
 function assertUngated(command) {
@@ -153,6 +154,95 @@ async function activate(command,services) {
     receipt_id:receiptId,
     ...(confirm===undefined ? {} : {confirm}),
   });
+}
+
+function featureProgramForBug(state,repository) {
+  const candidates=state.programs.filter(program => program.interrupts===null &&
+    program.repository_releases.some(release => release.repository===repository &&
+      ["ACTIVE","PAUSED"].includes(release.phase)));
+  if (candidates.length!==1) {
+    throw new CoreConflictError("Bounded production bug requires exactly one active or paused feature release");
+  }
+  return candidates[0];
+}
+
+function patchNextResult(result,id) {
+  return closedData({...result,next_command:`toss-core issue start ${id}`},
+    "patch interruption command result");
+}
+
+function patchTransitionEvidence(state,featureProgram,patchPrograms,repository,id) {
+  const activePatch=patchPrograms.find(program => program.repository_releases.some(release =>
+    release.repository===repository && ["ACTIVE","READY_FOR_APPROVAL","PUBLISHING"].includes(release.phase) &&
+    release.scope.includes(id))) ?? null;
+  const selectedProgram=activePatch ?? (featureProgram.repository_releases.some(release =>
+    release.repository===repository && release.phase==="PAUSED") ? featureProgram : null);
+  if (selectedProgram===null) return null;
+  const release=selectedProgram.repository_releases.find(value => value.repository===repository);
+  const transition=release?.transitions.at(-1) ?? null;
+  const matchingReceipts=transition===null ? [] : state.receipts.filter(value =>
+    value.receipt_id===transition.source_receipt);
+  if (matchingReceipts.length>1) throw new CoreConflictError("Patch transition receipt identity is ambiguous");
+  const receipt=matchingReceipts[0] ?? null;
+  const matchingIntents=receipt===null ? [] : state.intents.filter(value =>
+    value.intent_id===receipt.intent_id);
+  if (matchingIntents.length>1) throw new CoreConflictError("Patch transition intent identity is ambiguous");
+  return closedData({program_id:selectedProgram.program_id,release_id:release.release_id,
+    event:transition?.event ?? null,intent:matchingIntents[0] ?? null,receipt},
+  "patch transition evidence");
+}
+
+export async function runPatchInterruptionStep(command,services,bugSnapshot) {
+  if (bugSnapshot?.work?.item?.kind!=="bug") return null;
+  const id=bugSnapshot.work.item.id;
+  const repository=bugSnapshot.work.item.repository;
+  const state=await planningState(services,{requireResolved:false});
+  assertResolvedReleaseEvidence(state,{repository});
+  const program=featureProgramForBug(state,repository);
+  const operations=ownDataValue(services,"operations","services");
+  const receiptId=ownDataFunction(operations,"reserveReceiptId","operations")();
+  const repositoryConfiguration=state.repositories.find(value =>
+    value.repository===repository) ?? null;
+  if (repositoryConfiguration===null) {
+    throw new CoreConflictError(`Repository is not registered for patch interruption: ${repository}`);
+  }
+  const patchPrograms=state.programs.filter(value => value.interrupts!==null);
+  const transitionEvidence=patchTransitionEvidence(state,program,patchPrograms,repository,id);
+  const ledgerSha256=sha256Canonical({intents:state.intents,receipts:state.receipts});
+  const query=closedData({kind:"patch-interruption",control_revision:state.revision,
+    bug_id:id,feature_program:program,patch_programs:patchPrograms,
+    programs:state.programs,ledger_sha256:ledgerSha256,
+    transition_evidence:transitionEvidence,
+    organization:state.organization,repositories:state.repositories,
+    repository_configuration:repositoryConfiguration,
+    project:state.organization.project},"patch interruption query");
+  const observation=await ownDataFunction(
+    ownDataValue(services,"github","services"),"snapshot","github",
+  )(query);
+  const snapshot=closedData({
+    source:{repository:state.organization.control_repository,revision:state.revision,
+      sha256:sha256Canonical({control:{revision:state.revision,
+        organization:state.organization,repositories:state.repositories,programs:state.programs,
+        ledger_sha256:ledgerSha256},github:observation})},
+    query,observation,receipt_id:receiptId,
+    timestamp:ownDataFunction(services,"clock","services")(),
+  },"patch interruption aggregate snapshot");
+  const decision=planPatchInterruption({bug:bugSnapshot,
+    latestPublished:observation.latest_published,activeFeatureProgram:program,snapshot});
+  const selected=decision.pauseOperations.length>0
+    ? decision.pauseOperations
+    : decision.patchOperations;
+  if (selected.length>0 && selected.every(operation => operation.action==="verify")) {
+    return closedData({continue_issue_start:true,source:snapshot.source,
+      operations:selected,receipt_id:receiptId},"patch issue-start continuation");
+  }
+  if (selected.length===0) return null;
+  const confirm=confirmation(command,services);
+  const result=await ownDataFunction(operations,"execute","operations")({
+    command,source:snapshot.source,operations:selected,authority:null,receipt_id:receiptId,
+    ...(confirm===undefined ? {} : {confirm}),
+  });
+  return patchNextResult(result,id);
 }
 
 export async function runReleaseCommand(command,services) {

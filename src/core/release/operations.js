@@ -178,7 +178,10 @@ function reconciliationFromState(state,{programId,repository}) {
   }
   const evidence=[];
   for (const intent of state.intents) {
-    if (!intent.command.startsWith("release.") ||
+    const releaseOwned=intent.command.startsWith("release.") ||
+      intent.operations.some(operation => ["release-patch-precondition",
+        "release-patch-completion-precondition"].includes(operation.payload?.kind));
+    if (!releaseOwned ||
         !releaseIntentAffects(intent,{programId,repository})) continue;
     const receipt=receipts.get(intent.intent_id) ?? null;
     if (receipt!==null) assertReleaseReceiptCoverage(receipt,intent);

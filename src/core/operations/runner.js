@@ -242,6 +242,10 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
     const githubOperations=valid.operations.filter(operation => operation.payload?.kind!=="release-program-manifest");
     const verifyOperations=githubOperations.filter(operation => operation.action==="verify");
     const mutationOperations=githubOperations.filter(operation => operation.action!=="verify");
+    const controlBound=localOperations.length===1 || verifyOperations.some(operation =>
+      ["release-plan-precondition","release-activation-precondition",
+        "release-patch-precondition","release-patch-completion-precondition"].includes(
+        operation.payload?.kind));
     let prior;
     try { prior=await findIntent(valid); } catch (error) {
       const conflict=ledgerConflict(error,"intent lookup");
@@ -256,7 +260,7 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
       if (sha256Canonical(storedIntent)!==sha256Canonical(valid)) throw new CoreConflictError("Intent identity conflicts with the ledger");
     }
     let revision=await head();
-    if (prior===null && localOperations.length===1 && revision!==valid.source.revision) {
+    if (prior===null && controlBound && revision!==valid.source.revision) {
       throw new CoreConflictError("Release operation source control revision is stale");
     }
     try {

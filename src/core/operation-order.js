@@ -4,6 +4,8 @@ import {compareCanonicalText} from "./canonical-order.js";
 const RELEASE_OPERATION_RANK=Object.freeze(new Map([
   ["release-plan-precondition",-100],
   ["release-activation-precondition",-99],
+  ["release-patch-precondition",-98.5],
+  ["release-patch-completion-precondition",-98.25],
   ["release-repository-precondition",-98],
   ["release-default-branch-precondition",-97],
   ["release-milestone-precondition",-96],
@@ -14,11 +16,14 @@ const RELEASE_OPERATION_RANK=Object.freeze(new Map([
   ["release-project-item-precondition",-91],
   ["release-milestone",10],
   ["release-branch",20],
+  ["release-patch-reconcile",25],
   ["release-program-manifest",30],
   ["release-pull-request",40],
   ["release-assignment",50],
   ["release-epic-branch",60],
   ["release-project-state",70],
+  ["release-patch-review-stale",71],
+  ["release-check-request",72],
 ]));
 
 function nullFirst(left,right) {

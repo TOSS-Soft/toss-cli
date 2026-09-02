@@ -777,6 +777,10 @@ export function createCoreControlStore({repository}) {
     }
     if (current===null) {
       if (program.revision!=="REV-0001") throw new TypeError("new release program must begin at REV-0001");
+    } else if (program.revision===current.revision) {
+      if (!equivalent(program,current)) {
+        throw ledgerConflict(`release program same-revision content conflict: ${program.program_id}`);
+      }
     } else if (program.revision!==nextReleaseRevision(current.revision) ||
         program.created_at!==current.created_at) {
       throw new TypeError("release program update must advance once and retain its creation time");
