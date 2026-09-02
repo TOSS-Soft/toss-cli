@@ -4,6 +4,7 @@ import test from "node:test";
 
 import {dispatchCoreCommand,parseCoreCommand} from "../src/core/commands/router.js";
 import {canonicalJson,sha256Canonical} from "../src/contracts/acp.js";
+import {createOperationIntent} from "../src/core/operations/plan.js";
 import {createOperationRunner} from "../src/core/operations/runner.js";
 import {createCoreGithubFixture} from "./support/core-github-fixture.js";
 
@@ -22,7 +23,7 @@ const work=Object.freeze({
   physical_branch:Object.freeze({exists:false,head_sha:null}),pull_request:null,review:null,checks:null,
   authority:Object.freeze({epic_acceptance_required:false,release_approval_required:false}),
   project:Object.freeze({project_id:"PVT_TOSS_OS_2",item_id:"PVTI_42",revision:"project-1",
-    fields:Object.freeze({Status:"Backlog",Gate:"EPIC_PREPARATION_REQUIRED",branch:"epic/42-organizational-lifecycle",base_branch:null,last_reconciled_at:"2026-09-02T08:00:00.000Z"})}),
+    fields:Object.freeze({Status:"Backlog",Gate:"EPIC_PREPARATION_REQUIRED",repository:"TOSS-Soft/toss-cli",parent:null,milestone:null,branch:"epic/42-organizational-lifecycle",base_branch:null,last_reconciled_at:"2026-09-02T08:00:00.000Z"})}),
 });
 const emptyDependency=Object.freeze({kind:"dependency-graph",source:Object.freeze({repository:"TOSS-Soft/toss-os-control",revision:"dependency-1",sha256:"b".repeat(64)}),revision:"dependency-1",root:null,nodes:Object.freeze([EPIC]),edges:Object.freeze([]),completed_ids:Object.freeze([]),relationships:Object.freeze([]),tombstones:Object.freeze([]),next_edge_revision:"edge-2"});
 
@@ -40,7 +41,7 @@ function completedChildEvidence({revision,projectRevision,head,release}) {
       pull_request:{state:"MERGED",head_sha:head,merged_sha:head},review:null,checks:null,
       authority:{epic_acceptance_required:false,release_approval_required:false},
       project:{project_id:"PVT_TOSS_OS_2",item_id:"PVTI_43",revision:projectRevision,
-        fields:{Status:"Done",Gate:"NONE",branch:child.branch,base_branch:child.base_branch,last_reconciled_at:"2026-09-02T08:00:00.000Z"}},
+        fields:{Status:"Done",Gate:"NONE",repository:child.repository,parent:child.parent_id,milestone:item.milestone,branch:child.branch,base_branch:child.base_branch,last_reconciled_at:"2026-09-02T08:00:00.000Z"}},
     },
     native_parent_id:EPIC,projected:true,
   };
@@ -56,6 +57,9 @@ function memoryControl() {
     async head() { return head; },
     async findIntent(value) { return intents.get(value.intent_id) ?? null; },
     async findReceipt(value) { return receipts.get(value.intent_id) ?? null; },
+    async loadOperationState() {
+      return {revision:head,intents:[...intents.values()].map(value => structuredClone(value)),receipts:[...receipts.values()].map(value => structuredClone(value))};
+    },
     async commitIntent({expectedHead,intent}) {
       assert.equal(expectedHead,head);
       intents.set(intent.intent_id,structuredClone(intent));
@@ -73,6 +77,28 @@ function memoryControl() {
   });
 }
 
+function immutableApprovalControl(binding,id) {
+  const intent=createOperationIntent({
+    intent_id:"INTENT-20260902-0998",created_at:"2026-09-02T07:00:00.000Z",
+    command:"epic.approve",policy_revision:"POLICY-0001",
+    source:{repository:"TOSS-Soft/toss-cli",revision:"repository-approval",sha256:"9".repeat(64)},
+    authority:{record_id:"AUTH-20260902-0998",sha256:"8".repeat(64)},
+    operations:[{resource:"issue",action:"update",repository:"TOSS-Soft/toss-cli",
+      expected_revision:binding.epic.revision,
+      payload:{kind:"epic-approve",authority_binding:binding,work:{item:{id}}}}],
+  });
+  const receipt={
+    schema_version:"operation-receipt.v1",document_type:"operation-receipt",
+    receipt_id:"RECEIPT-20260902-0998",intent_id:intent.intent_id,
+    intent_sha256:sha256Canonical(intent),created_at:"2026-09-02T07:01:00.000Z",
+    status:"completed",observed_revisions:[{operation_id:intent.operations[0].operation_id,
+      repository:"TOSS-Soft/toss-cli",revision:"issue-approval-complete"}],
+  };
+  return {async loadOperationState() {
+    return {revision:"control-approval",intents:[intent],receipts:[receipt]};
+  }};
+}
+
 function fakeHarness(inputs,{authorityRegistry={keys:[]},authorities={}}={}) {
   const fixture=createCoreGithubFixture();
   const control=memoryControl();
@@ -84,7 +110,7 @@ function fakeHarness(inputs,{authorityRegistry={keys:[]},authorities={}}={}) {
     policyRevision:() => "POLICY-0001",
   });
   const services=Object.freeze({
-    github:fixture.github,operations:runner,clock:() => "2026-09-02T08:00:00.000Z",
+    control,github:fixture.github,operations:runner,clock:() => "2026-09-02T08:00:00.000Z",
     policyRevision:() => "POLICY-0001",
     async readInput(path) { return structuredClone(inputs[path]); },
     async readAuthority(path) { return structuredClone(authorities[path]); },
@@ -103,7 +129,7 @@ function signedAuthority(privateKey,{record_id,command,targets,expected_revision
   return {...unsigned,signature:{algorithm:"ed25519",key_id:"approver",value:sign(null,Buffer.from(canonicalJson(unsigned)),privateKey).toString("base64")}};
 }
 
-async function approvedFakeHarness({children=[child],dependencies=[]}={}) {
+async function approvedFakeHarness({children=[child],dependencies=[],approvalConfirmation=null}={}) {
   const plan={plan_id:"EPIC-PLAN-0042",created_at:"2026-09-01T10:00:00.000Z",source:{repository:"TOSS-Soft/toss-cli",revision:"feature-request@42",sha256:"a".repeat(64)},epic:work.item,children,dependencies};
   const {privateKey,publicKey}=generateKeyPairSync("ed25519");
   const authorities={};
@@ -121,7 +147,7 @@ async function approvedFakeHarness({children=[child],dependencies=[]}={}) {
     epic:{id:EPIC,revision:epic.revision},
     plan:{plan_id:epic.epic_plan.plan_id,content_sha256:epic.epic_plan.content_sha256},
     children:children.map(planned => ({id:planned.id,revision:repository.issues.find(value => value.work.item.id===planned.id).revision})).sort((left,right) => left.id.localeCompare(right.id)),
-    edges:dependencies.map(edge => ({edge_id:edge.edge_id,revision:edge.revision})).sort((left,right) => left.edge_id.localeCompare(right.edge_id)),
+    edges:epic.epic_plan.edges.map(edge => ({edge_id:edge.edge_id,revision:edge.revision})),
     project:{id:preparedView.project.id,revision:preparedView.project.revision},policy_revision:"POLICY-0001",
   };
   authorities["approve.json"]=signedAuthority(privateKey,{
@@ -129,8 +155,12 @@ async function approvedFakeHarness({children=[child],dependencies=[]}={}) {
     targets:["TOSS-Soft/toss-cli",preparedView.project.id,`binding:${sha256Canonical(binding)}`],
     expected_revisions:[{repository:"TOSS-Soft/toss-cli",revision:epic.revision},{repository:null,revision:preparedView.project.revision}],
   });
-  await dispatchCoreCommand(parseCoreCommand(["epic","approve",EPIC,"--authority","approve.json","--apply","--non-interactive"]),{services:state.services});
-  return {...state,plan,privateKey,authorities,inputs};
+  const approvalArgv=["epic","approve",EPIC,"--authority","approve.json","--apply",
+    ...(approvalConfirmation===null ? ["--non-interactive"] : [])];
+  const approvalResult=await dispatchCoreCommand(parseCoreCommand(approvalArgv),{
+    services:state.services,...(approvalConfirmation===null ? {} : {confirm:approvalConfirmation}),
+  });
+  return {...state,plan,privateKey,authorities,inputs,approvalResult};
 }
 
 async function reviewedEpicHarness({children=[child],dependencies=[],completionOrder=children}={}) {
@@ -240,6 +270,98 @@ test("epic prepare normalizes the exact plan and persists a preparation intent",
   assert.equal(preparation.payload.work.item.gate,"EPIC_APPROVAL_REQUIRED");
 });
 
+test("epic prepare validates the complete post-intent organization DAG and existing external targets",async () => {
+  const external=`TOSS-Soft/toss-cli#99`;
+  const edge=(source,target,suffix) => ({
+    schema_version:"dependency-edge.v1",edge_id:`DEP-${suffix}`,source,target,kind:"requires",
+    rationale:"The complete organization graph must remain acyclic.",
+    provenance:{source_revision:"feature-request@42",source_sha256:"a".repeat(64),locations:[`dependencies[${suffix}]`]},
+    revision:`EDGE-${suffix}@1`,
+  });
+  const cases=[
+    {
+      label:"combined cycle",
+      desired:edge(child.id,external,"child-external"),
+      dependency:{...structuredClone(emptyDependency),nodes:[EPIC,child.id,external],
+        edges:[edge(external,child.id,"external-child")],
+        relationships:[{edge_id:"DEP-external-child",source:external,target:child.id,revision:"EDGE-external-child@1"}]},
+    },
+    {
+      label:"dangling external target",
+      desired:edge(child.id,external,"missing-external"),
+      dependency:{...structuredClone(emptyDependency),nodes:[EPIC]},
+    },
+  ];
+
+  for (const item of cases) {
+    const plan={plan_id:"EPIC-PLAN-0042",created_at:"2026-09-01T10:00:00.000Z",
+      source:{repository:"TOSS-Soft/toss-cli",revision:"feature-request@42",sha256:"a".repeat(64)},
+      epic:work.item,children:[child],dependencies:[item.desired]};
+    let executed=false;
+    const services={
+      async readInput() { return plan; },
+      github:{async snapshot() { return {kind:"epic-prepare",source:{repository:"TOSS-Soft/toss-cli",revision:"repository-1",sha256:"b".repeat(64)},epic:work,epic_plan:null,epic_approval:null,preparation:{revision:"repository-1",children:[],relationships:[]},dependency:item.dependency}; }},
+      operations:{async execute() { executed=true; return {status:"completed"}; }},
+    };
+
+    const result=await dispatchCoreCommand(parseCoreCommand(["epic","prepare",EPIC,"--from","plan.json"]),{services});
+
+    assert.equal(result.exitCode,5,item.label);
+    assert.equal(executed,false,item.label);
+  }
+});
+
+test("epic prepare replaces stale completion and blocker caches with the exact prepared scope",async () => {
+  const stale=structuredClone(work);
+  stale.children_complete=true;
+  stale.blocking_dependencies=[`${EPIC.slice(0,EPIC.lastIndexOf("#"))}#99`];
+  const plan={plan_id:"EPIC-PLAN-0042",created_at:"2026-09-01T10:00:00.000Z",
+    source:{repository:"TOSS-Soft/toss-cli",revision:"feature-request@42",sha256:"a".repeat(64)},
+    epic:work.item,children:[child],dependencies:[]};
+  let request;
+  const services={
+    async readInput() { return plan; },
+    github:{async snapshot() { return {kind:"epic-prepare",source:{repository:"TOSS-Soft/toss-cli",revision:"repository-1",sha256:"b".repeat(64)},epic:stale,epic_plan:null,epic_approval:null,preparation:{revision:"repository-1",children:[],relationships:[]},dependency:{...structuredClone(emptyDependency),nodes:[EPIC,child.id]}}; }},
+    operations:{async execute(input) { request=input; return {status:"completed"}; }},
+  };
+
+  const result=await dispatchCoreCommand(parseCoreCommand(["epic","prepare",EPIC,"--from","plan.json"]),{services});
+
+  assert.equal(result.exitCode,0,result.result.error?.message);
+  const projected=request.operations.find(value => value.payload.kind==="epic-prepare").payload.work;
+  assert.equal(projected.children_complete,false);
+  assert.deepEqual(projected.blocking_dependencies,[]);
+});
+
+test("epic preparation scopes managed markers to their exact verified parent",async () => {
+  const state=await approvedFakeHarness();
+  const secondId="TOSS-Soft/toss-cli#50";
+  const second=structuredClone(work);
+  second.item.id=secondId;
+  second.item.issue_number=50;
+  second.item.branch="epic/50-second-parent";
+  second.project.item_id="PVTI_50";
+  second.project.revision=state.fixture.view().project.revision;
+  second.project.fields.branch=second.item.branch;
+  state.fixture.seedWork(second);
+  const secondChild={...child,id:"TOSS-Soft/toss-cli#51",issue_number:51,
+    parent_id:secondId,branch:"issue/51-second-parent-child",base_branch:second.item.branch};
+  state.inputs["second-plan.json"]={
+    plan_id:"EPIC-PLAN-0050",created_at:"2026-09-02T09:00:00.000Z",
+    source:{repository:"TOSS-Soft/toss-cli",revision:"feature-request@50",sha256:"5".repeat(64)},
+    epic:second.item,children:[secondChild],dependencies:[],
+  };
+
+  const snapshot=await state.fixture.github.snapshot({kind:"epic-prepare",id:secondId});
+  assert.deepEqual(snapshot.preparation.children,[]);
+  assert.deepEqual(snapshot.preparation.relationships,[]);
+  const result=await dispatchCoreCommand(
+    parseCoreCommand(["epic","prepare",secondId,"--from","second-plan.json","--apply","--non-interactive"]),
+    {services:state.services},
+  );
+  assert.equal(result.exitCode,0,result.result.error?.message);
+});
+
 test("epic approve rejects unprepared work and missing prepared-scope evidence",async () => {
   const plan={schema_version:"epic-plan.v1",plan_id:"EPIC-PLAN-0042",created_at:"2026-09-01T10:00:00.000Z",source:{repository:"TOSS-Soft/toss-cli",revision:"feature-request@42",sha256:"a".repeat(64)},epic:work.item,children:[child],edges:[]};
   plan.content_sha256=sha256Canonical({...plan});
@@ -262,6 +384,37 @@ test("epic approve rejects unprepared work and missing prepared-scope evidence",
   assert.equal(calls.length,0);
 });
 
+test("epic approval keys valid multi-edge evidence independently of plan sort order",async () => {
+  const third={...child,id:"TOSS-Soft/toss-cli#45",issue_number:45,
+    branch:"issue/45-third-child",acceptance_criteria:["The shared target is governed."]};
+  const edges=[
+    {...dependencyEdge,edge_id:"DEP-Z-FIRST-SOURCE",source:child.id,target:third.id,
+      revision:"EDGE-Z@1",provenance:{...dependencyEdge.provenance,locations:["dependencies[0]"]}},
+    {...dependencyEdge,edge_id:"DEP-A-SECOND-SOURCE",source:dependentChild.id,target:third.id,
+      revision:"EDGE-A@1",provenance:{...dependencyEdge.provenance,locations:["dependencies[1]"]}},
+  ];
+  const state=await approvedFakeHarness({children:[child,dependentChild,third],dependencies:edges});
+
+  const result=await dispatchCoreCommand(
+    parseCoreCommand(["epic","approve",EPIC,"--authority","approve.json","--apply","--non-interactive"]),
+    {services:state.services},
+  );
+  assert.equal(result.exitCode,0,result.result.error?.message);
+  const epic=state.fixture.view().repositories[0].issues.find(value => value.work.item.id===EPIC);
+  assert.equal(epic.work.scope_approved,true);
+});
+
+test("epic approval routes its interactive final preview through the shared confirmation bridge",async () => {
+  const previews=[];
+  const state=await approvedFakeHarness({approvalConfirmation:async preview => {
+    previews.push(preview);
+    return true;
+  }});
+  assert.equal(state.approvalResult.exitCode,0,state.approvalResult.result.error?.message);
+  assert.equal(previews.length,1);
+  assert.equal(previews[0].command,"epic.approve");
+});
+
 test("epic submit targets only the active same-repository release branch after all children complete",async () => {
   const approved=structuredClone(work); approved.prepared=true; approved.scope_approved=true; approved.children_complete=true;
   approved.item.status="Ready"; approved.item.gate="NONE"; approved.item.base_branch="release/v2.1.2"; approved.item.milestone="v2.1.2";
@@ -273,7 +426,7 @@ test("epic submit targets only the active same-repository release branch after a
   plan.content_sha256=sha256Canonical({...plan});
   const approval={epic:{id:EPIC,revision:"issue-42-2"},plan:{plan_id:plan.plan_id,content_sha256:plan.content_sha256},children:[{id:child.id,revision:"issue-43-1"}],edges:[],project:{id:"PVT_TOSS_OS_2",revision:"project-1"},policy_revision:"POLICY-0001"};
   const calls=[];
-  const services={policyRevision:() => "POLICY-0001",github:{async snapshot() { return {kind:"epic-submit",source:{repository:"TOSS-Soft/toss-cli",revision:"repository-3",sha256:"d".repeat(64)},epic:approved,epic_revision:"issue-42-3",plan,epic_approval:approval,children:[completedChildEvidence({revision:"issue-43-3",projectRevision:"project-2",head:"c".repeat(40),release:approved.release})],edges:[],release:approved.release,branch:{name:approved.item.branch,base_branch:"release/v2.1.2",head_sha:"d".repeat(40),revision:"branch-1"},pull_request:null,project:{id:"PVT_TOSS_OS_2",revision:"project-2"}}; }},operations:{async execute(input) { calls.push(input); return {status:"completed"}; }}};
+  const services={control:immutableApprovalControl(approval,EPIC),policyRevision:() => "POLICY-0001",github:{async snapshot() { return {kind:"epic-submit",source:{repository:"TOSS-Soft/toss-cli",revision:"repository-3",sha256:"d".repeat(64)},epic:approved,epic_revision:"issue-42-3",plan,epic_approval:approval,children:[completedChildEvidence({revision:"issue-43-3",projectRevision:"project-2",head:"c".repeat(40),release:approved.release})],edges:[],release:approved.release,branch:{name:approved.item.branch,base_branch:"release/v2.1.2",head_sha:"d".repeat(40),revision:"branch-1"},pull_request:null,project:{id:"PVT_TOSS_OS_2",revision:"project-2"}}; }},operations:{async execute(input) { calls.push(input); return {status:"completed"}; }}};
   const result=await dispatchCoreCommand(parseCoreCommand(["epic","submit",EPIC,"--apply","--non-interactive"]),{services});
   assert.equal(result.exitCode,0,result.result.data?.message ?? result.result.error?.message);
   assert.equal(calls[0].operations[0].payload.base,"release/v2.1.2");
@@ -294,7 +447,7 @@ test("epic accept binds the current reviewed passing pull request before complet
   accepted.authority.epic_acceptance_required=true;
   accepted.project.revision="project-3";
   Object.assign(accepted.project.fields,{Status:"In review",Gate:"EPIC_ACCEPTANCE_REQUIRED",base_branch:"release/v2.1.2"});
-  const services={async readAuthority() { return {record_id:"AUTH-2",sha256:"a".repeat(64)}; },policyRevision:() => "POLICY-0001",github:{async snapshot() { return {kind:"epic-accept",source:{repository:"TOSS-Soft/toss-cli",revision:"repository-4",sha256:"f".repeat(64)},epic:accepted,epic_revision:"issue-42-4",plan,epic_approval:approval,children:[completedChildEvidence({revision:"issue-43-3",projectRevision:"project-3",head:"e".repeat(40),release:accepted.release})],edges:[],release:accepted.release,branch:{name:accepted.item.branch,base_branch:"release/v2.1.2",head_sha:head,revision:"branch-2"},pull_request:{id:"TOSS-Soft/toss-cli#42",number:42,revision:"pr-1",head_sha:head,head:work.item.branch,base:"release/v2.1.2",head_repository:"TOSS-Soft/toss-cli",base_repository:"TOSS-Soft/toss-cli",state:"READY",merged_sha:null},review:{id:"REVIEW-1",record_revision:"review-1",reviewed_revision:head,verdict:"APPROVED",independent:true,formal:true,reviewer:"reviewer"},checks:{state:"PASSED",revision:head,observation:"checks-1"},project:{id:"PVT_TOSS_OS_2",revision:"project-3"}}; }},operations:{async execute(input) { calls.push(input); return {status:"completed"}; }}};
+  const services={control:immutableApprovalControl(approval,EPIC),async readAuthority() { return {record_id:"AUTH-2",sha256:"a".repeat(64)}; },policyRevision:() => "POLICY-0001",github:{async snapshot() { return {kind:"epic-accept",source:{repository:"TOSS-Soft/toss-cli",revision:"repository-4",sha256:"f".repeat(64)},epic:accepted,epic_revision:"issue-42-4",plan,epic_approval:approval,children:[completedChildEvidence({revision:"issue-43-3",projectRevision:"project-3",head:"e".repeat(40),release:accepted.release})],edges:[],release:accepted.release,branch:{name:accepted.item.branch,base_branch:"release/v2.1.2",head_sha:head,revision:"branch-2"},pull_request:{id:"TOSS-Soft/toss-cli#42",number:42,revision:"pr-1",head_sha:head,head:work.item.branch,base:"release/v2.1.2",head_repository:"TOSS-Soft/toss-cli",base_repository:"TOSS-Soft/toss-cli",state:"READY",merged_sha:null},review:{id:"REVIEW-1",record_revision:"review-1",reviewed_revision:head,verdict:"APPROVED",independent:true,formal:true,reviewer:"reviewer"},checks:{state:"PASSED",revision:head,observation:"checks-1"},project:{id:"PVT_TOSS_OS_2",revision:"project-3"}}; }},operations:{async execute(input) { calls.push(input); return {status:"completed"}; }}};
   const result=await dispatchCoreCommand(parseCoreCommand(["epic","accept",EPIC,"--authority","authority.json","--apply","--non-interactive"]),{services});
   assert.equal(result.exitCode,0,result.result.data?.message ?? result.result.error?.message);
   assert.equal(calls[0].operations[0].payload.kind,"epic-accept");
@@ -441,8 +594,8 @@ test("fake release assignment activates the approved epic hierarchy on one same-
   assert.equal(childSnapshot.work.item.status,"Ready");
   assert.equal(childSnapshot.work.item.gate,"NONE");
   const approvalReplay=await dispatchCoreCommand(parseCoreCommand(["epic","approve",EPIC,"--authority","approve.json","--apply","--non-interactive"]),{services});
-  assert.equal(approvalReplay.exitCode,0,approvalReplay.result.error?.message);
-  assert.equal(approvalReplay.result.data.status,"already-reconciled");
+  assert.equal(approvalReplay.exitCode,4);
+  assert.match(approvalReplay.result.error.message,/DEPENDENCY_REQUIRED/u);
 });
 
 test("fake child completion merges the exact governed PR into its epic and closes native work",async () => {
@@ -496,6 +649,27 @@ test("public epic submit creates one replay-safe PR only against the active rele
   assert.equal(replay.result.data.status,"already-reconciled");
   assert.equal(control.events.length,eventCount);
   assert.equal(fixture.view().repositories.find(value => value.repository==="TOSS-Soft/toss-cli").pull_requests.filter(value => value.work_item_id===EPIC).length,1);
+});
+
+test("epic submit atomically projects its ready PR acceptance authority and Project review state",async () => {
+  const {fixture,services}=await approvedFakeHarness();
+  fixture.assignActiveRelease(EPIC,"v2.1.2");
+  await dispatchCoreCommand(parseCoreCommand(["issue","start",child.id,"--apply","--non-interactive"]),{services});
+  fixture.setBranchHead("TOSS-Soft/toss-cli",child.branch,"d".repeat(40));
+  await dispatchCoreCommand(parseCoreCommand(["issue","submit",child.id,"--apply","--non-interactive"]),{services});
+  fixture.mergeWorkPullRequest(child.id);
+
+  const submitted=await dispatchCoreCommand(parseCoreCommand(["epic","submit",EPIC,"--apply","--non-interactive"]),{services});
+  assert.equal(submitted.exitCode,0,submitted.result.error?.message);
+  const snapshot=await fixture.github.snapshot({kind:"work-item",id:EPIC});
+  assert.equal(snapshot.work.pull_request.state,"READY");
+  assert.equal(snapshot.work.pull_request.head_sha,snapshot.work.physical_branch.head_sha);
+  assert.equal(snapshot.work.authority.epic_acceptance_required,true);
+  assert.equal(snapshot.work.authority.release_approval_required,false);
+  assert.equal(snapshot.work.item.status,"In review");
+  assert.equal(snapshot.work.item.gate,"EPIC_ACCEPTANCE_REQUIRED");
+  assert.equal(snapshot.work.project.fields.Status,"In review");
+  assert.equal(snapshot.work.project.fields.Gate,"EPIC_ACCEPTANCE_REQUIRED");
 });
 
 test("epic submit requires each closed child to be semantically Done at its exact merged head and Project state",async () => {
@@ -764,7 +938,74 @@ test("epic acceptance records failed reconciliation when Project Done fails afte
   assert.equal(pull.state,"MERGED");
   assert.equal(epic.work.issue_state,"CLOSED");
   assert.notEqual(epic.work.project.fields.Status,"Done");
-  assert.equal(state.control.events.at(-1).value.status,"failed");
+  const receipt=state.control.events.at(-1).value;
+  const intent=state.control.events.at(-2).value;
+  const completed=intent.operations.find(value => value.payload.kind==="epic-accept");
+  assert.equal(receipt.status,"failed");
+  assert.deepEqual(receipt.observed_revisions.map(value => value.operation_id),[completed.operation_id]);
+  assert.notEqual(receipt.observed_revisions[0].revision,completed.expected_revision);
+
+  const status=await dispatchCoreCommand(parseCoreCommand(["epic","status",EPIC]),{services:state.services});
+  assert.equal(status.exitCode,0,status.result.error?.message);
+  assert.equal(status.result.data.state.status,"Blocked");
+  assert.equal(status.result.data.state.gate,"RECONCILE_REQUIRED");
+  assert.equal(status.result.data.reconciliation.required,true);
+  assert.equal(status.result.data.reconciliation.receipts[0].receipt_id,receipt.receipt_id);
+  assert.deepEqual(status.result.data.reconciliation.receipts[0].completed_operation_ids,[completed.operation_id]);
+
+  const eventCount=state.control.events.length;
+  const applyCount=state.fixture.view().calls.filter(value => value.method==="apply").length;
+  const retry=await dispatchCoreCommand(
+    parseCoreCommand(["epic","accept",EPIC,"--authority","accept.json","--apply","--non-interactive"]),
+    {services:state.services},
+  );
+  assert.equal(retry.exitCode,4);
+  assert.equal(state.control.events.length,eventCount);
+  assert.equal(state.fixture.view().calls.filter(value => value.method==="apply").length,applyCount);
+});
+
+test("epic mutation confirmation sees the exact final preview and decline is write-free",async () => {
+  const declined=await reviewedEpicHarness();
+  authorizeAccept(declined,await declined.fixture.github.snapshot({kind:"epic-accept",id:EPIC}));
+  const declinedEvents=declined.control.events.length;
+  const declinedWrites=declined.fixture.view().calls.filter(value => ["inspect","apply"].includes(value.method)).length;
+  let declinedPreview=null;
+  const declinedResult=await dispatchCoreCommand(
+    parseCoreCommand(["epic","accept",EPIC,"--authority","accept.json","--apply","--json"]),
+    {services:declined.services,confirm:async preview => {
+      declinedPreview=preview;
+      assert.equal(declined.control.events.length,declinedEvents);
+      assert.equal(declined.fixture.view().calls.filter(value => ["inspect","apply"].includes(value.method)).length,declinedWrites);
+      return false;
+    }},
+  );
+  assert.equal(declinedResult.exitCode,4);
+  assert.equal(declinedPreview.command,"epic.accept");
+  assert.equal(declined.control.events.length,declinedEvents);
+  assert.equal(declined.fixture.view().calls.filter(value => ["inspect","apply"].includes(value.method)).length,declinedWrites);
+
+  const accepted=await reviewedEpicHarness();
+  authorizeAccept(accepted,await accepted.fixture.github.snapshot({kind:"epic-accept",id:EPIC}),"AUTH-20260902-0910");
+  let acceptedPreview=null;
+  const result=await dispatchCoreCommand(
+    parseCoreCommand(["epic","accept",EPIC,"--authority","accept.json","--apply","--json"]),
+    {services:accepted.services,confirm:async preview => { acceptedPreview=preview; return true; }},
+  );
+  assert.equal(result.exitCode,0,result.result.error?.message);
+  const intent=accepted.control.events.at(-2).value;
+  assert.equal(acceptedPreview.intent_sha256,sha256Canonical(intent));
+  assert.equal(canonicalJson(acceptedPreview.operations),canonicalJson(intent.operations));
+  assert.deepEqual(JSON.parse(JSON.stringify(result)),result);
+
+  const promptFree=await reviewedEpicHarness();
+  authorizeAccept(promptFree,await promptFree.fixture.github.snapshot({kind:"epic-accept",id:EPIC}),"AUTH-20260902-0911");
+  let prompts=0;
+  const nonInteractive=await dispatchCoreCommand(
+    parseCoreCommand(["epic","accept",EPIC,"--authority","accept.json","--apply","--non-interactive","--json"]),
+    {services:promptFree.services,confirm:async () => { prompts+=1; return false; }},
+  );
+  assert.equal(nonInteractive.exitCode,0,nonInteractive.result.error?.message);
+  assert.equal(prompts,0);
 });
 
 test("epic status returns a detached full view and derives review required after current-head drift",async () => {
@@ -796,6 +1037,51 @@ test("epic status returns a detached full view and derives review required after
   assert.notEqual(accept.exitCode,0);
   assert.equal(state.control.events.length,eventCount);
   assert.equal(state.fixture.view().repositories.find(value => value.repository==="TOSS-Soft/toss-cli").pull_requests.find(value => value.work_item_id===EPIC).state,"READY");
+});
+
+test("epic status proves scope approval from its immutable signed intent and receipt",async () => {
+  const state=await approvedFakeHarness();
+  const status=await dispatchCoreCommand(parseCoreCommand(["epic","status",EPIC]),{services:state.services});
+  assert.equal(status.exitCode,0,status.result.error?.message);
+  const approvalIntent=state.control.events.find(value => value.kind==="intent" && value.value.command==="epic.approve").value;
+  const approvalReceipt=state.control.events.find(value => value.kind==="receipt" && value.value.intent_id===approvalIntent.intent_id).value;
+  assert.equal(canonicalJson(status.result.data.approval.provenance),canonicalJson({
+    authority_record:approvalIntent.authority,
+    intent_id:approvalIntent.intent_id,intent_sha256:sha256Canonical(approvalIntent),
+    receipt_id:approvalReceipt.receipt_id,receipt_sha256:sha256Canonical(approvalReceipt),
+  }));
+
+  const events=state.control.events.length;
+  const tampered=await dispatchCoreCommand(parseCoreCommand(["epic","status",EPIC]),{
+    services:withSnapshotMutation(state,"epic-status",snapshot => {
+      snapshot.epic_approval.plan.content_sha256="0".repeat(64);
+    }),
+  });
+  assert.equal(tampered.exitCode,6);
+  assert.equal(state.control.events.length,events);
+});
+
+test("epic status rejects every impossible prepared plan approval state combination",async () => {
+  const state=await approvedFakeHarness();
+  const cases=[
+    ["approval without plan",snapshot => {
+      snapshot.plan=null;
+      snapshot.epic.prepared=false;
+      snapshot.epic.scope_approved=false;
+    }],
+    ["scope approved without approval",snapshot => { snapshot.epic_approval=null; }],
+    ["immutable approval omitted with mutable flag cleared",snapshot => {
+      snapshot.epic_approval=null;
+      snapshot.epic.scope_approved=false;
+    }],
+    ["approval without prepared state",snapshot => { snapshot.epic.prepared=false; }],
+  ];
+  for (const [label,mutate] of cases) {
+    const result=await dispatchCoreCommand(parseCoreCommand(["epic","status",EPIC]),{
+      services:withSnapshotMutation(state,"epic-status",mutate),
+    });
+    assert.equal(result.exitCode,6,label);
+  }
 });
 
 test("epic status rejects prepared unapproved scope drift and approved completion or blocker drift",async () => {
@@ -846,6 +1132,40 @@ test("epic status rejects prepared unapproved completion and blocker cache drift
 
   assert.deepEqual(results,[["children_complete",6],["blocking_dependencies",6]]);
   assert.equal(state.control.events.length,eventCount);
+});
+
+test("epic transition replays and acceptance authority cannot bypass derived lifecycle gates",async () => {
+  const approved=await approvedFakeHarness();
+  const approvalEvents=approved.control.events.length;
+  const approvalResult=await dispatchCoreCommand(
+    parseCoreCommand(["epic","approve",EPIC,"--authority","approve.json","--apply","--non-interactive"]),
+    {services:withSnapshotMutation(approved,"epic-approval",snapshot => { snapshot.epic.drifted=true; })},
+  );
+  assert.equal(approvalResult.exitCode,4,"approval replay drift gate");
+  assert.equal(approved.control.events.length,approvalEvents);
+
+  const submitted=await reviewedEpicHarness();
+  const submitEvents=submitted.control.events.length;
+  const submitResult=await dispatchCoreCommand(
+    parseCoreCommand(["epic","submit",EPIC,"--apply","--non-interactive"]),
+    {services:withSnapshotMutation(submitted,"epic-submit",snapshot => { snapshot.epic.drifted=true; })},
+  );
+  assert.equal(submitResult.exitCode,4,"submit replay drift gate");
+  assert.equal(submitted.control.events.length,submitEvents);
+
+  const acceptance=await reviewedEpicHarness();
+  const releaseApprovalSnapshot=structuredClone(await acceptance.fixture.github.snapshot({kind:"epic-accept",id:EPIC}));
+  releaseApprovalSnapshot.epic.authority={epic_acceptance_required:false,release_approval_required:true};
+  authorizeAccept(acceptance,releaseApprovalSnapshot,"AUTH-20260902-0801");
+  const acceptanceEvents=acceptance.control.events.length;
+  const acceptResult=await dispatchCoreCommand(
+    parseCoreCommand(["epic","accept",EPIC,"--authority","accept.json","--apply","--non-interactive"]),
+    {services:withSnapshotMutation(acceptance,"epic-accept",snapshot => {
+      snapshot.epic.authority={epic_acceptance_required:false,release_approval_required:true};
+    })},
+  );
+  assert.equal(acceptResult.exitCode,4,"release approval gate");
+  assert.equal(acceptance.control.events.length,acceptanceEvents);
 });
 
 test("fake release and child completion keep Epic dependency blockers synchronized",async () => {

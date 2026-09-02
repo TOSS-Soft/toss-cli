@@ -10,7 +10,9 @@ import {
   normalizeIssueInput,
   workStatusResult,
 } from "../work/operations.js";
-import {closedData,ownDataFunction,ownDataValue} from "./common.js";
+import {
+  applyReconciliationGate,closedData,ownDataFunction,ownDataValue,reconciliationEvidence,
+} from "./common.js";
 
 function confirmation(command,services) {
   if (!command.options.apply || !command.interactive) return undefined;
@@ -50,7 +52,11 @@ async function start(command,services) {
   assertUngated(command);
   if (command.options.from!==null) throw new CoreValidationError("issue start does not consume an input file");
   const id=command.args[0]; parseWorkItemId(id);
-  const snapshot=await ownDataFunction(ownDataValue(services,"github","services"),"snapshot","github")({kind:"issue-start",id});
+  const observed=await ownDataFunction(ownDataValue(services,"github","services"),"snapshot","github")({kind:"issue-start",id});
+  const reconciliation=await reconciliationEvidence(services,id);
+  const snapshot=reconciliation.required
+    ? closedData({...observed,work:applyReconciliationGate(observed.work,reconciliation)},"reconciliation-gated issue start snapshot")
+    : observed;
   const decision=issueStartOperations({id,snapshot,reconciled_at:ownDataFunction(services,"clock","services")()});
   return execute(command,services,snapshot,decision,"issue start replay result");
 }
@@ -59,7 +65,11 @@ async function submit(command,services) {
   assertUngated(command);
   if (command.options.from!==null) throw new CoreValidationError("issue submit does not consume an input file");
   const id=command.args[0]; parseWorkItemId(id);
-  const snapshot=await ownDataFunction(ownDataValue(services,"github","services"),"snapshot","github")({kind:"issue-submit",id});
+  const observed=await ownDataFunction(ownDataValue(services,"github","services"),"snapshot","github")({kind:"issue-submit",id});
+  const reconciliation=await reconciliationEvidence(services,id);
+  const snapshot=reconciliation.required
+    ? closedData({...observed,work:applyReconciliationGate(observed.work,reconciliation)},"reconciliation-gated issue submit snapshot")
+    : observed;
   const decision=issueSubmitOperations({id,snapshot,reconciled_at:ownDataFunction(services,"clock","services")()});
   return execute(command,services,snapshot,decision,"issue submit replay result");
 }
@@ -67,7 +77,12 @@ async function submit(command,services) {
 async function status(command,services) {
   if (command.options.from!==null || command.options.authority!==null) throw new CoreValidationError("issue status does not consume input or authority files");
   const id=command.args[0]; parseWorkItemId(id);
-  return workStatusResult(await ownDataFunction(ownDataValue(services,"github","services"),"snapshot","github")({kind:"work-item",id}),id);
+  const observed=await ownDataFunction(ownDataValue(services,"github","services"),"snapshot","github")({kind:"work-item",id});
+  const reconciliation=await reconciliationEvidence(services,id);
+  const snapshot=reconciliation.required
+    ? closedData({...observed,work:applyReconciliationGate(observed.work,reconciliation)},"reconciliation-gated issue status snapshot")
+    : observed;
+  return closedData({...workStatusResult(snapshot,id),reconciliation},"issue status with reconciliation evidence");
 }
 
 export async function runIssueCommand(command,services) {

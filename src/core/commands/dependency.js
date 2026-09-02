@@ -9,7 +9,9 @@ import {
   normalizeDependencyAddInput,
   normalizeDependencyRemoveInput,
 } from "../work/operations.js";
-import {closedData,ownDataFunction,ownDataValue} from "./common.js";
+import {
+  applyReconciliationGate,closedData,ownDataFunction,ownDataValue,reconciliationEvidence,
+} from "./common.js";
 
 function confirmation(command,services) {
   if (!command.options.apply || !command.interactive) return undefined;
@@ -27,10 +29,16 @@ async function mutation(command,services,remove) {
   const [source,target]=command.args; parseWorkItemId(source); parseWorkItemId(target);
   const raw=await ownDataFunction(services,"readInput","services")(command.options.from);
   const input=remove ? normalizeDependencyRemoveInput(raw) : normalizeDependencyAddInput(raw);
-  const snapshot=await ownDataFunction(ownDataValue(services,"github","services"),"snapshot","github")({kind:"dependency-graph",root:null});
+  const observed=await ownDataFunction(ownDataValue(services,"github","services"),"snapshot","github")({kind:"dependency-mutation",source,target});
+  const reconciliation=await reconciliationEvidence(services,source);
+  const snapshot=reconciliation.required
+    ? closedData({...observed,mutation:{...observed.mutation,
+      work:applyReconciliationGate(observed.mutation.work,reconciliation)}},"reconciliation-gated dependency mutation snapshot")
+    : observed;
+  const reconciled_at=ownDataFunction(services,"clock","services")();
   const decision=remove
-    ? dependencyRemoveOperations({source,target,input,snapshot,removed_at:ownDataFunction(services,"clock","services")()})
-    : dependencyAddOperations({source,target,input,snapshot});
+    ? dependencyRemoveOperations({source,target,input,snapshot,removed_at:reconciled_at,reconciled_at})
+    : dependencyAddOperations({source,target,input,snapshot,reconciled_at});
   if (decision.operations.length===0) return closedData({status:"already-reconciled",[remove ? "tombstone" : "edge"]:remove ? decision.tombstone : decision.edge},"dependency replay result");
   const confirm=confirmation(command,services);
   return ownDataFunction(ownDataValue(services,"operations","services"),"execute","operations")({

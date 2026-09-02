@@ -91,6 +91,7 @@ function workSnapshot({head=HEAD_A,review=null,checks={state:"PASSED",revision:h
       fields:{
         Status:"In review",Gate:review?.verdict==="CHANGES_REQUESTED" ? "CHANGES_REQUESTED" :
           review?.reviewed_revision===head && review?.verdict==="APPROVED" && checks?.state==="PASSED" ? "NONE" : "REVIEW_REQUIRED",
+        repository:REPOSITORY,parent:`${REPOSITORY}#42`,milestone:"v2.2.0",
         branch,base_branch:base,last_reconciled_at:NOW,
       },
     },

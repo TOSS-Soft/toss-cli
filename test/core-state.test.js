@@ -89,6 +89,9 @@ function snapshot(kind="issue") {
       fields:{
         Status:"Backlog",
         Gate:"RELEASE_PLANNING",
+        repository:item.repository,
+        parent:item.parent_id,
+        milestone:item.milestone,
         branch:item.branch,
         base_branch:item.base_branch,
         last_reconciled_at:RECONCILED_AT,
@@ -642,6 +645,27 @@ test("Project reconciliation emits only differing machine-owned fields",() => {
   assert.equal(intent.operations[0].resource,"project");
 });
 
+test("Project reconciliation validates and corrects repository parent and milestone with all eight machine fields",() => {
+  const value=snapshot();
+  Object.assign(value.project.fields,{
+    repository:"TOSS-Soft/wrong-repository",
+    parent:null,
+    milestone:"v9.9.9",
+  });
+  const state=deriveWorkItemState(value);
+
+  const operations=projectReconciliationOperations(value,state,NEXT_RECONCILED_AT);
+
+  assert.deepEqual(operations[0].payload.fields,{
+    Status:"Ready",
+    Gate:"NONE",
+    repository:REPOSITORY,
+    parent:`${REPOSITORY}#42`,
+    milestone:"v2.2.0",
+    last_reconciled_at:NEXT_RECONCILED_AT,
+  });
+});
+
 test("Project reconciliation is a semantic no-op and treats time as an observed field",() => {
   const value=snapshot();
   const state=deriveWorkItemState(value);
@@ -668,6 +692,9 @@ test("Project reconciliation corrects branch fields in deterministic operation o
     last_reconciled_at:RECONCILED_AT,
     base_branch:"epic/41-old-parent",
     branch:"issue/41-old-reservation",
+    milestone:first.item.milestone,
+    parent:first.item.parent_id,
+    repository:first.item.repository,
     Gate:"NONE",
     Status:"Ready",
   };
@@ -675,6 +702,9 @@ test("Project reconciliation corrects branch fields in deterministic operation o
   second.project.fields={
     Status:"Ready",
     Gate:"NONE",
+    repository:second.item.repository,
+    parent:second.item.parent_id,
+    milestone:second.item.milestone,
     branch:"issue/41-old-reservation",
     base_branch:"epic/41-old-parent",
     last_reconciled_at:RECONCILED_AT,

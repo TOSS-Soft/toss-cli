@@ -12,7 +12,8 @@ const SNAPSHOT_KEYS=Object.freeze([
   "physical_branch","pull_request","review","checks","authority","project",
 ]);
 const PROJECT_FIELD_KEYS=Object.freeze([
-  "Status","Gate","branch","base_branch","last_reconciled_at",
+  "Status","Gate","repository","parent","milestone","branch","base_branch",
+  "last_reconciled_at",
 ]);
 const STATE_KEYS=Object.freeze(["status","gate","reason","next_command"]);
 const STATUSES=Object.freeze([
@@ -154,6 +155,10 @@ function validateProject(project,item) {
   exactKeys(project.fields,PROJECT_FIELD_KEYS,"Work state Project fields");
   if (!STATUSES.includes(project.fields.Status)) invalid("Observed Project Status is not approved");
   if (!GATES.includes(project.fields.Gate)) invalid("Observed Project Gate is not approved");
+  try { parseWorkItemId(`${project.fields.repository}#1`); }
+  catch (error) { invalid("Observed Project repository must be canonical OWNER/REPO ASCII",{cause:error}); }
+  if (project.fields.parent!==null) validateWorkId(project.fields.parent,"Observed Project parent");
+  if (project.fields.milestone!==null) nonEmptyText(project.fields.milestone,"Observed Project milestone");
   for (const key of ["branch","base_branch"]) {
     const observed=project.fields[key];
     if (observed!==null && (typeof observed!=="string" || observed.trim().length===0)) {
@@ -500,6 +505,9 @@ export function projectReconciliationOperations(snapshotInput,stateInput,reconci
   const desired=Object.freeze({
     Status:expectedState.status,
     Gate:expectedState.gate,
+    repository:snapshot.item.repository,
+    parent:snapshot.item.parent_id,
+    milestone:snapshot.item.milestone,
     branch:snapshot.item.branch,
     base_branch:snapshot.item.base_branch,
     last_reconciled_at:reconciledAt,

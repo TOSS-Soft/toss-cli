@@ -7,7 +7,9 @@ import {
   normalizeFeatureInput,
   workStatusResult,
 } from "../work/operations.js";
-import {closedData,ownDataFunction,ownDataValue} from "./common.js";
+import {
+  applyReconciliationGate,closedData,ownDataFunction,ownDataValue,reconciliationEvidence,
+} from "./common.js";
 
 function confirmation(command,services) {
   if (!command.options.apply || !command.interactive) return undefined;
@@ -41,8 +43,12 @@ async function add(command,services) {
 async function status(command,services) {
   if (command.options.from!==null || command.options.authority!==null) throw new CoreValidationError("feature status does not consume input or authority files");
   const id=command.args[0];
-  const snapshot=await ownDataFunction(ownDataValue(services,"github","services"),"snapshot","github")({kind:"work-item",id});
-  return workStatusResult(snapshot,id);
+  const observed=await ownDataFunction(ownDataValue(services,"github","services"),"snapshot","github")({kind:"work-item",id});
+  const reconciliation=await reconciliationEvidence(services,id);
+  const snapshot=reconciliation.required
+    ? closedData({...observed,work:applyReconciliationGate(observed.work,reconciliation)},"reconciliation-gated feature status snapshot")
+    : observed;
+  return closedData({...workStatusResult(snapshot,id),reconciliation},"feature status with reconciliation evidence");
 }
 
 export async function runFeatureCommand(command,services) {

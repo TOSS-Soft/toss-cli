@@ -3,12 +3,14 @@ import {types} from "node:util";
 import {canonicalJson,sha256Canonical} from "../../src/contracts/acp.js";
 import {closedData,exact} from "../../src/core/commands/common.js";
 import {validateCoreDocument} from "../../src/core/contracts.js";
-import {validateDependencyGraph} from "../../src/core/domain/dependencies.js";
+import {dependencyReadiness,validateDependencyGraph} from "../../src/core/domain/dependencies.js";
 import {parseWorkItemId,workItemId} from "../../src/core/domain/identity.js";
+import {deriveWorkItemState} from "../../src/core/domain/state.js";
 import {CoreConflictError,CoreValidationError} from "../../src/core/errors.js";
 import {reviewObservationRevision} from "../../src/core/review/recorder.js";
 
 const SHA=/^[a-f0-9]{40}$/u;
+const STABLE_VERSION=/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/u;
 const PROJECT_ID="PVT_TOSS_OS_2";
 const SOURCE_SHA="a".repeat(64);
 const REVIEW_RESERVATION_KEYS=Object.freeze([
@@ -62,6 +64,9 @@ function projectFields(item,at) {
   return {
     Status:item.status,
     Gate:item.gate,
+    repository:item.repository,
+    parent:item.parent_id,
+    milestone:item.milestone,
     branch:item.branch,
     base_branch:item.base_branch,
     last_reconciled_at:at,
@@ -191,13 +196,24 @@ export function createCoreGithubFixture(options={}) {
     },"dependency graph snapshot");
   }
 
-  function workSnapshot(kind,id) {
-    const record=issue(id);
-    if (!record) throw new CoreConflictError(`Unknown governed work item ${id}`);
-    const identity=parseWorkItemId(id);
+  function bugLineage(record) {
+    if (record.work.item.kind!=="bug") return null;
+    const match=STABLE_VERSION.exec(record.affected_version ?? "");
+    if (!match) throw new CoreConflictError("Governed bug is missing its canonical affected version");
+    const patch=Number(match[3]);
+    if (!Number.isSafeInteger(patch) || patch===Number.MAX_SAFE_INTEGER) {
+      throw new CoreConflictError("Governed bug affected version has no safe patch successor");
+    }
+    return {classification:"patch",affected_version:record.affected_version,
+      patch_version:`${match[1]}.${match[2]}.${patch+1}`};
+  }
+
+  function composeWork(record) {
+    const identity=parseWorkItemId(record.work.item.id);
     const repository=repo(identity.repository);
     const branch=repository.branches.get(record.work.item.branch) ?? null;
-    const pullRequest=[...repository.pullRequests.values()].find(value => value.work_item_id===id) ?? null;
+    const pullRequest=[...repository.pullRequests.values()]
+      .find(value => value.work_item_id===record.work.item.id) ?? null;
     const work=structuredClone(record.work);
     work.physical_branch=branch===null
       ? {exists:false,head_sha:null}
@@ -205,6 +221,17 @@ export function createCoreGithubFixture(options={}) {
     work.pull_request=pullRequest===null ? null : {
       state:pullRequest.state,head_sha:pullRequest.head_sha,merged_sha:pullRequest.merged_sha,
     };
+    return work;
+  }
+
+  function workSnapshot(kind,id) {
+    const record=issue(id);
+    if (!record) throw new CoreConflictError(`Unknown governed work item ${id}`);
+    const identity=parseWorkItemId(id);
+    const repository=repo(identity.repository);
+    const branch=repository.branches.get(record.work.item.branch) ?? null;
+    const pullRequest=[...repository.pullRequests.values()].find(value => value.work_item_id===id) ?? null;
+    const work=composeWork(record);
     const base=work.item.kind==="issue"
       ? work.parent===null ? null : {
         repository:work.item.repository,
@@ -226,22 +253,13 @@ export function createCoreGithubFixture(options={}) {
       },
       base,
       pull_request:pullRequest===null ? null : copy(pullRequest,"fake pull request"),
+      bug_lineage:bugLineage(record),
     },`${kind} snapshot`);
   }
 
   function governedWorkEvidence(record) {
     const identity=parseWorkItemId(record.work.item.id);
-    const repository=repo(identity.repository);
-    const branch=repository.branches.get(record.work.item.branch) ?? null;
-    const pullRequest=[...repository.pullRequests.values()]
-      .find(value => value.work_item_id===record.work.item.id) ?? null;
-    const observedWork=structuredClone(record.work);
-    observedWork.physical_branch=branch===null
-      ? {exists:false,head_sha:null}
-      : {exists:true,head_sha:branch.head_sha};
-    observedWork.pull_request=pullRequest===null ? null : {
-      state:pullRequest.state,head_sha:pullRequest.head_sha,merged_sha:pullRequest.merged_sha,
-    };
+    const observedWork=composeWork(record);
     return {
       id:record.work.item.id,revision:record.revision,
       source:source(identity.repository,record.revision),work:observedWork,
@@ -357,12 +375,19 @@ export function createCoreGithubFixture(options={}) {
       }
       const repository=repo(epicRecord.work.item.repository);
       const governed=[...repository.issues.values()]
-        .filter(record => record.native_parent_id===query.id ||
-          /^<!-- toss-core:managed-child:[a-f0-9]{64} -->$/u.test(record.marker))
+        .filter(record => {
+          if (record.native_parent_id===query.id) return true;
+          if (!/^<!-- toss-core:managed-child:[a-f0-9]{64} -->$/u.test(record.marker)) return false;
+          const nativeParent=record.native_parent_id ?? null;
+          const projectParent=record.managed_project_fields?.parent ?? null;
+          if (projectParent===query.id) return true;
+          if (nativeParent!==null && projectParent!==null && nativeParent===projectParent) return false;
+          return true;
+        })
         .sort((left,right) => compare(left.work.item.id,right.work.item.id));
       return copy({
         kind:query.kind,source:source(repository.repository,repository.revision),
-        epic:epicRecord.work,epic_plan:epicRecord.epic_plan ?? null,
+        epic:composeWork(epicRecord),epic_plan:epicRecord.epic_plan ?? null,
         epic_approval:epicRecord.epic_approval ?? null,
         preparation:{
           revision:repository.revision,
@@ -405,7 +430,7 @@ export function createCoreGithubFixture(options={}) {
       });
       return copy({
         kind:query.kind,source:source(repository.repository,repository.revision),
-        epic:epicRecord.work,epic_revision:epicRecord.revision,
+        epic:composeWork(epicRecord),epic_revision:epicRecord.revision,
         plan:epicRecord.epic_plan,epic_approval:epicRecord.epic_approval ?? null,
         children,edges,project:{id:project.id,revision:project.revision},
       },"epic approval snapshot");
@@ -433,7 +458,7 @@ export function createCoreGithubFixture(options={}) {
       });
       return copy({
         kind:query.kind,source:source(repository.repository,repository.revision),
-        epic:epicRecord.work,epic_revision:epicRecord.revision,
+        epic:composeWork(epicRecord),epic_revision:epicRecord.revision,
         plan:epicRecord.epic_plan,epic_approval:epicRecord.epic_approval ?? null,
         children,edges,release:epicRecord.work.release,
         branch:branch===null ? null : {...branch},
@@ -484,7 +509,7 @@ export function createCoreGithubFixture(options={}) {
       const checks=nativePull?.checks ? {...nativePull.checks,observation:sha256Canonical(nativePull.checks)} : null;
       return copy({
         kind:query.kind,source:source(repository.repository,repository.revision),
-        epic:epicRecord.work,epic_revision:epicRecord.revision,
+        epic:composeWork(epicRecord),epic_revision:epicRecord.revision,
         plan:epicRecord.epic_plan,epic_approval:epicRecord.epic_approval ?? null,
         children,edges,release:epicRecord.work.release,
         branch:nativeBranch===null ? null : {...nativeBranch},pull_request:pullRequest,
@@ -518,18 +543,32 @@ export function createCoreGithubFixture(options={}) {
       const identities=new Set(nativePull?.implementation_identity ? [nativePull.implementation_identity.pull_request_author,...nativePull.implementation_identity.commits.flatMap(commit => [commit.author,commit.committer])] : []);
       const review=result===null ? null : {id:result.review_id,record_revision:reviewObservationRevision({native_revision:nativePull.revision,checks:nativePull.checks,implementation_identity:nativePull.implementation_identity}),reviewed_revision:result.reviewed_revision,verdict:result.verdict,independent:result.reviewer.role==="independent-reviewer" && !identities.has(result.reviewer.identity),formal:nativePull.formal_review?.state==="APPROVED" && nativePull.formal_review.reviewed_revision===nativePull.head_sha,reviewer:result.reviewer.identity};
       const checks=nativePull?.checks ? {...nativePull.checks,observation:sha256Canonical(nativePull.checks)} : null;
-      return copy({kind:query.kind,source:source(repository.repository,repository.revision),epic:epicRecord.work,epic_revision:epicRecord.revision,plan,epic_approval:epicRecord.epic_approval ?? null,children,edges,release:epicRecord.work.release,branch:nativeBranch===null ? null : {...nativeBranch},pull_request:pullRequest,review,checks,project:{id:project.id,revision:project.revision}},"epic status snapshot");
+      return copy({kind:query.kind,source:source(repository.repository,repository.revision),epic:composeWork(epicRecord),epic_revision:epicRecord.revision,plan,epic_approval:epicRecord.epic_approval ?? null,children,edges,release:epicRecord.work.release,branch:nativeBranch===null ? null : {...nativeBranch},pull_request:pullRequest,review,checks,project:{id:project.id,revision:project.revision}},"epic status snapshot");
     }
     if (query.kind==="work-item") {
       exact(query,["kind","id"],"work snapshot query");
       const record=issue(query.id);
       if (!record) throw new CoreConflictError(`Unknown governed work item ${query.id}`);
       const identity=parseWorkItemId(query.id);
-      return copy({kind:query.kind,source:source(identity.repository,repo(identity.repository).revision),work:record.work},"work snapshot");
+      return copy({kind:query.kind,source:source(identity.repository,repo(identity.repository).revision),
+        work:composeWork(record),bug_lineage:bugLineage(record)},"work snapshot");
     }
     if (query.kind==="issue-start" || query.kind==="issue-submit") {
       exact(query,["kind","id"],"work mutation snapshot query");
       return workSnapshot(query.kind,query.id);
+    }
+    if (query.kind==="dependency-mutation") {
+      exact(query,["kind","source","target"],"dependency mutation snapshot query");
+      const sourceRecord=issue(query.source);
+      const targetRecord=issue(query.target);
+      if (!sourceRecord || !targetRecord) {
+        throw new CoreConflictError("Dependency mutation requires exact existing source and target work");
+      }
+      const graph=graphSnapshot(null);
+      return copy({...graph,kind:query.kind,mutation:{
+        source:query.source,target:query.target,revision:sourceRecord.revision,
+        work:governedWorkEvidence(sourceRecord).work,
+      }},"dependency mutation snapshot");
     }
     if (query.kind==="dependency-graph") {
       exact(query,["kind","root"],"dependency snapshot query");
@@ -634,6 +673,9 @@ export function createCoreGithubFixture(options={}) {
     }
     if (operation.resource==="issue" && ["dependency-add","dependency-remove"].includes(operation.payload.kind)) {
       return dependency.revision;
+    }
+    if (operation.resource==="issue" && operation.payload.kind==="dependency-work-state") {
+      return issue(operation.payload.work.item.id)?.revision ?? repo(operation.repository).revision;
     }
     if (operation.resource==="issue" && Object.hasOwn(operation.payload,"native_parent_id")) {
       return operation.action==="create"
@@ -899,9 +941,7 @@ export function createCoreGithubFixture(options={}) {
       if (record.projected) throw new CoreConflictError("Project membership already exists");
       record.projected=true;
       record.visible_project_fields=structuredClone(payload.fields);
-      record.work.project.fields=Object.fromEntries(
-        ["Status","Gate","branch","base_branch","last_reconciled_at"].map(key => [key,payload.fields[key]]),
-      );
+      record.work.project.fields=structuredClone(payload.fields);
     } else if (payload.kind==="work-state" || payload.kind==="review-work-state") {
       if (payload.kind==="review-work-state") {
         exact(payload,["kind","project_id","item_id","fields","review_context"],"Review Project state payload");
@@ -926,10 +966,7 @@ export function createCoreGithubFixture(options={}) {
       }
       followUp.projected=true;
       followUp.project_fields=structuredClone(payload.fields);
-      Object.assign(followUp.work.project.fields,Object.fromEntries(
-        ["Status","Gate","branch","base_branch","last_reconciled_at"]
-          .map(key => [key,payload.fields[key]]),
-      ));
+      Object.assign(followUp.work.project.fields,structuredClone(payload.fields));
       followUp.visible_project_fields=structuredClone(payload.fields);
       const projectEvidence=reviewProjects.get(payload.review_context.review_result.repository+
         `#${payload.review_context.review_result.pull_request_number}`);
@@ -1016,25 +1053,53 @@ export function createCoreGithubFixture(options={}) {
   function applyPullRequest(operation) {
     const repository=repo(operation.repository);
     const payload=operation.payload;
-    exact(payload,["kind","work_item_id","head","base","head_sha","draft"],"work pull request payload");
+    const projectsWork=Object.hasOwn(payload,"work");
+    exact(payload,projectsWork
+      ? ["kind","work_item_id","head","base","head_sha","draft","work"]
+      : ["kind","work_item_id","head","base","head_sha","draft"],"work pull request payload");
     const branch=repository.branches.get(payload.head);
     if (!branch || branch.head_sha!==payload.head_sha) throw new CoreConflictError("Pull request head is stale");
+    const record=issue(payload.work_item_id);
+    if (!record || record.work.item.repository!==operation.repository) {
+      throw new CoreConflictError("Pull request work identity is not governed");
+    }
+    if (projectsWork) {
+      deriveWorkItemState(payload.work);
+      if (record.work.item.kind!=="epic" || payload.work.item.id!==payload.work_item_id ||
+          payload.work.physical_branch.exists!==true ||
+          payload.work.physical_branch.head_sha!==payload.head_sha ||
+          payload.work.pull_request?.state!=="READY" ||
+          payload.work.pull_request.head_sha!==payload.head_sha ||
+          payload.work.pull_request.merged_sha!==null ||
+          payload.work.authority.epic_acceptance_required!==true) {
+        throw new CoreConflictError("Projected epic pull request work is incomplete");
+      }
+    }
     const existing=[...repository.pullRequests.values()].find(value => value.work_item_id===payload.work_item_id);
+    let revision;
     if (existing) {
       if (existing.base!==payload.base || existing.head!==payload.head) throw new CoreConflictError("Existing pull request base or head conflicts");
       existing.head_sha=payload.head_sha;
       existing.revision=bump("pull-request",existing.revision);
-      return existing.revision;
+      revision=existing.revision;
+    } else {
+      const number=repository.nextPullRequestNumber++;
+      repository.pullRequests.set(number,{
+        number,work_item_id:payload.work_item_id,head_repository:operation.repository,
+        base_repository:operation.repository,head:payload.head,base:payload.base,
+        head_sha:payload.head_sha,state:payload.draft ? "DRAFT" : "READY",
+        merged_sha:null,revision:"pull-request-1",
+      });
+      repository.revision=bump("repository",repository.revision);
+      revision="pull-request-1";
     }
-    const number=repository.nextPullRequestNumber++;
-    repository.pullRequests.set(number,{
-      number,work_item_id:payload.work_item_id,head_repository:operation.repository,
-      base_repository:operation.repository,head:payload.head,base:payload.base,
-      head_sha:payload.head_sha,state:payload.draft ? "DRAFT" : "READY",
-      merged_sha:null,revision:"pull-request-1",
-    });
-    repository.revision=bump("repository",repository.revision);
-    return repository.revision;
+    if (projectsWork) {
+      const projectEvidence=record.work.project;
+      record.work=structuredClone(payload.work);
+      record.work.project=projectEvidence;
+      record.revision=bump(`issue-${record.work.item.issue_number}`,record.revision);
+    }
+    return revision;
   }
 
   function applyEpicAccept(operation) {
@@ -1090,6 +1155,89 @@ export function createCoreGithubFixture(options={}) {
     return dependency.revision;
   }
 
+  function applyDependencyWork(operation) {
+    const payload=operation.payload;
+    exact(payload,["kind","work"],"dependency work-state payload");
+    const record=issue(payload.work.item.id);
+    if (!record || record.work.item.repository!==operation.repository) {
+      throw new CoreConflictError("Dependency work-state references missing source work");
+    }
+    const graph=graphSnapshot(null);
+    const readiness=dependencyReadiness(payload.work.item.id,
+      validateDependencyGraph({nodes:graph.nodes,edges:graph.edges}),graph.completed_ids);
+    const state=deriveWorkItemState(payload.work);
+    if (canonicalJson(payload.work.blocking_dependencies)!==canonicalJson(readiness.blocking) ||
+        payload.work.item.status!==state.status || payload.work.item.gate!==state.gate) {
+      throw new CoreConflictError("Dependency work-state does not match the complete graph readiness");
+    }
+    const priorProject=structuredClone(record.work.project);
+    record.work=structuredClone(payload.work);
+    record.work.project=priorProject;
+    record.revision=bump(`issue-${record.work.item.issue_number}`,record.revision);
+    const repository=repo(operation.repository);
+    repository.revision=bump("repository",repository.revision);
+    return record.revision;
+  }
+
+  function preflightDependencyResult(values) {
+    const dependencyOperations=values.filter(operation => operation.resource==="issue" &&
+      ["dependency-add","dependency-remove"].includes(operation.payload.kind));
+    if (dependencyOperations.length===0) return;
+    const nodes=new Set(allNodes());
+    for (const operation of values) {
+      if (operation.resource!=="issue" || operation.action!=="create") continue;
+      const id=operation.payload.work_item_id ?? operation.payload.work?.item?.id ??
+        operation.payload.work_item?.id;
+      if (typeof id==="string") nodes.add(id);
+    }
+    const edges=new Map([...dependency.edges.entries()].map(([id,edge]) => [id,structuredClone(edge)]));
+    const relationships=new Map([...dependency.relationships.entries()]
+      .map(([id,relationship]) => [id,structuredClone(relationship)]));
+    const tombstones=new Map([...dependency.tombstones.entries()]
+      .map(([id,tombstone]) => [id,structuredClone(tombstone)]));
+    for (const operation of dependencyOperations) {
+      if (operation.payload.kind==="dependency-add") {
+        exact(operation.payload,["kind","edge","relationship"],"dependency add preflight payload");
+        const {edge,relationship}=operation.payload;
+        validateCoreDocument(edge,"dependency-edge.v1");
+        exact(relationship,["edge_id","source","target","revision"],"dependency relationship preflight");
+        if (relationship.edge_id!==edge.edge_id || relationship.source!==edge.source ||
+            relationship.target!==edge.target || relationship.revision!==edge.revision) {
+          throw new CoreConflictError("Dependency add relationship does not bind its exact edge");
+        }
+        if (edges.has(edge.edge_id) || relationships.has(edge.edge_id) || tombstones.has(edge.edge_id)) {
+          throw new CoreConflictError("Dependency add preflight conflicts with existing immutable evidence");
+        }
+        edges.set(edge.edge_id,structuredClone(edge));
+        relationships.set(edge.edge_id,structuredClone(relationship));
+      } else {
+        exact(operation.payload,["kind","tombstone"],"dependency remove preflight payload");
+        const {tombstone}=operation.payload;
+        exact(tombstone,["edge_id","source","target","kind","prior_revision","reason","removed_at"],"dependency tombstone preflight");
+        const edge=edges.get(tombstone.edge_id);
+        const relationship=relationships.get(tombstone.edge_id);
+        if (!edge || !relationship || tombstones.has(tombstone.edge_id) ||
+            tombstone.kind!=="requires" || tombstone.source!==edge.source ||
+            tombstone.target!==edge.target || tombstone.prior_revision!==edge.revision ||
+            relationship.source!==edge.source || relationship.target!==edge.target ||
+            relationship.revision!==edge.revision) {
+          throw new CoreConflictError("Dependency remove preflight conflicts with active immutable evidence");
+        }
+        edges.delete(tombstone.edge_id);
+        relationships.delete(tombstone.edge_id);
+        tombstones.set(tombstone.edge_id,structuredClone(tombstone));
+      }
+    }
+    validateDependencyGraph({nodes:[...nodes],edges:[...edges.values()]});
+    if (relationships.size!==edges.size || [...edges.values()].some(edge => {
+      const relationship=relationships.get(edge.edge_id);
+      return !relationship || relationship.source!==edge.source || relationship.target!==edge.target ||
+        relationship.revision!==edge.revision;
+    })) {
+      throw new CoreConflictError("Dependency preflight result has conflicting native relationships");
+    }
+  }
+
   async function apply(operationsInput,applyOptions) {
     const operations=copy(operationsInput,"fake GitHub applied operations");
     if (!Array.isArray(operations)) throw new CoreValidationError("Fake GitHub apply requires operations");
@@ -1101,6 +1249,7 @@ export function createCoreGithubFixture(options={}) {
     calls.push(copy({method:"apply",operations,idempotencyKey:optionsValue.idempotencyKey},"fake GitHub call"));
     if (appliedKeys.has(optionsValue.idempotencyKey)) return appliedKeys.get(optionsValue.idempotencyKey);
     const values=operations.map(assertPortOperation);
+    preflightDependencyResult(values);
     for (const repository of repositories.values()) {
       const reserved=values
         .filter(operation => operation.repository===repository.repository && operation.resource==="issue" &&
@@ -1119,6 +1268,8 @@ export function createCoreGithubFixture(options={}) {
     if (failureMode==="throw-apply") throw new Error("injected fake GitHub apply failure");
     const observations=[];
     const acceptance=values.find(operation => operation.resource==="pull_request" && operation.payload.kind==="epic-accept");
+    const epicSubmission=values.find(operation => operation.resource==="pull_request" &&
+      operation.payload.kind==="work-pull-request" && operation.payload.work?.item?.kind==="epic");
     if (acceptance!==undefined && failureMode?.startsWith("drift-epic-")) {
       const record=issue(acceptance.payload.epic_id);
       const nativePull=[...repo(acceptance.repository).pullRequests.values()]
@@ -1139,27 +1290,36 @@ export function createCoreGithubFixture(options={}) {
         project.revision=bump("project",project.revision);
       }
     }
-    const executionValues=acceptance===undefined
+    const first=acceptance ?? epicSubmission;
+    const executionValues=first===undefined
       ? values
-      : [acceptance,...values.filter(operation => operation!==acceptance)];
-    for (const operation of executionValues) {
-      let revision;
-      if (operation.resource==="issue" && operation.action==="create" &&
-          operation.payload.kind==="review-minor-follow-up") revision=applyReviewFollowUp(operation);
-      else if (operation.resource==="issue" && Object.hasOwn(operation.payload,"native_parent_id")) revision=applyManagedChild(operation);
-      else if (operation.resource==="issue" && operation.action==="create") revision=applyIssueCreate(operation);
-      else if (operation.resource==="project") revision=applyProject(operation);
-      else if (operation.resource==="branch" && operation.action==="create") revision=applyBranch(operation);
-      else if (operation.resource==="pull_request" && operation.action==="update" &&
-          operation.payload.kind==="review-record") revision=applyReviewPullRequest(operation);
-      else if (operation.resource==="pull_request" && operation.action==="update" &&
-          operation.payload.kind==="epic-accept") revision=applyEpicAccept(operation);
-      else if (operation.resource==="pull_request" && ["create","update"].includes(operation.action)) revision=applyPullRequest(operation);
-      else if (operation.resource==="issue" && operation.action==="update" && operation.payload.kind==="epic-prepare") revision=applyEpicPrepare(operation);
-      else if (operation.resource==="issue" && operation.action==="update" && operation.payload.kind==="epic-approve") revision=applyEpicApprove(operation);
-      else if (operation.resource==="issue" && operation.action==="update") revision=applyDependency(operation);
-      else throw new CoreValidationError(`Unsupported fake GitHub operation ${operation.resource}.${operation.action}`);
-      observations.push({operation_id:operation.operation_id,repository:operation.repository,revision});
+      : [first,...values.filter(operation => operation!==first)];
+    try {
+      for (const operation of executionValues) {
+        let revision;
+        if (operation.resource==="issue" && operation.action==="create" &&
+            operation.payload.kind==="review-minor-follow-up") revision=applyReviewFollowUp(operation);
+        else if (operation.resource==="issue" && Object.hasOwn(operation.payload,"native_parent_id")) revision=applyManagedChild(operation);
+        else if (operation.resource==="issue" && operation.action==="create") revision=applyIssueCreate(operation);
+        else if (operation.resource==="project") revision=applyProject(operation);
+        else if (operation.resource==="branch" && operation.action==="create") revision=applyBranch(operation);
+        else if (operation.resource==="pull_request" && operation.action==="update" &&
+            operation.payload.kind==="review-record") revision=applyReviewPullRequest(operation);
+        else if (operation.resource==="pull_request" && operation.action==="update" &&
+            operation.payload.kind==="epic-accept") revision=applyEpicAccept(operation);
+        else if (operation.resource==="pull_request" && ["create","update"].includes(operation.action)) revision=applyPullRequest(operation);
+        else if (operation.resource==="issue" && operation.action==="update" && operation.payload.kind==="epic-prepare") revision=applyEpicPrepare(operation);
+        else if (operation.resource==="issue" && operation.action==="update" && operation.payload.kind==="epic-approve") revision=applyEpicApprove(operation);
+        else if (operation.resource==="issue" && operation.action==="update" && operation.payload.kind==="dependency-work-state") revision=applyDependencyWork(operation);
+        else if (operation.resource==="issue" && operation.action==="update") revision=applyDependency(operation);
+        else throw new CoreValidationError(`Unsupported fake GitHub operation ${operation.resource}.${operation.action}`);
+        observations.push({operation_id:operation.operation_id,repository:operation.repository,revision});
+      }
+    } catch (error) {
+      if (observations.length===0) throw error;
+      const failed=copy({status:"failed",observed_revisions:observations},"fake GitHub partial apply result");
+      appliedKeys.set(optionsValue.idempotencyKey,failed);
+      return failed;
     }
     for (const evidence of reviewProjects.values()) {
       evidence.revision=project.revision;
@@ -1174,16 +1334,26 @@ export function createCoreGithubFixture(options={}) {
     return result;
   }
 
-  function seedWork(snapshotInput,{title="Seeded work",description="Seeded work description",marker=null}={}) {
+  function seedWork(snapshotInput,{title="Seeded work",description="Seeded work description",marker=null,affectedVersion=null}={}) {
     const work=structuredClone(copy(snapshotInput,"seeded work snapshot"));
     const identity=parseWorkItemId(work.item.id);
     const repository=repo(identity.repository);
     const number=identity.issueNumber;
     repository.nextIssueNumber=Math.max(repository.nextIssueNumber,number+1);
+    if (work.item.kind!=="bug" && affectedVersion!==null) {
+      throw new TypeError("Only a bounded bug can carry an affected version");
+    }
+    let governedAffectedVersion=affectedVersion;
+    if (work.item.kind==="bug" && governedAffectedVersion===null) {
+      const match=/^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/u
+        .exec(work.item.milestone ?? "");
+      const patch=Number(match?.[3]);
+      governedAffectedVersion=match && patch>0 ? `${match[1]}.${match[2]}.${patch-1}` : null;
+    }
     repository.issues.set(number,{
       request_identity:`seed-${work.item.id}`,marker:marker ?? `<!-- toss-core:seed:${sha256Canonical(work.item.id)} -->`,
       title,description,labels:work.item.kind==="epic" ? ["epic"] : [work.item.kind],
-      priority:null,change_class:null,affected_version:null,scope:[],work,
+      priority:null,change_class:null,affected_version:governedAffectedVersion,scope:[],work,
       revision:`issue-${number}-1`,projected:true,visible_project_fields:{
         ...work.project.fields,repository:work.item.repository,parent:work.item.parent_id,milestone:work.item.milestone,
       },
@@ -1243,6 +1413,9 @@ export function createCoreGithubFixture(options={}) {
     record.work.item.gate="DEPENDENCY_REQUIRED";
     record.work.physical_branch={exists:true,head_sha:releaseHead};
     record.work.project.fields.base_branch=branch;
+    record.work.project.fields.repository=record.work.item.repository;
+    record.work.project.fields.parent=record.work.item.parent_id;
+    record.work.project.fields.milestone=version;
     record.work.project.fields.Status="Blocked";
     record.work.project.fields.Gate="DEPENDENCY_REQUIRED";
     record.work.blocking_dependencies=epicBlockingDependencies(record);
@@ -1260,6 +1433,9 @@ export function createCoreGithubFixture(options={}) {
       childRecord.work.parent.revision=record.revision;
       childRecord.work.project.fields.Status=childRecord.work.item.status;
       childRecord.work.project.fields.Gate=childRecord.work.item.gate;
+      childRecord.work.project.fields.repository=childRecord.work.item.repository;
+      childRecord.work.project.fields.parent=childRecord.work.item.parent_id;
+      childRecord.work.project.fields.milestone=version;
       childRecord.revision=bump(`issue-${childRecord.work.item.issue_number}`,childRecord.revision);
       Object.assign(childRecord.visible_project_fields,{Status:childRecord.work.item.status,Gate:childRecord.work.item.gate,milestone:version});
     }

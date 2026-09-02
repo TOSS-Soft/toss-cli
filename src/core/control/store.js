@@ -466,6 +466,15 @@ export function createCoreControlStore({repository}) {
     return loadRegistryStateAt(await loadValidatedLedgerAt(await head()));
   }
 
+  async function loadOperationState() {
+    const validated=await loadValidatedLedgerAt(await head());
+    return frozenCanonicalCopy({
+      revision:validated.revision,
+      intents:validated.intentRecords.map(record => record.document),
+      receipts:validated.receiptRecords.map(record => record.document),
+    });
+  }
+
   function findReceiptInLedger(intent,validated) {
     const valid=validateCoreDocument(intent,"operation-intent.v1");
     const matches=validated.receiptRecords.filter(record =>
@@ -689,6 +698,7 @@ export function createCoreControlStore({repository}) {
     loadRepository,
     listRepositories,
     loadRegistryState,
+    loadOperationState,
     findCompletedRepositoryRegistration,
     commitIntent,
     commitReceipt,

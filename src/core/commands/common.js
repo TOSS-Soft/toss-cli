@@ -1,7 +1,8 @@
 import {types} from "node:util";
 
-import {canonicalJson} from "../../contracts/acp.js";
-import {CoreBlockedError,CoreValidationError} from "../errors.js";
+import {canonicalJson,sha256Canonical} from "../../contracts/acp.js";
+import {validateCoreDocument} from "../contracts.js";
+import {CoreBlockedError,CoreConflictError,CoreValidationError} from "../errors.js";
 
 export function closedData(value,label,path="$",ancestors=new Set()) {
   if (value===null || ["string","boolean"].includes(typeof value)) return value;
@@ -86,4 +87,102 @@ export function requireAuthority(command,services) {
   if (command.options.apply!==true) return Promise.resolve(null);
   if (command.options.authority===null) throw new CoreBlockedError("Apply requires an explicit authority record");
   return ownDataFunction(services,"readAuthority","services")(command.options.authority);
+}
+
+function operationAffectsWork(operation,id) {
+  const payload=operation.payload ?? {};
+  return payload.work_item_id===id || payload.epic_id===id || payload.issue_id===id ||
+    payload.source===id || payload.target===id || payload.work?.item?.id===id ||
+    payload.work_item?.id===id || payload.plan?.epic?.id===id ||
+    payload.edge?.source===id || payload.edge?.target===id ||
+    payload.tombstone?.source===id || payload.tombstone?.target===id ||
+    payload.authority_binding?.epic?.id===id;
+}
+
+function orderedReceipt(left,right) {
+  if (left.receipt.created_at!==right.receipt.created_at) {
+    return left.receipt.created_at<right.receipt.created_at ? -1 : 1;
+  }
+  if (left.receipt.receipt_id!==right.receipt.receipt_id) {
+    return left.receipt.receipt_id<right.receipt.receipt_id ? -1 : 1;
+  }
+  return 0;
+}
+
+export function assertReceiptCoverage(receipt,intent,label="Operation receipt") {
+  if (receipt.intent_id!==intent.intent_id || receipt.intent_sha256!==sha256Canonical(intent)) {
+    throw new CoreConflictError(`${label} does not bind its immutable intent`);
+  }
+  const operations=new Map();
+  for (const operation of intent.operations) {
+    if (operations.has(operation.operation_id)) {
+      throw new CoreConflictError(`${label} intent operation identity is duplicated`);
+    }
+    operations.set(operation.operation_id,operation);
+  }
+  const observed=new Set();
+  for (const observation of receipt.observed_revisions) {
+    const operation=operations.get(observation.operation_id);
+    if (!operation || operation.repository!==observation.repository || observed.has(observation.operation_id)) {
+      throw new CoreConflictError(`${label} contains incompatible operation evidence`);
+    }
+    observed.add(observation.operation_id);
+  }
+  if (receipt.status==="completed" &&
+      (observed.size!==operations.size || [...operations.keys()].some(operationId => !observed.has(operationId)))) {
+    throw new CoreConflictError(`${label} does not exactly cover its completed intent`);
+  }
+  return observed;
+}
+
+export async function reconciliationEvidence(services,id) {
+  const empty=closedData({required:false,receipts:[]},"work reconciliation evidence");
+  const controlDescriptor=services && typeof services==="object" && !types.isProxy(services)
+    ? Object.getOwnPropertyDescriptor(services,"control")
+    : null;
+  if (!controlDescriptor || !("value" in controlDescriptor)) return empty;
+  const control=controlDescriptor.value;
+  const loaderDescriptor=control && typeof control==="object" && !types.isProxy(control)
+    ? Object.getOwnPropertyDescriptor(control,"loadOperationState")
+    : null;
+  if (!loaderDescriptor) return empty;
+  const ledger=closedData(await ownDataFunction(control,"loadOperationState","control")(),"operation ledger evidence");
+  exact(ledger,["revision","intents","receipts"],"operation ledger evidence");
+  if (!(ledger.revision===null || typeof ledger.revision==="string") ||
+      !Array.isArray(ledger.intents) || !Array.isArray(ledger.receipts)) {
+    throw new CoreValidationError("Operation ledger evidence is malformed");
+  }
+  const intents=new Map();
+  for (const candidate of ledger.intents) {
+    const intent=validateCoreDocument(candidate,"operation-intent.v1");
+    if (intents.has(intent.intent_id)) throw new CoreConflictError("Operation ledger intent identity is duplicated");
+    intents.set(intent.intent_id,intent);
+  }
+  const records=ledger.receipts.map(candidate => {
+    const receipt=validateCoreDocument(candidate,"operation-receipt.v1");
+    const intent=intents.get(receipt.intent_id);
+    if (!intent) {
+      throw new CoreConflictError("Operation reconciliation receipt does not bind an immutable intent");
+    }
+    assertReceiptCoverage(receipt,intent,"Operation reconciliation receipt");
+    return {receipt,intent,affects:intent.operations.some(operation => operationAffectsWork(operation,id))};
+  }).sort(orderedReceipt);
+  const unresolved=records.filter((record,index) => record.affects && record.receipt.status==="failed" &&
+    !records.slice(index+1).some(later => later.affects && later.receipt.status==="completed" &&
+      later.intent.command==="sync"));
+  return closedData({required:unresolved.length>0,receipts:unresolved.map(({receipt,intent}) => ({
+    receipt_id:receipt.receipt_id,intent_id:receipt.intent_id,
+    intent_sha256:receipt.intent_sha256,
+    completed_operation_ids:receipt.observed_revisions.map(value => value.operation_id)
+      .filter(operationId => intent.operations.some(operation => operation.operation_id===operationId))
+      .sort(),
+  }))},"work reconciliation evidence");
+}
+
+export function applyReconciliationGate(work,evidence) {
+  const value=closedData(work,"work reconciliation projection");
+  const reconciliation=closedData(evidence,"work reconciliation evidence");
+  exact(reconciliation,["required","receipts"],"work reconciliation evidence");
+  if (!reconciliation.required) return value;
+  return closedData({...value,drifted:true},"reconciliation-gated work");
 }

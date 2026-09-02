@@ -8,7 +8,7 @@ import {validateCoreDocument} from "../contracts.js";
 import {CoreBlockedError,CoreConflictError,CoreValidationError} from "../errors.js";
 import {compareOperations} from "../operation-order.js";
 
-const SEMVER=/^(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)$/u;
+const SEMVER=/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/u;
 const SHA=/^[a-f0-9]{40}$/u;
 const HASH=/^[a-f0-9]{64}$/u;
 const RFC3339_DATE_TIME=/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-](\d{2}):(\d{2}))$/u;
@@ -150,17 +150,15 @@ function intakeWork({owner,number,title,kind,status,gate,epicRequired,project,at
     blocking_dependencies:Object.freeze([]),children_complete:kind==="epic" ? false : null,
     physical_branch:Object.freeze({exists:false,head_sha:null}),pull_request:null,review:null,checks:null,
     authority:Object.freeze({epic_acceptance_required:false,release_approval_required:false}),
-    project:Object.freeze({project_id:project.id,item_id:`PVTI_${owner.replaceAll("/","_")}_${number}`,revision:project.revision,fields:Object.freeze({Status:status,Gate:gate,branch:item.branch,base_branch:null,last_reconciled_at:at})}),
+    project:Object.freeze({project_id:project.id,item_id:`PVTI_${owner.replaceAll("/","_")}_${number}`,revision:project.revision,fields:Object.freeze({
+      Status:status,Gate:gate,repository:owner,parent:null,milestone:null,
+      branch:item.branch,base_branch:null,last_reconciled_at:at,
+    })}),
   });
 }
 
 function projectMembership(work) {
-  const visibleFields=Object.freeze({
-    ...work.project.fields,
-    repository:work.item.repository,
-    parent:work.item.parent_id,
-    milestone:work.item.milestone,
-  });
+  const visibleFields=Object.freeze({...work.project.fields});
   return Object.freeze({
     resource:"project",action:"create",repository:work.item.repository,
     expected_revision:work.project.revision,
@@ -246,13 +244,14 @@ export function issueAddOperations(optionsInput) {
 
 function validateMutationSnapshot(input,kind,id) {
   const value=closedData(input,`${kind} snapshot`);
-  exact(value,["kind","source","repository_revision","work","branch","base","pull_request"],`${kind} snapshot`);
+  exact(value,["kind","source","repository_revision","work","branch","base","pull_request","bug_lineage"],`${kind} snapshot`);
   if (value.kind!==kind) invalid(`${kind} snapshot kind is invalid`);
   const identity=parseWorkItemId(id);
   source(value.source,`${kind} source`);
   if (value.source.repository!==identity.repository || value.source.revision!==value.repository_revision) conflict(`${kind} source does not bind the governed repository revision`);
   revision(value.repository_revision,`${kind} repository revision`);
   if (value.work?.item?.id!==id) conflict(`${kind} snapshot work identity conflicts with the request`);
+  validateBugLineage(value.bug_lineage,value.work,`${kind} bug lineage`);
   const state=deriveWorkItemState(value.work);
   if (!Array.isArray(value.work.blocking_dependencies)) invalid(`${kind} dependency evidence is invalid`);
   if (value.branch!==null) {
@@ -283,6 +282,41 @@ function validateMutationSnapshot(input,kind,id) {
   return Object.freeze({snapshot:value,identity,state});
 }
 
+function nextPatchVersion(version,label) {
+  const match=SEMVER.exec(version);
+  if (!match) invalid(`${label} affected version must be canonical stable SemVer`);
+  const patch=Number(match[3]);
+  if (!Number.isSafeInteger(patch) || patch===Number.MAX_SAFE_INTEGER) {
+    invalid(`${label} patch component cannot be incremented safely`);
+  }
+  return `${match[1]}.${match[2]}.${patch+1}`;
+}
+
+function validateBugLineage(input,work,label) {
+  if (work.item.kind!=="bug") {
+    if (input!==null) invalid(`${label} applies only to bounded bugs`);
+    return null;
+  }
+  const value=closedData(input,label);
+  exact(value,["classification","affected_version","patch_version"],label);
+  if (value.classification!=="patch") invalid(`${label} classification must be patch`);
+  const expected=nextPatchVersion(value.affected_version,label);
+  if (value.patch_version!==expected) invalid(`${label} does not increment the affected release by one patch`);
+  if (work.release.assigned) {
+    const milestone=`v${expected}`;
+    const branch=`release/${milestone}`;
+    if (work.release.repository!==work.item.repository ||
+        work.release.milestone!==milestone || work.release.branch!==branch ||
+        work.release.id!==`${work.item.repository}@${branch}` ||
+        work.item.milestone!==milestone || work.item.base_branch!==branch ||
+        work.project.fields.milestone!==milestone ||
+        work.project.fields.base_branch!==branch) {
+      invalid(`${label} does not bind the exact active patch release derived from the affected version`);
+    }
+  }
+  return value;
+}
+
 function postState(work,changes) {
   return closedData({...work,...changes},"projected work snapshot");
 }
@@ -292,6 +326,12 @@ function projectOperations(work,state,at) {
     ...operation,
     payload:Object.freeze({kind:"work-state",...operation.payload}),
   }));
+}
+
+function requireTransitionState(state,label,allowed) {
+  if (!allowed.some(([status,gate]) => state.status===status && state.gate===gate)) {
+    throw new CoreBlockedError(`${label} cannot run while ${state.status} / ${state.gate}`);
+  }
 }
 
 function validateGoverningBase(snapshot,identity,label) {
@@ -316,13 +356,15 @@ export function issueStartOperations(optionsInput) {
   validateGoverningBase(snapshot,identity,"Issue start");
   const operations=[];
   if (snapshot.branch===null) {
-    if (state.status!=="Ready" || state.gate!=="NONE") throw new CoreBlockedError(`Issue cannot start while ${state.status} / ${state.gate}`);
+    requireTransitionState(state,"Issue start",[["Ready","NONE"]]);
     operations.push(Object.freeze({resource:"branch",action:"create",repository:identity.repository,
       expected_revision:snapshot.repository_revision,payload:Object.freeze({kind:"work-branch",work_item_id:id,
         name:snapshot.work.item.branch,base_branch:snapshot.base.branch,source_sha:snapshot.base.head_sha})}));
   } else if (snapshot.branch.name!==snapshot.work.item.branch ||
       snapshot.branch.base_branch!==snapshot.base.branch || snapshot.branch.head_sha!==snapshot.base.head_sha) {
     conflict("Existing physical branch conflicts with the exact reserved branch, base, or source head");
+  } else {
+    requireTransitionState(state,"Issue start replay",[["In progress","NONE"]]);
   }
   const projected=snapshot.branch===null ? postState(snapshot.work,{physical_branch:{exists:true,head_sha:snapshot.base.head_sha}}) : snapshot.work;
   const projectedState=deriveWorkItemState(projected);
@@ -334,7 +376,7 @@ export function issueSubmitOperations(optionsInput) {
   const {id,snapshot:snapshotInput,reconciled_at}=operationArguments(
     optionsInput,["id","snapshot","reconciled_at"],"issue submit options",
   );
-  const {snapshot,identity}=validateMutationSnapshot(snapshotInput,"issue-submit",id);
+  const {snapshot,identity,state:currentState}=validateMutationSnapshot(snapshotInput,"issue-submit",id);
   const item=snapshot.work.item;
   if (!["issue","bug"].includes(item.kind)) invalid("issue submit supports only child issues and bounded bugs");
   if (snapshot.branch===null || !snapshot.work.physical_branch.exists || snapshot.branch.name!==item.branch ||
@@ -342,6 +384,7 @@ export function issueSubmitOperations(optionsInput) {
     conflict("Issue submit requires the exact current physical branch, base, and head");
   }
   validateGoverningBase(snapshot,identity,"Issue submit");
+  requireTransitionState(currentState,"Issue submit",[["In progress","NONE"]]);
   assertValidPullRequestTarget({headRepository:identity.repository,baseRepository:identity.repository,head:item.branch,base:item.base_branch,expectedBase:item.base_branch});
   const operations=[];
   if (snapshot.pull_request===null) {
@@ -426,18 +469,66 @@ function validateDependencySnapshot(input,root) {
   return Object.freeze({snapshot:value,graph,completed:Object.freeze([...completed].sort(compare)),relations,tombstones});
 }
 
+function validateDependencyMutationSnapshot(input,sourceId,targetId) {
+  const value=closedData(input,"dependency mutation snapshot");
+  exact(value,["kind","source","revision","root","nodes","edges","completed_ids","relationships","tombstones","next_edge_revision","mutation"],"dependency mutation snapshot");
+  if (value.kind!=="dependency-mutation" || value.root!==null) invalid("Dependency mutation snapshot kind is invalid");
+  exact(value.mutation,["source","target","revision","work"],"dependency mutation source evidence");
+  if (value.mutation.source!==sourceId || value.mutation.target!==targetId ||
+      value.mutation.work?.item?.id!==sourceId) {
+    conflict("Dependency mutation snapshot does not bind the exact source and target work");
+  }
+  revision(value.mutation.revision,"Dependency mutation source revision");
+  const graphInput={...value};
+  delete graphInput.mutation;
+  graphInput.kind="dependency-graph";
+  const validated=validateDependencySnapshot(graphInput,null);
+  const readiness=dependencyReadiness(sourceId,validated.graph,validated.completed);
+  if (canonicalJson(value.mutation.work.blocking_dependencies)!==canonicalJson(readiness.blocking)) {
+    conflict("Dependency mutation source blockers do not match the exact graph snapshot");
+  }
+  const state=deriveWorkItemState(value.mutation.work);
+  if (value.mutation.work.item.status!==state.status || value.mutation.work.item.gate!==state.gate ||
+      value.mutation.work.project.fields.Status!==state.status ||
+      value.mutation.work.project.fields.Gate!==state.gate) {
+    conflict("Dependency mutation source machine state does not match its exact graph readiness");
+  }
+  return Object.freeze({...validated,mutation:value.mutation,state});
+}
+
+function dependencyStateOperations({sourceId,graph,completed,mutation,reconciledAt}) {
+  const readiness=dependencyReadiness(sourceId,graph,completed);
+  const evidence=structuredClone(mutation.work);
+  evidence.blocking_dependencies=[...readiness.blocking];
+  const state=deriveWorkItemState(evidence);
+  const work=structuredClone(evidence);
+  work.item.status=state.status;
+  work.item.gate=state.gate;
+  const operations=[];
+  if (canonicalJson({blocking_dependencies:mutation.work.blocking_dependencies,status:mutation.work.item.status,gate:mutation.work.item.gate})!==
+      canonicalJson({blocking_dependencies:work.blocking_dependencies,status:work.item.status,gate:work.item.gate})) {
+    operations.push(Object.freeze({
+      resource:"issue",action:"update",repository:work.item.repository,
+      expected_revision:mutation.revision,
+      payload:Object.freeze({kind:"dependency-work-state",work:closedData(work,"dependency projected work")}),
+    }));
+  }
+  operations.push(...projectOperations(work,state,timestamp(reconciledAt,"Dependency reconciliation time")));
+  return Object.freeze({work:closedData(work,"dependency projected work"),state,operations:Object.freeze(operations)});
+}
+
 export function dependencyEdgeIdentity(sourceId,targetId) {
   parseWorkItemId(sourceId); parseWorkItemId(targetId);
   return `DEP-${sha256Canonical({source:sourceId,target:targetId,kind:"requires"})}`;
 }
 
 export function dependencyAddOperations(optionsInput) {
-  const {source:sourceId,target:targetId,input:inputValue,snapshot:snapshotInput}=operationArguments(
-    optionsInput,["source","target","input","snapshot"],"dependency add options",
+  const {source:sourceId,target:targetId,input:inputValue,snapshot:snapshotInput,reconciled_at}=operationArguments(
+    optionsInput,["source","target","input","snapshot","reconciled_at"],"dependency add options",
   );
   parseWorkItemId(sourceId); parseWorkItemId(targetId);
   const input=normalizeDependencyAddInput(inputValue);
-  const {snapshot,graph,relations,tombstones}=validateDependencySnapshot(snapshotInput,null);
+  const {snapshot,graph,completed,relations,tombstones,mutation}=validateDependencyMutationSnapshot(snapshotInput,sourceId,targetId);
   const edgeId=dependencyEdgeIdentity(sourceId,targetId);
   if (tombstones.has(edgeId)) conflict("Removed dependency identity cannot be re-added without an explicit resurrection protocol");
   const existing=graph.edges.filter(edge => edge.source===sourceId && edge.target===targetId && edge.kind==="requires");
@@ -450,7 +541,8 @@ export function dependencyAddOperations(optionsInput) {
         canonicalJson(edge.provenance)!==canonicalJson(input.provenance) || !relation || relation.source!==sourceId || relation.target!==targetId || relation.revision!==edge.revision) {
       conflict("Existing dependency edge or native relationship conflicts with the exact request");
     }
-    return Object.freeze({edge,operations:Object.freeze([])});
+    const projected=dependencyStateOperations({sourceId,graph,completed,mutation,reconciledAt:reconciled_at});
+    return Object.freeze({edge,work:projected.work,state:projected.state,operations:Object.freeze([...projected.operations].sort(compareOperations))});
   }
   const edge=Object.freeze({schema_version:"dependency-edge.v1",edge_id:edgeId,source:sourceId,target:targetId,kind:"requires",rationale:input.rationale,provenance:input.provenance,revision:snapshot.next_edge_revision});
   validateCoreDocument(edge,"dependency-edge.v1");
@@ -458,23 +550,26 @@ export function dependencyAddOperations(optionsInput) {
   const relationship=Object.freeze({edge_id:edgeId,source:sourceId,target:targetId,revision:edge.revision});
   const operation=Object.freeze({resource:"issue",action:"update",repository:parseWorkItemId(sourceId).repository,
     expected_revision:snapshot.revision,payload:Object.freeze({kind:"dependency-add",edge,relationship})});
-  return Object.freeze({edge,operations:Object.freeze([operation])});
+  const postGraph=validateDependencyGraph({nodes:graph.order,edges:[...graph.edges,edge]});
+  const projected=dependencyStateOperations({sourceId,graph:postGraph,completed,mutation,reconciledAt:reconciled_at});
+  return Object.freeze({edge,work:projected.work,state:projected.state,operations:Object.freeze([operation,...projected.operations].sort(compareOperations))});
 }
 
 export function dependencyRemoveOperations(optionsInput) {
-  const {source:sourceId,target:targetId,input:inputValue,snapshot:snapshotInput,removed_at}=operationArguments(
-    optionsInput,["source","target","input","snapshot","removed_at"],"dependency remove options",
+  const {source:sourceId,target:targetId,input:inputValue,snapshot:snapshotInput,removed_at,reconciled_at}=operationArguments(
+    optionsInput,["source","target","input","snapshot","removed_at","reconciled_at"],"dependency remove options",
   );
   parseWorkItemId(sourceId); parseWorkItemId(targetId);
   const input=normalizeDependencyRemoveInput(inputValue);
-  const {snapshot,graph,relations,tombstones}=validateDependencySnapshot(snapshotInput,null);
+  const {snapshot,graph,completed,relations,tombstones,mutation}=validateDependencyMutationSnapshot(snapshotInput,sourceId,targetId);
   const edgeId=dependencyEdgeIdentity(sourceId,targetId);
   const matches=graph.edges.filter(edge => edge.edge_id===edgeId && edge.source===sourceId && edge.target===targetId && edge.kind==="requires");
   if (matches.length===0) {
     const tombstone=tombstones.get(edgeId);
     if (tombstone && tombstone.source===sourceId && tombstone.target===targetId &&
         tombstone.prior_revision===input.expected_edge_revision && tombstone.reason===input.reason) {
-      return Object.freeze({tombstone,operations:Object.freeze([])});
+      const projected=dependencyStateOperations({sourceId,graph,completed,mutation,reconciledAt:reconciled_at});
+      return Object.freeze({tombstone,work:projected.work,state:projected.state,operations:Object.freeze([...projected.operations].sort(compareOperations))});
     }
     conflict("Managed dependency edge does not exist or removal evidence conflicts");
   }
@@ -487,7 +582,9 @@ export function dependencyRemoveOperations(optionsInput) {
   const tombstone=Object.freeze({edge_id:edgeId,source:sourceId,target:targetId,kind:"requires",prior_revision:edge.revision,reason:input.reason,removed_at:timestamp(removed_at,"Dependency removal time")});
   const operation=Object.freeze({resource:"issue",action:"update",repository:parseWorkItemId(sourceId).repository,
     expected_revision:snapshot.revision,payload:Object.freeze({kind:"dependency-remove",tombstone})});
-  return Object.freeze({tombstone,operations:Object.freeze([operation])});
+  const postGraph=validateDependencyGraph({nodes:graph.order,edges:graph.edges.filter(value => value.edge_id!==edgeId)});
+  const projected=dependencyStateOperations({sourceId,graph:postGraph,completed,mutation,reconciledAt:reconciled_at});
+  return Object.freeze({tombstone,work:projected.work,state:projected.state,operations:Object.freeze([operation,...projected.operations].sort(compareOperations))});
 }
 
 function subgraph(graph,root) {
@@ -527,10 +624,15 @@ export function dependencyGraphResult(snapshotInput,root=null,optionsInput=undef
 export function workStatusResult(snapshotInput,id) {
   parseWorkItemId(id);
   const snapshot=closedData(snapshotInput,"work status snapshot");
-  exact(snapshot,["kind","source","work"],"work status snapshot");
+  const hasLineage=Object.hasOwn(snapshot,"bug_lineage");
+  exact(snapshot,hasLineage ? ["kind","source","work","bug_lineage"] : ["kind","source","work"],"work status snapshot");
   if (snapshot.kind!=="work-item") invalid("Work status snapshot kind is invalid");
   source(snapshot.source,"work status source");
   if (snapshot.work?.item?.id!==id) conflict("Work status snapshot identity conflicts with the request");
+  const bugLineage=hasLineage
+    ? validateBugLineage(snapshot.bug_lineage,snapshot.work,"work status bug lineage")
+    : null;
   const state=deriveWorkItemState(snapshot.work);
-  return closedData({work_item:snapshot.work.item,state,evidence:snapshot.work,source:snapshot.source},"work status result");
+  return closedData({work_item:snapshot.work.item,state,evidence:snapshot.work,source:snapshot.source,
+    ...(hasLineage ? {bug_lineage:bugLineage} : {})},"work status result");
 }

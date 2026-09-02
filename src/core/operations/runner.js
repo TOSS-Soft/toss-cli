@@ -239,7 +239,7 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
       return receipt;
     } catch (error) {
       if (error && typeof error==="object" && persistedFailureErrors.has(error)) throw error;
-      try { await persistFailed(valid,revision,inspected); } catch (persistenceError) { throw new CoreRemoteError("GitHub apply failed and failed receipt could not be persisted",{cause:persistenceError}); }
+      try { await persistFailed(valid,revision,[]); } catch (persistenceError) { throw new CoreRemoteError("GitHub apply failed and failed receipt could not be persisted",{cause:persistenceError}); }
       if (error instanceof CoreRemoteError) throw error;
       if (error instanceof CoreValidationError || error instanceof CoreConflictError) throw error;
       throw new CoreRemoteError("GitHub apply failed",{cause:error});

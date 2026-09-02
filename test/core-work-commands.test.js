@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {sha256Canonical} from "../src/contracts/acp.js";
+import {canonicalJson,sha256Canonical} from "../src/contracts/acp.js";
 import {runDependencyCommand} from "../src/core/commands/dependency.js";
 import {runFeatureCommand} from "../src/core/commands/feature.js";
 import {runIssueCommand} from "../src/core/commands/issue.js";
@@ -10,6 +10,7 @@ import {CoreConflictError,CoreValidationError} from "../src/core/errors.js";
 import {createOperationRunner} from "../src/core/operations/runner.js";
 import {
   dependencyAddOperations,
+  dependencyEdgeIdentity,
   dependencyGraphResult,
   dependencyRemoveOperations,
   featureAddOperations,
@@ -129,7 +130,9 @@ function activeWork(kind,{number=43,parentNumber=42}={}) {
     authority:{epic_acceptance_required:false,release_approval_required:false},
     project:{
       project_id:"PVT_TOSS_OS_2",item_id:`PVTI_${number}`,revision:"project-1",
-      fields:{Status:"Ready",Gate:"NONE",branch,base_branch:base,last_reconciled_at:"2026-09-01T08:00:00.000Z"},
+      fields:{Status:"Ready",Gate:"NONE",repository:REPOSITORY,
+        parent:kind==="issue" ? `${REPOSITORY}#${parentNumber}` : null,milestone:"v2.1.3",
+        branch,base_branch:base,last_reconciled_at:"2026-09-01T08:00:00.000Z"},
     },
   };
 }
@@ -143,7 +146,7 @@ function seedBacklog(fixture,repository,number) {
     release:{assigned:false,active:false,id:null,repository:null,branch:null,milestone:null,revision:null},
     blocking_dependencies:[],children_complete:null,physical_branch:{exists:false,head_sha:null},pull_request:null,review:null,checks:null,
     authority:{epic_acceptance_required:false,release_approval_required:false},
-    project:{project_id:"PVT_TOSS_OS_2",item_id:`PVTI_${repository.replaceAll("/","_")}_${number}`,revision:"project-1",fields:{Status:"Backlog",Gate:"RELEASE_PLANNING",branch,base_branch:null,last_reconciled_at:"2026-09-01T08:00:00.000Z"}},
+    project:{project_id:"PVT_TOSS_OS_2",item_id:`PVTI_${repository.replaceAll("/","_")}_${number}`,revision:"project-1",fields:{Status:"Backlog",Gate:"RELEASE_PLANNING",repository,parent:null,milestone:null,branch,base_branch:null,last_reconciled_at:"2026-09-01T08:00:00.000Z"}},
   });
 }
 
@@ -167,6 +170,9 @@ function mutationSnapshot(kind,work,{baseRevision=null,branchBase=null}={}) {
       revision:baseRevision ?? governing.revision,
     },
     pull_request:null,
+    bug_lineage:work.item.kind==="bug"
+      ? {classification:"patch",affected_version:"2.1.2",patch_version:"2.1.3"}
+      : null,
   };
 }
 
@@ -337,6 +343,36 @@ test("issue start creates the reserved branch from the exact governing head and 
   assert.equal(record.work.project.fields.Gate,"NONE");
 });
 
+test("bounded bugs start only on the exact SemVer patch lineage of their affected release",async () => {
+  for (const version of ["v2.1.4","v2.2.0","v3.0.0"]) {
+    const {fixture,services}=harness();
+    const work=activeWork("bug");
+    const branch=`release/${version}`;
+    work.item.base_branch=branch;
+    work.item.milestone=version;
+    work.release={...work.release,id:`${REPOSITORY}@${branch}`,branch,milestone:version};
+    Object.assign(work.project.fields,{base_branch:branch,milestone:version});
+    fixture.seedWork(work,{affectedVersion:"2.1.2"});
+
+    await assert.rejects(
+      runIssueCommand(command(["issue","start",work.item.id,"--apply","--non-interactive"]),services),
+      error => error instanceof CoreValidationError && /patch|affected|lineage/iu.test(error.message),
+      version,
+    );
+    assert.equal(fixture.view().repositories[0].branches.some(value => value.name===work.item.branch),false);
+  }
+
+  const {fixture,services}=harness();
+  const work=activeWork("bug");
+  fixture.seedWork(work,{affectedVersion:"2.1.2"});
+  const started=await runIssueCommand(command(["issue","start",work.item.id,"--apply","--non-interactive"]),services);
+  assert.equal(started.status,"completed");
+  const status=await runIssueCommand(command(["issue","status",work.item.id]),services);
+  assert.equal(canonicalJson(status.bug_lineage),canonicalJson({
+    classification:"patch",affected_version:"2.1.2",patch_version:"2.1.3",
+  }));
+});
+
 test("issue start blocks non-ready state and conflicts on stale or different existing branch evidence",async () => {
   const first=harness();
   const blocked=activeWork("bug");
@@ -355,6 +391,37 @@ test("issue start blocks non-ready state and conflicts on stale or different exi
     runIssueCommand(command(["issue","start",ready.item.id,"--apply","--non-interactive"]),second.services),
     error => error instanceof CoreConflictError && error.exitCode===6,
   );
+});
+
+test("issue transition replays cannot bypass reconcile or dependency gates",async () => {
+  const replayState=harness();
+  const drifted=activeWork("bug",{number:57});
+  drifted.physical_branch={exists:true,head_sha:"1".repeat(40)};
+  drifted.drifted=true;
+  drifted.item.status="Blocked";
+  drifted.item.gate="RECONCILE_REQUIRED";
+  Object.assign(drifted.project.fields,{Status:"Blocked",Gate:"RECONCILE_REQUIRED",last_reconciled_at:NOW});
+  replayState.fixture.seedWork(drifted);
+
+  await assert.rejects(
+    runIssueCommand(command(["issue","start",drifted.item.id,"--apply","--non-interactive"]),replayState.services),
+    error => error.exitCode===4 && /RECONCILE_REQUIRED/u.test(error.message),
+  );
+
+  const submitState=harness();
+  const blocked=activeWork("issue",{number:58});
+  blocked.physical_branch={exists:true,head_sha:SHA_A};
+  blocked.blocking_dependencies=[`${REPOSITORY}#59`];
+  blocked.item.status="Blocked";
+  blocked.item.gate="DEPENDENCY_REQUIRED";
+  Object.assign(blocked.project.fields,{Status:"Blocked",Gate:"DEPENDENCY_REQUIRED"});
+  submitState.fixture.seedWork(blocked);
+
+  await assert.rejects(
+    runIssueCommand(command(["issue","submit",blocked.item.id,"--apply","--non-interactive"]),submitState.services),
+    error => error.exitCode===4 && /DEPENDENCY_REQUIRED/u.test(error.message),
+  );
+  assert.equal(submitState.fixture.view().repositories.find(value => value.repository===REPOSITORY).pull_requests.length,0);
 });
 
 test("issue start exact existing branch and reconciled fields is a deterministic no-op",async () => {
@@ -386,6 +453,27 @@ test("issue submit creates child and bug PRs against only their exact governed b
   }
 });
 
+test("public issue status composes authoritative branch and PR evidence immediately after start and submit",async () => {
+  const {fixture,services}=harness();
+  const work=activeWork("issue",{number:46});
+  fixture.seedWork(work);
+
+  await runIssueCommand(command(["issue","start",work.item.id,"--apply","--non-interactive"]),services);
+  const started=await dispatchCoreCommand(command(["issue","status",work.item.id]),{services});
+  assert.equal(started.exitCode,0,started.result.error?.message);
+  assert.equal(started.result.data.evidence.physical_branch.exists,true);
+  assert.equal(started.result.data.state.status,"In progress");
+
+  fixture.setBranchHead(REPOSITORY,work.item.branch,SHA_A);
+  await runIssueCommand(command(["issue","submit",work.item.id,"--apply","--non-interactive"]),services);
+  const submitted=await dispatchCoreCommand(command(["issue","status",work.item.id]),{services});
+  assert.equal(submitted.exitCode,0,submitted.result.error?.message);
+  assert.equal(submitted.result.data.evidence.physical_branch.head_sha,SHA_A);
+  assert.equal(submitted.result.data.evidence.pull_request.state,"DRAFT");
+  assert.equal(submitted.result.data.evidence.pull_request.head_sha,SHA_A);
+  assert.equal(submitted.result.data.state.status,"In progress");
+});
+
 test("issue submit exact replay is a no-op while a different existing base is a conflict",async () => {
   const {fixture,services}=harness();
   const work=activeWork("issue");
@@ -412,6 +500,7 @@ test("issue submit classifies an existing cross-repository PR target as a confli
       pull_request:{number:1,work_item_id:work.item.id,head_repository:REPOSITORY,
         base_repository:OTHER_REPOSITORY,head:work.item.branch,base:work.item.base_branch,
         head_sha:SHA_A,state:"DRAFT",merged_sha:null,revision:"pull-request-1"},
+      bug_lineage:null,
     },
   }),error => error instanceof CoreConflictError && error.exitCode===6);
 });
@@ -428,7 +517,8 @@ test("issue submit rejects a remote PR wrapper that disagrees with Task 3 state 
       base:{repository:REPOSITORY,branch:work.item.base_branch,head_sha:SHA_B,revision:"release-1"},
       pull_request:{number:1,work_item_id:work.item.id,head_repository:REPOSITORY,
         base_repository:REPOSITORY,head:work.item.branch,base:work.item.base_branch,
-        head_sha:SHA_A,state:"READY",merged_sha:null,revision:"pull-request-1"}},
+        head_sha:SHA_A,state:"READY",merged_sha:null,revision:"pull-request-1"},
+      bug_lineage:{classification:"patch",affected_version:"2.1.2",patch_version:"2.1.3"}},
   }),error => error instanceof CoreConflictError && error.exitCode===6);
 });
 
@@ -449,6 +539,82 @@ test("dependency add validates graph semantics, records immutable edge data, and
   assert.equal(Object.hasOwn(edge,"base_branch"),false);
   const persisted=control.events.find(value => value.kind==="intent").value.operations.find(value => value.payload.kind==="dependency-add");
   assert.equal(JSON.stringify(persisted.payload.edge),JSON.stringify(edge));
+});
+
+test("dependency add and remove reconcile the exact source work and Project readiness in the same intent",async () => {
+  const sourceId=`${REPOSITORY}#53`;
+  const targetId=`${REPOSITORY}#54`;
+  const input={kind:"requires",rationale:"The target must land first.",provenance:{source_revision:"request@1",source_sha256:HASH_A,locations:["dependencies[0]"]}};
+  const inputs={"add.json":input};
+  const {fixture,control,services}=harness({inputs});
+  fixture.seedWork(activeWork("bug",{number:53}));
+  seedBacklog(fixture,REPOSITORY,54);
+
+  await runDependencyCommand(command(["dependency","add",sourceId,targetId,"--from","add.json","--apply","--non-interactive"]),services);
+
+  let record=fixture.view().repositories.find(value => value.repository===REPOSITORY).issues
+    .find(value => value.work.item.id===sourceId);
+  assert.deepEqual(record.work.blocking_dependencies,[targetId]);
+  assert.equal(record.work.item.status,"Blocked");
+  assert.equal(record.work.item.gate,"DEPENDENCY_REQUIRED");
+  assert.equal(record.work.project.fields.Status,"Blocked");
+  assert.equal(record.work.project.fields.Gate,"DEPENDENCY_REQUIRED");
+  const addIntent=control.events.find(value => value.kind==="intent").value;
+  assert.deepEqual(addIntent.operations.map(value => value.payload.kind),[
+    "dependency-add","dependency-work-state","work-state",
+  ]);
+  const mutationQuery=fixture.view().calls.find(value =>
+    value.method==="snapshot" && value.query.kind==="dependency-mutation").query;
+  assert.equal(mutationQuery.kind,"dependency-mutation");
+  assert.equal(mutationQuery.source,sourceId);
+  assert.equal(mutationQuery.target,targetId);
+
+  const edge=fixture.view().dependency.edges[0];
+  inputs["remove.json"]={reason:"The dependency is no longer required.",expected_edge_revision:edge.revision};
+  await runDependencyCommand(command(["dependency","remove",sourceId,targetId,"--from","remove.json","--apply","--non-interactive"]),services);
+
+  record=fixture.view().repositories.find(value => value.repository===REPOSITORY).issues
+    .find(value => value.work.item.id===sourceId);
+  assert.deepEqual(record.work.blocking_dependencies,[]);
+  assert.equal(record.work.item.status,"Ready");
+  assert.equal(record.work.item.gate,"NONE");
+  assert.equal(record.work.project.fields.Status,"Ready");
+  assert.equal(record.work.project.fields.Gate,"NONE");
+});
+
+test("fake dependency apply preflights the complete post-operation DAG before any mutation",async () => {
+  const first=`${REPOSITORY}#55`;
+  const second=`${REPOSITORY}#56`;
+  const missing=`${REPOSITORY}#999`;
+  const makeEdge=(sourceId,targetId,suffix) => ({
+    schema_version:"dependency-edge.v1",
+    edge_id:dependencyEdgeIdentity(sourceId,targetId),
+    source:sourceId,target:targetId,kind:"requires",rationale:"Preflight the complete result.",
+    provenance:{source_revision:`request@${suffix}`,source_sha256:HASH_A,locations:[`dependencies[${suffix}]`]},
+    revision:`edge-${suffix}`,
+  });
+  const makeOperation=(edge,index) => ({
+    operation_id:`OP-000${index+1}`,resource:"issue",action:"update",repository:REPOSITORY,
+    expected_revision:"dependency-1",
+    payload:{kind:"dependency-add",edge,relationship:{edge_id:edge.edge_id,source:edge.source,target:edge.target,revision:edge.revision}},
+  });
+
+  for (const mode of ["cycle","dangling target"]) {
+    const {fixture}=harness();
+    seedBacklog(fixture,REPOSITORY,55);
+    seedBacklog(fixture,REPOSITORY,56);
+    const edges=mode==="cycle"
+      ? [makeEdge(first,second,1),makeEdge(second,first,2)]
+      : [makeEdge(first,missing,1)];
+
+    await assert.rejects(
+      fixture.github.apply(edges.map(makeOperation),{idempotencyKey:(mode==="cycle" ? "c" : "d").repeat(64)}),
+      error => error instanceof CoreValidationError,
+      mode,
+    );
+    assert.deepEqual(fixture.view().dependency.edges,[],`${mode} mutated dependency state`);
+    assert.deepEqual(fixture.view().dependency.relationships,[],`${mode} mutated native relationships`);
+  }
 });
 
 test("dependency readiness, cycle rejection, revision-bound removal, tombstone history, and replay are deterministic",async () => {
@@ -490,11 +656,11 @@ test("dependency reads reject native relationship evidence that is not exactly b
 
 test("tombstoned dependency identity conflicts in pure planning and the public runner path",async () => {
   const {fixture,services,source,target,add,inputs}=await removedDependencyHarness();
-  const snapshot=await fixture.github.snapshot({kind:"dependency-graph",root:null});
+  const snapshot=await fixture.github.snapshot({kind:"dependency-mutation",source,target});
   const changed={kind:"requires",rationale:"A different rationale cannot resurrect it.",provenance:{source_revision:"request@2",source_sha256:"b".repeat(64),locations:["dependencies[1]"]}};
   for (const input of [add,changed]) {
     assert.throws(
-      () => dependencyAddOperations({source,target,input,snapshot}),
+      () => dependencyAddOperations({source,target,input,snapshot,reconciled_at:NOW}),
       error => error instanceof CoreConflictError && error.exitCode===6,
     );
   }

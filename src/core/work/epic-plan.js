@@ -295,8 +295,16 @@ export function epicPreparationOperations(planInput,snapshotInput) {
         conflict(`Native child ${existing.id} has corrupt Project parent evidence`);
       }
     }
-    const governedByEpic=related?.parent_id===plan.epic.id ||
-      projectParent===plan.epic.id || MANAGED_MARKER.test(existing.marker);
+    const relationshipParent=related?.parent_id ?? null;
+    if (relationshipParent!==null && projectParent!==null && relationshipParent!==projectParent) {
+      conflict(`Native child ${existing.id} has conflicting parent projections`);
+    }
+    const governedByEpic=relationshipParent===plan.epic.id || projectParent===plan.epic.id;
+    const verifiedForeignParent=relationshipParent!==null && projectParent!==null &&
+      relationshipParent===projectParent && relationshipParent!==plan.epic.id;
+    if (!desiredIds.has(existing.id) && !governedByEpic && !verifiedForeignParent) {
+      conflict(`Managed child ${existing.id} has no exact verified parent scope`);
+    }
     if (governedByEpic && !desiredIds.has(existing.id)) {
       conflict(`Prepared epic plan would drop governed child ${existing.id}`);
     }
