@@ -52,6 +52,12 @@ function source(value,label) {
 
 function revision(value,label) { return text(value,label); }
 
+function operationArguments(input,keys,label) {
+  const value=closedData(input,label);
+  exact(value,keys,label);
+  return value;
+}
+
 export function normalizeFeatureInput(input) {
   const value=closedData(input,"feature input");
   exact(value,["title","description","priority","change_class"],"feature input");
@@ -183,7 +189,10 @@ function validateExistingFeature(existing,input,identity,work) {
       existing.work.item.base_branch!==null) conflict("Existing managed epic conflicts with the exact feature request");
 }
 
-export function featureAddOperations({repository:repositoryInput,input:inputValue,snapshot:snapshotInput,reconciled_at}) {
+export function featureAddOperations(optionsInput) {
+  const {repository:repositoryInput,input:inputValue,snapshot:snapshotInput,reconciled_at}=operationArguments(
+    optionsInput,["repository","input","snapshot","reconciled_at"],"feature add options",
+  );
   const owner=repository(repositoryInput);
   const input=normalizeFeatureInput(inputValue);
   const identity=featureRequestIdentity(owner,input);
@@ -212,7 +221,10 @@ function validateExistingIssue(existing,input,identity,work) {
   }
 }
 
-export function issueAddOperations({repository:repositoryInput,input:inputValue,snapshot:snapshotInput,reconciled_at}) {
+export function issueAddOperations(optionsInput) {
+  const {repository:repositoryInput,input:inputValue,snapshot:snapshotInput,reconciled_at}=operationArguments(
+    optionsInput,["repository","input","snapshot","reconciled_at"],"issue add options",
+  );
   const owner=repository(repositoryInput);
   const input=normalizeIssueInput(inputValue);
   const identity=issueRequestIdentity(owner,input);
@@ -282,11 +294,26 @@ function projectOperations(work,state,at) {
   }));
 }
 
-export function issueStartOperations({id,snapshot:snapshotInput,reconciled_at}) {
+function validateGoverningBase(snapshot,identity,label) {
+  const item=snapshot.work.item;
+  const governing=item.kind==="issue" ? snapshot.work.parent : snapshot.work.release;
+  if (snapshot.base===null || governing===null ||
+      snapshot.base.repository!==identity.repository ||
+      snapshot.base.repository!==(item.kind==="issue" ? item.repository : governing.repository) ||
+      snapshot.base.branch!==item.base_branch || snapshot.base.branch!==governing.branch ||
+      snapshot.base.revision!==governing.revision) {
+    conflict(`${label} governing base conflicts with exact parent or patch release evidence`);
+  }
+}
+
+export function issueStartOperations(optionsInput) {
+  const {id,snapshot:snapshotInput,reconciled_at}=operationArguments(
+    optionsInput,["id","snapshot","reconciled_at"],"issue start options",
+  );
   const {snapshot,identity,state}=validateMutationSnapshot(snapshotInput,"issue-start",id);
   if (!["issue","bug"].includes(snapshot.work.item.kind)) invalid("issue start supports only child issues and bounded bugs");
   if (snapshot.work.item.repository!==identity.repository) conflict("Issue start repository identity conflicts");
-  if (snapshot.base===null || snapshot.base.repository!==identity.repository || snapshot.base.branch!==snapshot.work.item.base_branch) conflict("Issue start governing base is missing or conflicts with the exact work item base");
+  validateGoverningBase(snapshot,identity,"Issue start");
   const operations=[];
   if (snapshot.branch===null) {
     if (state.status!=="Ready" || state.gate!=="NONE") throw new CoreBlockedError(`Issue cannot start while ${state.status} / ${state.gate}`);
@@ -303,12 +330,18 @@ export function issueStartOperations({id,snapshot:snapshotInput,reconciled_at}) 
   return Object.freeze({work:projected,state:projectedState,operations:Object.freeze(operations.sort(compareOperations))});
 }
 
-export function issueSubmitOperations({id,snapshot:snapshotInput,reconciled_at}) {
+export function issueSubmitOperations(optionsInput) {
+  const {id,snapshot:snapshotInput,reconciled_at}=operationArguments(
+    optionsInput,["id","snapshot","reconciled_at"],"issue submit options",
+  );
   const {snapshot,identity}=validateMutationSnapshot(snapshotInput,"issue-submit",id);
   const item=snapshot.work.item;
   if (!["issue","bug"].includes(item.kind)) invalid("issue submit supports only child issues and bounded bugs");
-  if (snapshot.branch===null || !snapshot.work.physical_branch.exists || snapshot.branch.name!==item.branch || snapshot.branch.head_sha!==snapshot.work.physical_branch.head_sha) conflict("Issue submit requires the exact current physical branch and head");
-  if (snapshot.base===null || snapshot.base.repository!==identity.repository || snapshot.base.branch!==item.base_branch) conflict("Issue submit governing base conflicts with exact parent or patch release evidence");
+  if (snapshot.branch===null || !snapshot.work.physical_branch.exists || snapshot.branch.name!==item.branch ||
+      snapshot.branch.base_branch!==item.base_branch || snapshot.branch.head_sha!==snapshot.work.physical_branch.head_sha) {
+    conflict("Issue submit requires the exact current physical branch, base, and head");
+  }
+  validateGoverningBase(snapshot,identity,"Issue submit");
   assertValidPullRequestTarget({headRepository:identity.repository,baseRepository:identity.repository,head:item.branch,base:item.base_branch,expectedBase:item.base_branch});
   const operations=[];
   if (snapshot.pull_request===null) {
@@ -398,11 +431,15 @@ export function dependencyEdgeIdentity(sourceId,targetId) {
   return `DEP-${sha256Canonical({source:sourceId,target:targetId,kind:"requires"})}`;
 }
 
-export function dependencyAddOperations({source:sourceId,target:targetId,input:inputValue,snapshot:snapshotInput}) {
+export function dependencyAddOperations(optionsInput) {
+  const {source:sourceId,target:targetId,input:inputValue,snapshot:snapshotInput}=operationArguments(
+    optionsInput,["source","target","input","snapshot"],"dependency add options",
+  );
   parseWorkItemId(sourceId); parseWorkItemId(targetId);
   const input=normalizeDependencyAddInput(inputValue);
-  const {snapshot,graph,relations}=validateDependencySnapshot(snapshotInput,null);
+  const {snapshot,graph,relations,tombstones}=validateDependencySnapshot(snapshotInput,null);
   const edgeId=dependencyEdgeIdentity(sourceId,targetId);
+  if (tombstones.has(edgeId)) conflict("Removed dependency identity cannot be re-added without an explicit resurrection protocol");
   const existing=graph.edges.filter(edge => edge.source===sourceId && edge.target===targetId && edge.kind==="requires");
   const byIdentity=graph.edges.filter(edge => edge.edge_id===edgeId);
   if (existing.length>1 || byIdentity.length>1) conflict("Dependency evidence is ambiguous");
@@ -424,7 +461,10 @@ export function dependencyAddOperations({source:sourceId,target:targetId,input:i
   return Object.freeze({edge,operations:Object.freeze([operation])});
 }
 
-export function dependencyRemoveOperations({source:sourceId,target:targetId,input:inputValue,snapshot:snapshotInput,removed_at}) {
+export function dependencyRemoveOperations(optionsInput) {
+  const {source:sourceId,target:targetId,input:inputValue,snapshot:snapshotInput,removed_at}=operationArguments(
+    optionsInput,["source","target","input","snapshot","removed_at"],"dependency remove options",
+  );
   parseWorkItemId(sourceId); parseWorkItemId(targetId);
   const input=normalizeDependencyRemoveInput(inputValue);
   const {snapshot,graph,relations,tombstones}=validateDependencySnapshot(snapshotInput,null);
@@ -468,7 +508,11 @@ function subgraph(graph,root) {
   return validateDependencyGraph({nodes:[...connected],edges:graph.edges.filter(edge => connected.has(edge.source) && connected.has(edge.target))});
 }
 
-export function dependencyGraphResult(snapshotInput,root=null,{check=false}={}) {
+export function dependencyGraphResult(snapshotInput,root=null,optionsInput=undefined) {
+  const {check}=optionsInput===undefined
+    ? Object.freeze({check:false})
+    : operationArguments(optionsInput,["check"],"dependency graph options");
+  if (typeof check!=="boolean") invalid("dependency graph check option must be boolean");
   if (root!==null) parseWorkItemId(root);
   const {graph,completed}=validateDependencySnapshot(snapshotInput,root);
   const selected=subgraph(graph,root);

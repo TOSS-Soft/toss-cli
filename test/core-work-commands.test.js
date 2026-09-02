@@ -9,8 +9,13 @@ import {dispatchCoreCommand,parseCoreCommand} from "../src/core/commands/router.
 import {CoreConflictError,CoreValidationError} from "../src/core/errors.js";
 import {createOperationRunner} from "../src/core/operations/runner.js";
 import {
+  dependencyAddOperations,
   dependencyGraphResult,
+  dependencyRemoveOperations,
+  featureAddOperations,
   featureRequestIdentity,
+  issueAddOperations,
+  issueStartOperations,
   issueSubmitOperations,
   normalizeIssueInput,
 } from "../src/core/work/operations.js";
@@ -140,6 +145,76 @@ function seedBacklog(fixture,repository,number) {
     authority:{epic_acceptance_required:false,release_approval_required:false},
     project:{project_id:"PVT_TOSS_OS_2",item_id:`PVTI_${repository.replaceAll("/","_")}_${number}`,revision:"project-1",fields:{Status:"Backlog",Gate:"RELEASE_PLANNING",branch,base_branch:null,last_reconciled_at:"2026-09-01T08:00:00.000Z"}},
   });
+}
+
+function mutationSnapshot(kind,work,{baseRevision=null,branchBase=null}={}) {
+  const governing=work.item.kind==="issue" ? work.parent : work.release;
+  return {
+    kind,
+    source:{repository:REPOSITORY,revision:"repository-1",sha256:HASH_A},
+    repository_revision:"repository-1",
+    work,
+    branch:work.physical_branch.exists ? {
+      name:work.item.branch,
+      base_branch:branchBase ?? work.item.base_branch,
+      head_sha:work.physical_branch.head_sha,
+      revision:"branch-1",
+    } : null,
+    base:{
+      repository:REPOSITORY,
+      branch:work.item.base_branch,
+      head_sha:SHA_B,
+      revision:baseRevision ?? governing.revision,
+    },
+    pull_request:null,
+  };
+}
+
+function storedWork(fixture,id) {
+  return fixture.view().repositories
+    .flatMap(value => value.issues)
+    .find(value => value.work.item.id===id).work;
+}
+
+async function removedDependencyHarness() {
+  const source=`${REPOSITORY}#81`;
+  const target=`${REPOSITORY}#82`;
+  const add={kind:"requires",rationale:"The target must land first.",provenance:{source_revision:"request@1",source_sha256:HASH_A,locations:["dependencies[0]"]}};
+  const inputs={"add.json":add};
+  const state=harness({inputs});
+  seedBacklog(state.fixture,REPOSITORY,81);
+  seedBacklog(state.fixture,REPOSITORY,82);
+  await runDependencyCommand(command(["dependency","add",source,target,"--from","add.json","--apply","--non-interactive"]),state.services);
+  const edge=(await runDependencyCommand(command(["dependency","graph"]),state.services)).graph.edges[0];
+  inputs["remove.json"]={reason:"The dependency was retired.",expected_edge_revision:edge.revision};
+  await runDependencyCommand(command(["dependency","remove",source,target,"--from","remove.json","--apply","--non-interactive"]),state.services);
+  return {...state,source,target,add,edge,inputs};
+}
+
+function opaqueWrapperCases(valid) {
+  const first=Object.keys(valid)[0];
+  const proxyCounter={value:0};
+  const proxy=new Proxy(valid,{get(target,key,receiver) {
+    proxyCounter.value+=1;
+    return Reflect.get(target,key,receiver);
+  }});
+  const accessorCounter={value:0};
+  const accessor={...valid};
+  Object.defineProperty(accessor,first,{enumerable:true,get() {
+    accessorCounter.value+=1;
+    return valid[first];
+  }});
+  const symbol={...valid,[Symbol("unexpected")]:true};
+  const hidden={...valid};
+  Object.defineProperty(hidden,"hidden",{value:true});
+  return [
+    {name:"proxy",value:proxy,counter:proxyCounter},
+    {name:"accessor",value:accessor,counter:accessorCounter},
+    {name:"symbol",value:symbol,counter:{value:0}},
+    {name:"hidden",value:hidden,counter:{value:0}},
+    {name:"sparse",value:Object.assign(new Array(1),valid),counter:{value:0}},
+    {name:"extra",value:{...valid,extra:true},counter:{value:0}},
+  ];
 }
 
 test("feature add previews and applies one unversioned managed epic without creating a branch",async () => {
@@ -411,6 +486,178 @@ test("dependency reads reject native relationship evidence that is not exactly b
     () => dependencyGraphResult(snapshot,null),
     error => error instanceof CoreConflictError && error.exitCode===6,
   );
+});
+
+test("tombstoned dependency identity conflicts in pure planning and the public runner path",async () => {
+  const {fixture,services,source,target,add,inputs}=await removedDependencyHarness();
+  const snapshot=await fixture.github.snapshot({kind:"dependency-graph",root:null});
+  const changed={kind:"requires",rationale:"A different rationale cannot resurrect it.",provenance:{source_revision:"request@2",source_sha256:"b".repeat(64),locations:["dependencies[1]"]}};
+  for (const input of [add,changed]) {
+    assert.throws(
+      () => dependencyAddOperations({source,target,input,snapshot}),
+      error => error instanceof CoreConflictError && error.exitCode===6,
+    );
+  }
+  inputs["add.json"]=changed;
+  await assert.rejects(
+    runDependencyCommand(command(["dependency","add",source,target,"--from","add.json","--apply","--non-interactive"]),services),
+    error => error instanceof CoreConflictError && error.exitCode===6,
+  );
+  const graph=await runDependencyCommand(command(["dependency","graph"]),services);
+  const check=await runDependencyCommand(command(["dependency","check",source]),services);
+  assert.equal(graph.graph.edges.length,0);
+  assert.equal(JSON.stringify(check.readiness),JSON.stringify({ready:true,blocking:[]}));
+});
+
+test("tombstoned dependency identity is independently rejected by fake apply",async () => {
+  const {fixture,control,source}=await removedDependencyHarness();
+  const original=control.events
+    .filter(value => value.kind==="intent")
+    .flatMap(value => value.value.operations)
+    .find(value => value.payload.kind==="dependency-add");
+  const operation={...original,expected_revision:fixture.view().dependency.revision};
+  await assert.rejects(
+    fixture.github.apply([operation],{idempotencyKey:"c".repeat(64)}),
+    error => error instanceof CoreConflictError && error.exitCode===6,
+  );
+  const check=dependencyGraphResult(await fixture.github.snapshot({kind:"dependency-graph",root:source}),source,{check:true});
+  assert.equal(JSON.stringify(check.readiness),JSON.stringify({ready:true,blocking:[]}));
+});
+
+test("snapshot purity preserves stored work during issue start preview and dry-run",async () => {
+  for (const suffix of [[],["--dry-run"]]) {
+    const {fixture,services}=harness();
+    const work=activeWork("issue");
+    fixture.seedWork(work);
+    await runIssueCommand(command(["issue","start",work.item.id,"--apply","--non-interactive"]),services);
+    const before=storedWork(fixture,work.item.id);
+    await runIssueCommand(command(["issue","start",work.item.id,...suffix]),services);
+    assert.deepEqual(storedWork(fixture,work.item.id),before);
+  }
+});
+
+test("snapshot purity preserves stored work during issue submit preview and dry-run",async () => {
+  for (const suffix of [[],["--dry-run"]]) {
+    const {fixture,services}=harness();
+    const work=activeWork("bug");
+    fixture.seedWork(work);
+    await runIssueCommand(command(["issue","start",work.item.id,"--apply","--non-interactive"]),services);
+    await runIssueCommand(command(["issue","submit",work.item.id,"--apply","--non-interactive"]),services);
+    const before=storedWork(fixture,work.item.id);
+    await runIssueCommand(command(["issue","submit",work.item.id,...suffix]),services);
+    assert.deepEqual(storedWork(fixture,work.item.id),before);
+  }
+});
+
+test("governing provenance binds issue start base revision to parent or release evidence",() => {
+  for (const kind of ["issue","bug"]) {
+    const work=activeWork(kind);
+    assert.throws(
+      () => issueStartOperations({
+        id:work.item.id,
+        snapshot:mutationSnapshot("issue-start",work,{baseRevision:"wrong-governing-revision"}),
+        reconciled_at:NOW,
+      }),
+      error => error instanceof CoreConflictError && error.exitCode===6,
+    );
+  }
+});
+
+test("governing provenance binds issue submit base revision and physical branch base",() => {
+  for (const kind of ["issue","bug"]) {
+    const work=activeWork(kind);
+    work.physical_branch={exists:true,head_sha:SHA_A};
+    assert.throws(
+      () => issueSubmitOperations({
+        id:work.item.id,
+        snapshot:mutationSnapshot("issue-submit",work,{baseRevision:"wrong-governing-revision"}),
+        reconciled_at:NOW,
+      }),
+      error => error instanceof CoreConflictError && error.exitCode===6,
+    );
+  }
+  const work=activeWork("bug");
+  work.physical_branch={exists:true,head_sha:SHA_A};
+  assert.throws(
+    () => issueSubmitOperations({
+      id:work.item.id,
+      snapshot:mutationSnapshot("issue-submit",work,{branchBase:"release/v9.9.9"}),
+      reconciled_at:NOW,
+    }),
+    error => error instanceof CoreConflictError && error.exitCode===6,
+  );
+});
+
+test("operation option wrappers reject proxy accessor symbol hidden sparse and extra data without traps",async () => {
+  const state=harness();
+  const featureIdentity=featureRequestIdentity(REPOSITORY,featureInput);
+  const featureSnapshot=await state.fixture.github.snapshot({kind:"feature-by-marker",repository:REPOSITORY,request_identity:featureIdentity});
+  const issueIdentity=sha256Canonical({repository:REPOSITORY,...normalizeIssueInput(bugInput)});
+  const issueSnapshot=await state.fixture.github.snapshot({kind:"issue-by-marker",repository:REPOSITORY,request_identity:issueIdentity});
+  const startWork=activeWork("issue");
+  const submitWork=activeWork("bug");
+  submitWork.physical_branch={exists:true,head_sha:SHA_A};
+
+  const dependencyInput={kind:"requires",rationale:"Wrapper validation target.",provenance:{source_revision:"request@1",source_sha256:HASH_A,locations:["dependency"]}};
+  const dependencyState=harness({inputs:{"edge.json":dependencyInput}});
+  const source=`${REPOSITORY}#91`; const target=`${REPOSITORY}#92`;
+  seedBacklog(dependencyState.fixture,REPOSITORY,91);
+  seedBacklog(dependencyState.fixture,REPOSITORY,92);
+  await runDependencyCommand(command(["dependency","add",source,target,"--from","edge.json","--apply","--non-interactive"]),dependencyState.services);
+  const dependencySnapshot=await dependencyState.fixture.github.snapshot({kind:"dependency-graph",root:null});
+  const edge=dependencySnapshot.edges[0];
+
+  const entries=[
+    {label:"feature add",valid:{repository:REPOSITORY,input:featureInput,snapshot:featureSnapshot,reconciled_at:NOW},invoke:value => featureAddOperations(value)},
+    {label:"issue add",valid:{repository:REPOSITORY,input:bugInput,snapshot:issueSnapshot,reconciled_at:NOW},invoke:value => issueAddOperations(value)},
+    {label:"issue start",valid:{id:startWork.item.id,snapshot:mutationSnapshot("issue-start",startWork),reconciled_at:NOW},invoke:value => issueStartOperations(value)},
+    {label:"issue submit",valid:{id:submitWork.item.id,snapshot:mutationSnapshot("issue-submit",submitWork),reconciled_at:NOW},invoke:value => issueSubmitOperations(value)},
+    {label:"dependency add",valid:{source,target,input:dependencyInput,snapshot:dependencySnapshot},invoke:value => dependencyAddOperations(value)},
+    {label:"dependency remove",valid:{source,target,input:{reason:"Wrapper validation.",expected_edge_revision:edge.revision},snapshot:dependencySnapshot,removed_at:NOW},invoke:value => dependencyRemoveOperations(value)},
+    {label:"dependency graph options",valid:{check:false},invoke:value => dependencyGraphResult(dependencySnapshot,null,value)},
+  ];
+  for (const entry of entries) {
+    for (const variant of opaqueWrapperCases(entry.valid)) {
+      const before=variant.counter.value;
+      assert.throws(
+        () => entry.invoke(variant.value),
+        error => error instanceof CoreValidationError && error.exitCode===5,
+        `${entry.label} accepted ${variant.name}`,
+      );
+      assert.equal(variant.counter.value,before,`${entry.label} invoked ${variant.name}`);
+    }
+  }
+});
+
+test("Task 4 service ports reject accessor and proxy-backed github and operations without traps",async () => {
+  const cases=[
+    {key:"github",argv:["feature","status",`${REPOSITORY}#1`]},
+    {key:"operations",argv:["feature","add",REPOSITORY,"--from","feature.json"]},
+  ];
+  for (const item of cases) {
+    for (const kind of ["accessor","proxy"]) {
+      const state=harness();
+      if (item.key==="github") {
+        await runFeatureCommand(command(["feature","add",REPOSITORY,"--from","feature.json","--apply","--non-interactive"]),state.services);
+      }
+      let traps=0;
+      const services={...state.services};
+      if (kind==="accessor") {
+        Object.defineProperty(services,item.key,{enumerable:true,get() {
+          traps+=1;
+          return state.services[item.key];
+        }});
+      } else {
+        services[item.key]=new Proxy(state.services[item.key],{get(target,key,receiver) {
+          traps+=1;
+          return Reflect.get(target,key,receiver);
+        }});
+      }
+      const result=await dispatchCoreCommand(command([...item.argv,"--json"]),{services});
+      assert.equal(result.exitCode,5,`${item.key} ${kind}`);
+      assert.equal(traps,0,`${item.key} ${kind}`);
+    }
+  }
 });
 
 test("runner preview purity, confirmation, stale revisions, and failed observation receipts remain enforced",async () => {

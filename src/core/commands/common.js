@@ -51,6 +51,15 @@ export function ownDataFunction(value,key,label) {
   return descriptor.value;
 }
 
+export function ownDataValue(value,key,label) {
+  if (!value || typeof value!=="object" || types.isProxy(value)) throw new CoreValidationError(`${label} must be a non-proxy object`);
+  const descriptor=Object.getOwnPropertyDescriptor(value,key);
+  if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) {
+    throw new CoreValidationError(`${label}.${key} must be an own enumerable data property`);
+  }
+  return descriptor.value;
+}
+
 export function requireAuthority(command,services) {
   if (command.options.apply!==true) return Promise.resolve(null);
   if (command.options.authority===null) throw new CoreBlockedError("Apply requires an explicit authority record");

@@ -10,7 +10,7 @@ import {
   normalizeIssueInput,
   workStatusResult,
 } from "../work/operations.js";
-import {closedData,ownDataFunction} from "./common.js";
+import {closedData,ownDataFunction,ownDataValue} from "./common.js";
 
 function confirmation(command,services) {
   if (!command.options.apply || !command.interactive) return undefined;
@@ -27,7 +27,7 @@ function assertUngated(command) {
 async function execute(command,services,snapshot,decision,label) {
   if (decision.operations.length===0) return closedData({status:"already-reconciled",work_item:decision.work.item,state:decision.state ?? null},label);
   const confirm=confirmation(command,services);
-  return ownDataFunction(services.operations,"execute","operations")({
+  return ownDataFunction(ownDataValue(services,"operations","services"),"execute","operations")({
     command,source:closedData(snapshot,"issue mutation snapshot").source,operations:decision.operations,authority:null,
     ...(confirm===undefined ? {} : {confirm}),
   });
@@ -39,18 +39,18 @@ async function add(command,services) {
   const repository=command.args[0];
   const input=normalizeIssueInput(await ownDataFunction(services,"readInput","services")(command.options.from));
   const requestIdentity=issueRequestIdentity(repository,input);
-  const snapshot=await ownDataFunction(services.github,"snapshot","github")({kind:"issue-by-marker",repository,request_identity:requestIdentity});
+  const snapshot=await ownDataFunction(ownDataValue(services,"github","services"),"snapshot","github")({kind:"issue-by-marker",repository,request_identity:requestIdentity});
   const decision=issueAddOperations({repository,input,snapshot,reconciled_at:ownDataFunction(services,"clock","services")()});
   if (decision.operations.length===0) return closedData({status:"already-reconciled",request_identity:decision.request_identity,work_item:decision.work.item},"issue replay result");
   const confirm=confirmation(command,services);
-  return ownDataFunction(services.operations,"execute","operations")({command,source:closedData(snapshot,"issue intake snapshot").source,operations:decision.operations,authority:null,...(confirm===undefined ? {} : {confirm})});
+  return ownDataFunction(ownDataValue(services,"operations","services"),"execute","operations")({command,source:closedData(snapshot,"issue intake snapshot").source,operations:decision.operations,authority:null,...(confirm===undefined ? {} : {confirm})});
 }
 
 async function start(command,services) {
   assertUngated(command);
   if (command.options.from!==null) throw new CoreValidationError("issue start does not consume an input file");
   const id=command.args[0]; parseWorkItemId(id);
-  const snapshot=await ownDataFunction(services.github,"snapshot","github")({kind:"issue-start",id});
+  const snapshot=await ownDataFunction(ownDataValue(services,"github","services"),"snapshot","github")({kind:"issue-start",id});
   const decision=issueStartOperations({id,snapshot,reconciled_at:ownDataFunction(services,"clock","services")()});
   return execute(command,services,snapshot,decision,"issue start replay result");
 }
@@ -59,7 +59,7 @@ async function submit(command,services) {
   assertUngated(command);
   if (command.options.from!==null) throw new CoreValidationError("issue submit does not consume an input file");
   const id=command.args[0]; parseWorkItemId(id);
-  const snapshot=await ownDataFunction(services.github,"snapshot","github")({kind:"issue-submit",id});
+  const snapshot=await ownDataFunction(ownDataValue(services,"github","services"),"snapshot","github")({kind:"issue-submit",id});
   const decision=issueSubmitOperations({id,snapshot,reconciled_at:ownDataFunction(services,"clock","services")()});
   return execute(command,services,snapshot,decision,"issue submit replay result");
 }
@@ -67,7 +67,7 @@ async function submit(command,services) {
 async function status(command,services) {
   if (command.options.from!==null || command.options.authority!==null) throw new CoreValidationError("issue status does not consume input or authority files");
   const id=command.args[0]; parseWorkItemId(id);
-  return workStatusResult(await ownDataFunction(services.github,"snapshot","github")({kind:"work-item",id}),id);
+  return workStatusResult(await ownDataFunction(ownDataValue(services,"github","services"),"snapshot","github")({kind:"work-item",id}),id);
 }
 
 export async function runIssueCommand(command,services) {

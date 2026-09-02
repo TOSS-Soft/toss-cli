@@ -7,7 +7,7 @@ import {
   normalizeFeatureInput,
   workStatusResult,
 } from "../work/operations.js";
-import {closedData,ownDataFunction} from "./common.js";
+import {closedData,ownDataFunction,ownDataValue} from "./common.js";
 
 function confirmation(command,services) {
   if (!command.options.apply || !command.interactive) return undefined;
@@ -28,11 +28,11 @@ async function add(command,services) {
   const repository=command.args[0];
   const input=normalizeFeatureInput(await ownDataFunction(services,"readInput","services")(command.options.from));
   const requestIdentity=featureRequestIdentity(repository,input);
-  const snapshot=await ownDataFunction(services.github,"snapshot","github")({kind:"feature-by-marker",repository,request_identity:requestIdentity});
+  const snapshot=await ownDataFunction(ownDataValue(services,"github","services"),"snapshot","github")({kind:"feature-by-marker",repository,request_identity:requestIdentity});
   const decision=featureAddOperations({repository,input,snapshot,reconciled_at:ownDataFunction(services,"clock","services")()});
   if (decision.operations.length===0) return closedData({status:"already-reconciled",request_identity:decision.request_identity,work_item:decision.work.item},"feature replay result");
   const confirm=confirmation(command,services);
-  return ownDataFunction(services.operations,"execute","operations")({
+  return ownDataFunction(ownDataValue(services,"operations","services"),"execute","operations")({
     command,source:closedData(snapshot,"feature snapshot").source,operations:decision.operations,authority:null,
     ...(confirm===undefined ? {} : {confirm}),
   });
@@ -41,7 +41,7 @@ async function add(command,services) {
 async function status(command,services) {
   if (command.options.from!==null || command.options.authority!==null) throw new CoreValidationError("feature status does not consume input or authority files");
   const id=command.args[0];
-  const snapshot=await ownDataFunction(services.github,"snapshot","github")({kind:"work-item",id});
+  const snapshot=await ownDataFunction(ownDataValue(services,"github","services"),"snapshot","github")({kind:"work-item",id});
   return workStatusResult(snapshot,id);
 }
 

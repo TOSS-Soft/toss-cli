@@ -9,7 +9,7 @@ import {
   normalizeDependencyAddInput,
   normalizeDependencyRemoveInput,
 } from "../work/operations.js";
-import {closedData,ownDataFunction} from "./common.js";
+import {closedData,ownDataFunction,ownDataValue} from "./common.js";
 
 function confirmation(command,services) {
   if (!command.options.apply || !command.interactive) return undefined;
@@ -27,13 +27,13 @@ async function mutation(command,services,remove) {
   const [source,target]=command.args; parseWorkItemId(source); parseWorkItemId(target);
   const raw=await ownDataFunction(services,"readInput","services")(command.options.from);
   const input=remove ? normalizeDependencyRemoveInput(raw) : normalizeDependencyAddInput(raw);
-  const snapshot=await ownDataFunction(services.github,"snapshot","github")({kind:"dependency-graph",root:null});
+  const snapshot=await ownDataFunction(ownDataValue(services,"github","services"),"snapshot","github")({kind:"dependency-graph",root:null});
   const decision=remove
     ? dependencyRemoveOperations({source,target,input,snapshot,removed_at:ownDataFunction(services,"clock","services")()})
     : dependencyAddOperations({source,target,input,snapshot});
   if (decision.operations.length===0) return closedData({status:"already-reconciled",[remove ? "tombstone" : "edge"]:remove ? decision.tombstone : decision.edge},"dependency replay result");
   const confirm=confirmation(command,services);
-  return ownDataFunction(services.operations,"execute","operations")({
+  return ownDataFunction(ownDataValue(services,"operations","services"),"execute","operations")({
     command,source:closedData(snapshot,"dependency mutation snapshot").source,
     operations:decision.operations,authority:null,...(confirm===undefined ? {} : {confirm}),
   });
@@ -42,7 +42,7 @@ async function mutation(command,services,remove) {
 async function read(command,services,check) {
   const root=command.args[0] ?? null;
   if (root!==null) parseWorkItemId(root);
-  const snapshot=await ownDataFunction(services.github,"snapshot","github")({kind:"dependency-graph",root});
+  const snapshot=await ownDataFunction(ownDataValue(services,"github","services"),"snapshot","github")({kind:"dependency-graph",root});
   return dependencyGraphResult(snapshot,root,{check});
 }
 

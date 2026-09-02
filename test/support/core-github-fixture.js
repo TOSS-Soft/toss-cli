@@ -143,28 +143,29 @@ export function createCoreGithubFixture(options={}) {
     const repository=repo(identity.repository);
     const branch=repository.branches.get(record.work.item.branch) ?? null;
     const pullRequest=[...repository.pullRequests.values()].find(value => value.work_item_id===id) ?? null;
-    record.work.physical_branch=branch===null
+    const work=structuredClone(record.work);
+    work.physical_branch=branch===null
       ? {exists:false,head_sha:null}
       : {exists:true,head_sha:branch.head_sha};
-    record.work.pull_request=pullRequest===null ? null : {
+    work.pull_request=pullRequest===null ? null : {
       state:pullRequest.state,head_sha:pullRequest.head_sha,merged_sha:pullRequest.merged_sha,
     };
-    const base=record.work.item.kind==="issue"
-      ? record.work.parent===null ? null : {
-        repository:record.work.item.repository,
-        branch:record.work.parent.branch,
-        head_sha:repo(record.work.item.repository).branches.get(record.work.parent.branch)?.head_sha ?? null,
-        revision:record.work.parent.revision,
+    const base=work.item.kind==="issue"
+      ? work.parent===null ? null : {
+        repository:work.item.repository,
+        branch:work.parent.branch,
+        head_sha:repo(work.item.repository).branches.get(work.parent.branch)?.head_sha ?? null,
+        revision:work.parent.revision,
       }
-      : record.work.release.assigned ? {
-        repository:record.work.release.repository,
-        branch:record.work.release.branch,
-        head_sha:repo(record.work.item.repository).branches.get(record.work.release.branch)?.head_sha ?? null,
-        revision:record.work.release.revision,
+      : work.release.assigned ? {
+        repository:work.release.repository,
+        branch:work.release.branch,
+        head_sha:repo(work.item.repository).branches.get(work.release.branch)?.head_sha ?? null,
+        revision:work.release.revision,
       } : null;
     return copy({
       kind,source:source(identity.repository,repository.revision),
-      repository_revision:repository.revision,work:record.work,
+      repository_revision:repository.revision,work,
       branch:branch===null ? null : {
         name:branch.name,base_branch:branch.base_branch,head_sha:branch.head_sha,revision:branch.revision,
       },
@@ -363,6 +364,9 @@ export function createCoreGithubFixture(options={}) {
     const payload=operation.payload;
     if (payload.kind==="dependency-add") {
       exact(payload,["kind","edge","relationship"],"dependency add payload");
+      if (dependency.tombstones.has(payload.edge.edge_id)) {
+        throw new CoreConflictError("Removed dependency identity cannot be re-added");
+      }
       if (dependency.edges.has(payload.edge.edge_id) || dependency.relationships.has(payload.edge.edge_id)) {
         throw new CoreConflictError("Dependency already exists");
       }
