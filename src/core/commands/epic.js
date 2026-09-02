@@ -424,7 +424,7 @@ async function status(command,services) {
   } else if (work.prepared || snapshot.children.length!==0 || snapshot.edges.length!==0) {
     throw new CoreConflictError("Epic status plan evidence conflicts with lifecycle state");
   }
-  if (scope!==null && work.scope_approved===true &&
+  if (scope!==null &&
       (work.children_complete!==scope.children_complete ||
        canonicalJson(work.blocking_dependencies)!==canonicalJson(scope.blocking_dependencies))) {
     throw new CoreConflictError("Epic status completion or dependency blockers conflict with current scope evidence");

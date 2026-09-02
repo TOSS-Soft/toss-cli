@@ -825,6 +825,29 @@ test("epic status rejects prepared unapproved scope drift and approved completio
   assert.equal(approved.control.events.length,approvedEvents);
 });
 
+test("epic status rejects prepared unapproved completion and blocker cache drift",async () => {
+  const plan={plan_id:"EPIC-PLAN-0042",created_at:"2026-09-01T10:00:00.000Z",source:{repository:"TOSS-Soft/toss-cli",revision:"feature-request@42",sha256:"a".repeat(64)},epic:work.item,children:[child],dependencies:[]};
+  const state=fakeHarness({"plan.json":plan});
+  state.fixture.seedWork(work);
+  await dispatchCoreCommand(parseCoreCommand(["epic","prepare",EPIC,"--from","plan.json","--apply","--non-interactive"]),{services:state.services});
+  const eventCount=state.control.events.length;
+  const cases=[
+    ["children_complete",snapshot => { snapshot.epic.children_complete=true; }],
+    ["blocking_dependencies",snapshot => { snapshot.epic.blocking_dependencies=[child.id]; }],
+  ];
+  const results=[];
+
+  for (const [label,mutate] of cases) {
+    const result=await dispatchCoreCommand(parseCoreCommand(["epic","status",EPIC]),{
+      services:withSnapshotMutation(state,"epic-status",mutate),
+    });
+    results.push([label,result.exitCode]);
+  }
+
+  assert.deepEqual(results,[["children_complete",6],["blocking_dependencies",6]]);
+  assert.equal(state.control.events.length,eventCount);
+});
+
 test("fake release and child completion keep Epic dependency blockers synchronized",async () => {
   const state=await approvedFakeHarness({children:[child,dependentChild],dependencies:[dependencyEdge]});
   state.fixture.assignActiveRelease(EPIC,"v2.1.2");
