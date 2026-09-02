@@ -37,6 +37,7 @@ function acceptedWork(work,headSha) {
   next.item.status="Done";
   next.item.gate="NONE";
   next.pull_request={state:"MERGED",head_sha:headSha,merged_sha:headSha};
+  next.authority={epic_acceptance_required:false,release_approval_required:false};
   next.project.fields.Status="Done";
   next.project.fields.Gate="NONE";
   return closedData(next,"accepted epic work");
@@ -103,9 +104,118 @@ function immutableChild(item) {
   };
 }
 
+function assertRevision(value,label) {
+  if (typeof value!=="string" || value.trim().length===0) {
+    throw new CoreValidationError(`${label} must be a non-empty revision`);
+  }
+}
+
+function assertProjectIdentity(project,work,label) {
+  exact(project,["id","revision"],label);
+  assertRevision(project.id,`${label} identity`);
+  assertRevision(project.revision,`${label} revision`);
+  if (project.id!==work.project.project_id || project.revision!==work.project.revision) {
+    throw new CoreConflictError(`${label} does not match the epic Project evidence`);
+  }
+  return project;
+}
+
+function assertGovernedWorkEvidence(observed,id,label) {
+  exact(observed,["id","revision","source","work","native_parent_id","projected"],label);
+  assertRevision(observed.revision,`${label} revision`);
+  if (observed.id!==id || observed.source?.repository!==observed.work?.item?.repository ||
+      observed.source?.revision!==observed.revision) {
+    throw new CoreConflictError(`${label} does not bind the requested work revision`);
+  }
+  return workStatusResult({kind:"work-item",source:observed.source,work:observed.work},id);
+}
+
+function isSemanticallyDone(result) {
+  const current=result.evidence;
+  return result.state.status==="Done" && result.state.gate==="NONE" &&
+      current.item.status==="Done" && current.item.gate==="NONE" &&
+      current.issue_state==="CLOSED" && current.pull_request?.state==="MERGED" &&
+      current.pull_request.merged_sha===current.pull_request.head_sha &&
+      current.pull_request.head_sha===current.physical_branch.head_sha &&
+      current.project.fields.Status==="Done" && current.project.fields.Gate==="NONE";
+}
+
+function assertSemanticallyDone(result,label) {
+  if (!isSemanticallyDone(result)) {
+    throw new CoreConflictError(`${label} is not semantically Done at its exact merged head and Project state`);
+  }
+}
+
+function scopeCompletion(children,edges) {
+  return {
+    children_complete:children.every(value => value.done),
+    blocking_dependencies:[...new Set(edges.filter(value => !value.done).map(value => value.target))].sort(),
+  };
+}
+
+function assertActiveRelease(snapshot,work,label) {
+  workStatusResult({kind:"work-item",source:snapshot.source,work},work.item.id);
+  if (canonicalJson(snapshot.release)!==canonicalJson(work.release) ||
+      work.release.assigned!==true || work.release.active!==true) {
+    throw new CoreConflictError(`${label} release evidence does not match the governed work state`);
+  }
+  exact(snapshot.branch,["name","base_branch","head_sha","revision"],`${label} branch evidence`);
+  assertRevision(snapshot.branch.revision,`${label} branch revision`);
+  if (snapshot.branch.name!==work.item.branch ||
+      snapshot.branch.base_branch!==work.release.branch ||
+      snapshot.branch.head_sha!==work.physical_branch.head_sha) {
+    throw new CoreConflictError(`${label} branch does not match the exact active release hierarchy`);
+  }
+  return work.release;
+}
+
+function assertApprovalScope(snapshot,work) {
+  const plan=storedPlan(snapshot.plan);
+  if (plan.epic.id!==work.item.id || work.prepared!==true) {
+    throw new CoreConflictError("Epic approval requires the exact prepared plan state");
+  }
+  const project=assertProjectIdentity(snapshot.project,work,"Epic approval Project");
+  const children=[...snapshot.children].sort((left,right) => left.id.localeCompare(right.id));
+  const edges=[...snapshot.edges].sort((left,right) => left.edge_id.localeCompare(right.edge_id));
+  if (children.length!==plan.children.length || edges.length!==plan.edges.length) {
+    throw new CoreConflictError("Epic approval scope is incomplete");
+  }
+  const childCompletion=[];
+  for (let index=0;index<plan.children.length;index+=1) {
+    const planned=plan.children[index]; const observed=children[index];
+    const result=assertGovernedWorkEvidence(observed,planned.id,"Epic approval child evidence");
+    const current=result.evidence;
+    if (canonicalJson(immutableChild(current.item))!==canonicalJson(immutableChild(planned)) ||
+        observed.native_parent_id!==work.item.id || current.parent?.id!==work.item.id ||
+        current.parent?.branch!==work.item.branch || observed.projected!==true ||
+        current.project.project_id!==project.id || current.project.revision!==project.revision ||
+        current.project.fields.Status!==current.item.status || current.project.fields.Gate!==current.item.gate ||
+        current.project.fields.branch!==current.item.branch || current.project.fields.base_branch!==current.item.base_branch) {
+      throw new CoreConflictError("Epic approval child evidence does not match the prepared plan");
+    }
+    childCompletion.push({done:isSemanticallyDone(result)});
+  }
+  const edgeCompletion=[];
+  for (let index=0;index<plan.edges.length;index+=1) {
+    const planned=plan.edges[index]; const observed=edges[index];
+    exact(observed,["edge_id","revision","edge","relationship","target"],"Epic approval dependency evidence");
+    assertRevision(observed.revision,"Epic approval dependency revision");
+    const relationship={edge_id:planned.edge_id,source:planned.source,target:planned.target,revision:planned.revision};
+    if (observed.edge_id!==planned.edge_id || observed.revision!==planned.revision ||
+        canonicalJson(observed.edge)!==canonicalJson(planned) ||
+        canonicalJson(observed.relationship)!==canonicalJson(relationship)) {
+      throw new CoreConflictError("Epic approval dependency evidence does not match the prepared plan");
+    }
+    const target=assertGovernedWorkEvidence(observed.target,planned.target,"Epic approval dependency target");
+    edgeCompletion.push({target:planned.target,done:isSemanticallyDone(target)});
+  }
+  return {plan,children,edges,project,...scopeCompletion(childCompletion,edgeCompletion)};
+}
+
 function assertApprovedScope(snapshot,work,services,{complete}) {
   const plan=storedPlan(snapshot.plan);
   const approval=snapshot.epic_approval;
+  const project=assertProjectIdentity(snapshot.project,work,"Approved epic Project");
   const children=[...snapshot.children].sort((left,right) => left.id.localeCompare(right.id));
   const edges=[...snapshot.edges].sort((left,right) => left.edge_id.localeCompare(right.edge_id));
   if (!approval || work.scope_approved!==true || plan.epic.id!==work.item.id ||
@@ -118,27 +228,36 @@ function assertApprovedScope(snapshot,work,services,{complete}) {
       children.length!==plan.children.length || edges.length!==plan.edges.length) {
     throw new CoreConflictError("Epic scope no longer matches its exact approval");
   }
+  const childCompletion=[];
   for (let index=0;index<plan.children.length;index+=1) {
     const planned=plan.children[index]; const observed=children[index];
-    exact(observed,["id","state","revision","item","native_parent_id","project_id","projected"],"approved epic child evidence");
-    if (observed.id!==planned.id || canonicalJson(immutableChild(observed.item))!==canonicalJson(immutableChild(planned)) ||
-        observed.native_parent_id!==work.item.id || observed.project_id!==snapshot.project.id ||
-        observed.projected!==true || (complete && observed.state!=="CLOSED")) {
+    const current=assertGovernedWorkEvidence(observed,planned.id,"Approved epic child evidence");
+    if (canonicalJson(immutableChild(current.evidence.item))!==canonicalJson(immutableChild(planned)) ||
+        observed.native_parent_id!==work.item.id || current.evidence.parent?.id!==work.item.id ||
+        current.evidence.parent?.branch!==work.item.branch ||
+        current.evidence.project.project_id!==project.id || current.evidence.project.revision!==project.revision ||
+        observed.projected!==true) {
       throw new CoreConflictError("Epic child evidence no longer matches approved scope");
     }
+    childCompletion.push({done:isSemanticallyDone(current)});
+    if (complete) assertSemanticallyDone(current,"Approved epic child");
   }
+  const edgeCompletion=[];
   for (let index=0;index<plan.edges.length;index+=1) {
     const planned=plan.edges[index]; const observed=edges[index];
-    exact(observed,["edge_id","revision","edge","relationship","target_state"],"approved epic dependency evidence");
+    exact(observed,["edge_id","revision","edge","relationship","target"],"approved epic dependency evidence");
     const relationship={edge_id:planned.edge_id,source:planned.source,target:planned.target,revision:planned.revision};
+    const target=assertGovernedWorkEvidence(observed.target,planned.target,"Approved epic dependency target");
     if (observed.edge_id!==planned.edge_id || observed.revision!==planned.revision ||
         canonicalJson(observed.edge)!==canonicalJson(planned) ||
         canonicalJson(observed.relationship)!==canonicalJson(relationship) ||
-        (complete && observed.target_state!=="CLOSED")) {
+        observed.target.id!==planned.target) {
       throw new CoreConflictError("Epic dependency evidence no longer matches approved scope");
     }
+    edgeCompletion.push({target:planned.target,done:isSemanticallyDone(target)});
+    if (complete) assertSemanticallyDone(target,"Approved epic dependency target");
   }
-  return {plan,children,edges,approval};
+  return {plan,children,edges,approval,project,...scopeCompletion(childCompletion,edgeCompletion)};
 }
 
 async function prepare(command,services) {
@@ -188,10 +307,10 @@ async function approve(command,services) {
   exact(snapshot,["kind","source","epic","epic_revision","plan","epic_approval","children","edges","project"],"epic approval snapshot");
   if (snapshot.kind!=="epic-approval" || typeof snapshot.epic_revision!=="string") throw new CoreValidationError("Epic approval snapshot is invalid");
   const work=assertEpic(snapshot,id,"epic approval snapshot");
-  const plan=storedPlan(snapshot.plan);
-  if (plan.epic.id!==id) throw new CoreValidationError("Stored epic plan does not bind requested epic");
-  const children=[...snapshot.children].sort((a,b) => a.id.localeCompare(b.id));
-  const edges=[...snapshot.edges].sort((a,b) => a.edge_id.localeCompare(b.edge_id));
+  const scope=assertApprovalScope(snapshot,work);
+  const {plan,project}=scope;
+  const children=scope.children.map(value => Object.freeze({id:value.id,revision:value.revision}));
+  const edges=scope.edges.map(value => Object.freeze({edge_id:value.edge_id,revision:value.revision}));
   const policyRevision=ownDataFunction(services,"policyRevision","services")();
   const planBinding=Object.freeze({plan_id:plan.plan_id,content_sha256:plan.content_sha256});
   if (snapshot.epic_approval!==null) {
@@ -199,17 +318,22 @@ async function approve(command,services) {
     if (stored.epic?.id!==id || canonicalJson(stored.plan)!==canonicalJson(planBinding) ||
         canonicalJson(stored.children?.map(value => value.id))!==canonicalJson(children.map(value => value.id)) ||
         canonicalJson(stored.edges)!==canonicalJson(edges) ||
-        stored.project?.id!==snapshot.project.id || stored.policy_revision!==policyRevision ||
+        stored.project?.id!==project.id || stored.policy_revision!==policyRevision ||
         work.prepared!==true || work.scope_approved!==true) {
       throw new CoreConflictError("Stored epic approval conflicts with the current prepared scope");
     }
     return closedData({status:"already-reconciled",approval:stored},"epic approval replay result");
   }
-  const authority_binding=Object.freeze({epic:Object.freeze({id,revision:snapshot.epic_revision}),plan:planBinding,children:Object.freeze(children),edges:Object.freeze(edges),project:Object.freeze(snapshot.project),policy_revision:policyRevision});
+  if (work.scope_approved!==false || work.item.status!=="Backlog" ||
+      work.item.gate!=="EPIC_APPROVAL_REQUIRED" ||
+      work.project.fields.Status!=="Backlog" || work.project.fields.Gate!=="EPIC_APPROVAL_REQUIRED") {
+    throw new CoreConflictError("Epic approval requires prepared Backlog scope awaiting approval");
+  }
+  const authority_binding=Object.freeze({epic:Object.freeze({id,revision:snapshot.epic_revision}),plan:planBinding,children:Object.freeze(children),edges:Object.freeze(edges),project:Object.freeze(project),policy_revision:policyRevision});
   const nextWork=approvedWork(work);
   const operations=[
     Object.freeze({resource:"issue",action:"update",repository:plan.epic.repository,expected_revision:snapshot.epic_revision,payload:Object.freeze({kind:"epic-approve",authority_binding,plan,work:nextWork})}),
-    Object.freeze({resource:"project",action:"update",repository:plan.epic.repository,expected_revision:snapshot.project.revision,payload:Object.freeze({kind:"work-state",project_id:snapshot.project.id,item_id:work.project.item_id,fields:Object.freeze(nextWork.project.fields)})}),
+    Object.freeze({resource:"project",action:"update",repository:plan.epic.repository,expected_revision:project.revision,payload:Object.freeze({kind:"work-state",project_id:project.id,item_id:work.project.item_id,fields:Object.freeze(nextWork.project.fields)})}),
   ];
   return ownDataFunction(ownDataValue(services,"operations","services"),"execute","operations")({command,source:snapshot.source,operations,authority});
 }
@@ -222,8 +346,7 @@ async function submit(command,services) {
   const work=assertEpic(snapshot,id,"epic submit snapshot");
   if (snapshot.kind!=="epic-submit" || !Array.isArray(snapshot.children) || !Array.isArray(snapshot.edges)) throw new CoreValidationError("Epic submit snapshot is invalid");
   assertApprovedScope(snapshot,work,services,{complete:true});
-  const release=snapshot.release;
-  if (!release?.active || !release.assigned || release.repository!==work.item.repository || release.id!==`${release.repository}@${release.branch}` || work.item.base_branch!==release.branch || snapshot.branch?.base_branch!==release.branch || snapshot.branch?.name!==work.item.branch) throw new CoreValidationError("Epic submit requires the active same-repository release branch");
+  const release=assertActiveRelease(snapshot,work,"Epic submit");
   const pull=snapshot.pull_request;
   if (pull!==null && (pull.work_item_id!==id || pull.head_repository!==work.item.repository ||
       pull.base_repository!==work.item.repository || pull.head!==work.item.branch || pull.base!==release.branch)) {
@@ -241,24 +364,29 @@ async function accept(command,services) {
   const id=command.args[0]; parseWorkItemId(id);
   const authority=await requireAuthority(command,services);
   const snapshot=closedData(await ownDataFunction(ownDataValue(services,"github","services"),"snapshot","github")({kind:"epic-accept",id}),"epic acceptance snapshot");
-  exact(snapshot,["kind","source","epic","epic_revision","plan","epic_approval","children","edges","release","pull_request","review","checks","project"],"epic acceptance snapshot");
+  exact(snapshot,["kind","source","epic","epic_revision","plan","epic_approval","children","edges","release","branch","pull_request","review","checks","project"],"epic acceptance snapshot");
   const work=assertEpic(snapshot,id,"epic acceptance snapshot");
   if (snapshot.kind!=="epic-accept" || !Array.isArray(snapshot.children) || !Array.isArray(snapshot.edges)) throw new CoreValidationError("Epic acceptance snapshot is invalid");
   const scope=assertApprovedScope(snapshot,work,services,{complete:true});
   const pull=snapshot.pull_request; const review=snapshot.review; const checks=snapshot.checks;
-  if (pull?.state==="MERGED" && pull.merged_sha===pull.head_sha && work.issue_state==="CLOSED" &&
-      work.project.fields.Status==="Done" && work.project.fields.Gate==="NONE") {
-    return closedData({status:"already-reconciled",pull_request:pull},"epic acceptance replay result");
-  }
-  const release=snapshot.release;
-  if (!release?.active || !release.assigned || release.repository!==work.item.repository ||
-      release.id!==`${release.repository}@${release.branch}` || work.item.base_branch!==release.branch ||
-      !pull || pull.head_repository!==work.item.repository || pull.base_repository!==work.item.repository ||
-      pull.head!==work.item.branch || pull.base!==release.branch || pull.state!=="READY" ||
+  const release=assertActiveRelease(snapshot,work,"Epic acceptance");
+  if (!pull || pull.head_repository!==work.item.repository || pull.base_repository!==work.item.repository ||
+      pull.head!==work.item.branch || pull.base!==release.branch ||
       !review || review.reviewed_revision!==pull.head_sha || review.verdict!=="APPROVED" ||
       review.independent!==true || review.formal!==true || !checks || checks.state!=="PASSED" ||
       checks.revision!==pull.head_sha) {
     throw new CoreValidationError("Epic acceptance requires current independent approval and passed checks at the exact pull request head");
+  }
+  if (pull.state==="MERGED") {
+    if (pull.merged_sha!==pull.head_sha || work.issue_state!=="CLOSED" ||
+        work.project.fields.Status!=="Done" || work.project.fields.Gate!=="NONE" ||
+        work.authority.epic_acceptance_required!==false) {
+      throw new CoreConflictError("Merged epic acceptance evidence is incomplete");
+    }
+    return closedData({status:"already-reconciled",pull_request:pull},"epic acceptance replay result");
+  }
+  if (pull.state!=="READY") {
+    throw new CoreValidationError("Epic acceptance requires a ready or exactly merged pull request");
   }
   const authority_binding=Object.freeze({
     epic:Object.freeze({id,revision:snapshot.epic_revision}),
@@ -288,10 +416,18 @@ async function status(command,services) {
   exact(snapshot,["kind","source","epic","epic_revision","plan","epic_approval","children","edges","release","branch","pull_request","review","checks","project"],"epic status snapshot");
   if (snapshot.kind!=="epic-status") throw new CoreValidationError("Epic status snapshot kind is invalid");
   const work=assertEpic(snapshot,id,"epic status snapshot");
+  let scope=null;
   if (snapshot.plan!==null && snapshot.epic_approval!==null) {
-    assertApprovedScope(snapshot,work,services,{complete:false});
-  } else if (snapshot.plan===null ? (work.prepared || snapshot.children.length!==0 || snapshot.edges.length!==0) : !work.prepared) {
+    scope=assertApprovedScope(snapshot,work,services,{complete:false});
+  } else if (snapshot.plan!==null) {
+    scope=assertApprovalScope(snapshot,work);
+  } else if (work.prepared || snapshot.children.length!==0 || snapshot.edges.length!==0) {
     throw new CoreConflictError("Epic status plan evidence conflicts with lifecycle state");
+  }
+  if (scope!==null && work.scope_approved===true &&
+      (work.children_complete!==scope.children_complete ||
+       canonicalJson(work.blocking_dependencies)!==canonicalJson(scope.blocking_dependencies))) {
+    throw new CoreConflictError("Epic status completion or dependency blockers conflict with current scope evidence");
   }
   if (canonicalJson(snapshot.release)!==canonicalJson(work.release) ||
       snapshot.project.id!==work.project.project_id || snapshot.project.revision!==work.project.revision ||

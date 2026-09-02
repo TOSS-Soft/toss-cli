@@ -229,6 +229,88 @@ export function createCoreGithubFixture(options={}) {
     },`${kind} snapshot`);
   }
 
+  function governedWorkEvidence(record) {
+    const identity=parseWorkItemId(record.work.item.id);
+    const repository=repo(identity.repository);
+    const branch=repository.branches.get(record.work.item.branch) ?? null;
+    const pullRequest=[...repository.pullRequests.values()]
+      .find(value => value.work_item_id===record.work.item.id) ?? null;
+    const observedWork=structuredClone(record.work);
+    observedWork.physical_branch=branch===null
+      ? {exists:false,head_sha:null}
+      : {exists:true,head_sha:branch.head_sha};
+    observedWork.pull_request=pullRequest===null ? null : {
+      state:pullRequest.state,head_sha:pullRequest.head_sha,merged_sha:pullRequest.merged_sha,
+    };
+    return {
+      id:record.work.item.id,revision:record.revision,
+      source:source(identity.repository,record.revision),work:observedWork,
+      native_parent_id:record.native_parent_id ?? null,projected:record.projected===true,
+    };
+  }
+
+  function epicPullEvidence(repository,nativePull) {
+    return nativePull===null ? null : {
+      id:`${repository.repository}#${nativePull.number}`,number:nativePull.number,
+      revision:nativePull.revision,head_sha:nativePull.head_sha,head:nativePull.head,
+      base:nativePull.base,head_repository:nativePull.head_repository,
+      base_repository:nativePull.base_repository,state:nativePull.state,merged_sha:nativePull.merged_sha,
+    };
+  }
+
+  function epicReviewEvidence(nativePull) {
+    const result=nativePull?.recorded_result ?? null;
+    if (result===null) return null;
+    const identities=new Set([
+      nativePull.implementation_identity.pull_request_author,
+      ...nativePull.implementation_identity.commits.flatMap(commit => [commit.author,commit.committer]),
+    ]);
+    return {
+      id:result.review_id,
+      record_revision:reviewObservationRevision({
+        native_revision:nativePull.revision,checks:nativePull.checks,
+        implementation_identity:nativePull.implementation_identity,
+      }),
+      reviewed_revision:result.reviewed_revision,verdict:result.verdict,
+      independent:result.reviewer.role==="independent-reviewer" && !identities.has(result.reviewer.identity),
+      formal:nativePull.formal_review?.state==="APPROVED" &&
+        nativePull.formal_review.reviewed_revision===nativePull.head_sha,
+      reviewer:result.reviewer.identity,
+    };
+  }
+
+  function epicChecksEvidence(nativePull) {
+    return nativePull?.checks
+      ? {...nativePull.checks,observation:sha256Canonical(nativePull.checks)}
+      : null;
+  }
+
+  function liveAcceptanceBinding(record,nativePull) {
+    const repository=repo(record.work.item.repository);
+    return {
+      epic:{id:record.work.item.id,revision:record.revision},
+      plan:{plan_id:record.epic_plan.plan_id,content_sha256:record.epic_plan.content_sha256},
+      children:record.epic_plan.children.map(child => ({id:child.id,revision:issue(child.id)?.revision})),
+      edges:record.epic_plan.edges.map(edge => ({edge_id:edge.edge_id,revision:dependency.edges.get(edge.edge_id)?.revision})),
+      release:record.work.release,pull_request:epicPullEvidence(repository,nativePull),
+      review:epicReviewEvidence(nativePull),checks:epicChecksEvidence(nativePull),
+      project:{id:project.id,revision:project.revision},policy_revision:"POLICY-0001",
+    };
+  }
+
+  function recordSemanticallyDone(record) {
+    return record?.work.issue_state==="CLOSED" && record.work.item.status==="Done" &&
+      record.work.item.gate==="NONE" && record.work.pull_request?.state==="MERGED" &&
+      record.work.pull_request.head_sha===record.work.pull_request.merged_sha &&
+      record.work.project.fields.Status==="Done" && record.work.project.fields.Gate==="NONE";
+  }
+
+  function epicBlockingDependencies(record) {
+    return [...new Set(record.epic_plan.edges
+      .filter(edge => !recordSemanticallyDone(issue(edge.target)))
+      .map(edge => edge.target))].sort(compare);
+  }
+
   async function snapshot(queryInput) {
     const query=copy(queryInput,"fake GitHub snapshot query");
     if (!query || typeof query!=="object" || Array.isArray(query) || typeof query.kind!=="string") {
@@ -309,16 +391,17 @@ export function createCoreGithubFixture(options={}) {
         if (!record || record.native_parent_id!==query.id || record.projected!==true) {
           throw new CoreConflictError(`Prepared epic child ${planned.id} is missing`);
         }
-        return {id:planned.id,revision:record.revision};
+        return governedWorkEvidence(record);
       });
       const edges=epicRecord.epic_plan.edges.map(planned => {
         const edge=dependency.edges.get(planned.edge_id);
         const relationship=dependency.relationships.get(planned.edge_id);
+        const target=issue(planned.target);
         if (!edge || !relationship || canonicalJson(edge)!==canonicalJson(planned) ||
-            relationship.revision!==planned.revision) {
+            relationship.revision!==planned.revision || !target) {
           throw new CoreConflictError(`Prepared epic dependency ${planned.edge_id} is missing`);
         }
-        return {edge_id:planned.edge_id,revision:planned.revision};
+        return {edge_id:planned.edge_id,revision:planned.revision,edge,relationship,target:governedWorkEvidence(target)};
       });
       return copy({
         kind:query.kind,source:source(repository.repository,repository.revision),
@@ -338,16 +421,15 @@ export function createCoreGithubFixture(options={}) {
       const pullRequest=[...repository.pullRequests.values()].find(value => value.work_item_id===query.id) ?? null;
       const children=epicRecord.epic_plan.children.flatMap(planned => {
         const record=issue(planned.id);
-        return record ? [{
-          id:planned.id,state:record.work.issue_state,revision:record.revision,
-          item:record.work.item,native_parent_id:record.native_parent_id,
-          project_id:record.work.project.project_id,projected:record.projected,
-        }] : [];
+        return record ? [governedWorkEvidence(record)] : [];
       });
       const edges=epicRecord.epic_plan.edges.flatMap(planned => {
         const edge=dependency.edges.get(planned.edge_id);
         const relationship=dependency.relationships.get(planned.edge_id);
-        return edge && relationship ? [{edge_id:edge.edge_id,revision:edge.revision,edge,relationship,target_state:issue(edge.target)?.work.issue_state ?? "MISSING"}] : [];
+        const target=issue(planned.target);
+        return edge && relationship && target
+          ? [{edge_id:edge.edge_id,revision:edge.revision,edge,relationship,target:governedWorkEvidence(target)}]
+          : [];
       });
       return copy({
         kind:query.kind,source:source(repository.repository,repository.revision),
@@ -367,14 +449,18 @@ export function createCoreGithubFixture(options={}) {
       }
       const repository=repo(epicRecord.work.item.repository);
       const nativePull=[...repository.pullRequests.values()].find(value => value.work_item_id===query.id) ?? null;
+      const nativeBranch=repository.branches.get(epicRecord.work.item.branch) ?? null;
       const children=epicRecord.epic_plan.children.flatMap(planned => {
         const record=issue(planned.id);
-        return record ? [{id:planned.id,state:record.work.issue_state,revision:record.revision,item:record.work.item,native_parent_id:record.native_parent_id,project_id:record.work.project.project_id,projected:record.projected}] : [];
+        return record ? [governedWorkEvidence(record)] : [];
       });
       const edges=epicRecord.epic_plan.edges.flatMap(planned => {
         const edge=dependency.edges.get(planned.edge_id);
         const relationship=dependency.relationships.get(planned.edge_id);
-        return edge && relationship ? [{edge_id:edge.edge_id,revision:edge.revision,edge,relationship,target_state:issue(edge.target)?.work.issue_state ?? "MISSING"}] : [];
+        const target=issue(planned.target);
+        return edge && relationship && target
+          ? [{edge_id:edge.edge_id,revision:edge.revision,edge,relationship,target:governedWorkEvidence(target)}]
+          : [];
       });
       const pullRequest=nativePull===null ? null : {
         id:`${repository.repository}#${nativePull.number}`,number:nativePull.number,
@@ -400,7 +486,8 @@ export function createCoreGithubFixture(options={}) {
         kind:query.kind,source:source(repository.repository,repository.revision),
         epic:epicRecord.work,epic_revision:epicRecord.revision,
         plan:epicRecord.epic_plan,epic_approval:epicRecord.epic_approval ?? null,
-        children,edges,release:epicRecord.work.release,pull_request:pullRequest,
+        children,edges,release:epicRecord.work.release,
+        branch:nativeBranch===null ? null : {...nativeBranch},pull_request:pullRequest,
         review,checks,project:{id:project.id,revision:project.revision},
       },"epic acceptance snapshot");
     }
@@ -416,12 +503,15 @@ export function createCoreGithubFixture(options={}) {
       const plan=epicRecord.epic_plan ?? null;
       const children=plan===null ? [] : plan.children.flatMap(planned => {
         const record=issue(planned.id);
-        return record ? [{id:planned.id,state:record.work.issue_state,revision:record.revision,item:record.work.item,native_parent_id:record.native_parent_id,project_id:record.work.project.project_id,projected:record.projected}] : [];
+        return record ? [governedWorkEvidence(record)] : [];
       });
       const edges=plan===null ? [] : plan.edges.flatMap(planned => {
         const edge=dependency.edges.get(planned.edge_id);
         const relationship=dependency.relationships.get(planned.edge_id);
-        return edge && relationship ? [{edge_id:edge.edge_id,revision:edge.revision,edge,relationship,target_state:issue(edge.target)?.work.issue_state ?? "MISSING"}] : [];
+        const target=issue(planned.target);
+        return edge && relationship && target
+          ? [{edge_id:edge.edge_id,revision:edge.revision,edge,relationship,target:governedWorkEvidence(target)}]
+          : [];
       });
       const pullRequest=nativePull===null ? null : {id:`${repository.repository}#${nativePull.number}`,number:nativePull.number,revision:nativePull.revision,head_sha:nativePull.head_sha,head:nativePull.head,base:nativePull.base,head_repository:nativePull.head_repository,base_repository:nativePull.base_repository,state:nativePull.state,merged_sha:nativePull.merged_sha};
       const result=nativePull?.recorded_result ?? null;
@@ -956,10 +1046,7 @@ export function createCoreGithubFixture(options={}) {
     const releaseBranch=record ? repository.branches.get(record.work.release.branch) : null;
     if (!record || record.work.item.kind!=="epic" || !record.epic_approval || !pullRequest ||
         pullRequest.state!=="READY" || pullRequest.head_sha!==payload.head_sha ||
-        payload.authority_binding.epic.id!==payload.epic_id ||
-        payload.authority_binding.epic.revision!==record.revision ||
-        payload.authority_binding.pull_request.revision!==pullRequest.revision ||
-        payload.authority_binding.pull_request.head_sha!==pullRequest.head_sha ||
+        canonicalJson(payload.authority_binding)!==canonicalJson(liveAcceptanceBinding(record,pullRequest)) ||
         !releaseBranch || pullRequest.base!==releaseBranch.name) {
       throw new CoreConflictError("Epic acceptance conflicts with exact current merge evidence");
     }
@@ -1032,6 +1119,26 @@ export function createCoreGithubFixture(options={}) {
     if (failureMode==="throw-apply") throw new Error("injected fake GitHub apply failure");
     const observations=[];
     const acceptance=values.find(operation => operation.resource==="pull_request" && operation.payload.kind==="epic-accept");
+    if (acceptance!==undefined && failureMode?.startsWith("drift-epic-")) {
+      const record=issue(acceptance.payload.epic_id);
+      const nativePull=[...repo(acceptance.repository).pullRequests.values()]
+        .find(value => value.work_item_id===acceptance.payload.epic_id);
+      if (failureMode==="drift-epic-child-binding") {
+        const childRecord=issue(record.epic_plan.children[0].id);
+        childRecord.revision=bump(`issue-${childRecord.work.item.issue_number}`,childRecord.revision);
+      } else if (failureMode==="drift-epic-edge-binding") {
+        const edge=dependency.edges.get(record.epic_plan.edges[0].edge_id);
+        edge.revision=`${edge.revision}-drift`;
+      } else if (failureMode==="drift-epic-release-binding") {
+        record.work.release.revision=`${record.work.release.revision}-drift`;
+      } else if (failureMode==="drift-epic-review-binding") {
+        nativePull.recorded_result.reviewed_revision="0".repeat(40);
+      } else if (failureMode==="drift-epic-checks-binding") {
+        nativePull.checks.state="FAILED";
+      } else if (failureMode==="drift-epic-project-binding") {
+        project.revision=bump("project",project.revision);
+      }
+    }
     const executionValues=acceptance===undefined
       ? values
       : [acceptance,...values.filter(operation => operation!==acceptance)];
@@ -1138,6 +1245,7 @@ export function createCoreGithubFixture(options={}) {
     record.work.project.fields.base_branch=branch;
     record.work.project.fields.Status="Blocked";
     record.work.project.fields.Gate="DEPENDENCY_REQUIRED";
+    record.work.blocking_dependencies=epicBlockingDependencies(record);
     record.revision=bump(`issue-${record.work.item.issue_number}`,record.revision);
     for (const planned of record.epic_plan.children) {
       const childRecord=issue(planned.id);
@@ -1204,7 +1312,8 @@ export function createCoreGithubFixture(options={}) {
     if (record.work.parent) {
       const parent=issue(record.work.parent.id);
       parent.work.physical_branch={exists:true,head_sha:base.head_sha};
-      parent.work.children_complete=parent.epic_plan.children.every(child => issue(child.id)?.work.issue_state==="CLOSED");
+      parent.work.children_complete=parent.epic_plan.children.every(child => recordSemanticallyDone(issue(child.id)));
+      parent.work.blocking_dependencies=epicBlockingDependencies(parent);
       parent.work.item.status=parent.work.children_complete ? "In progress" : "Blocked";
       parent.work.item.gate=parent.work.children_complete ? "NONE" : "DEPENDENCY_REQUIRED";
       parent.work.project.fields.Status=parent.work.item.status;
@@ -1307,6 +1416,7 @@ export function createCoreGithubFixture(options={}) {
     const pullRequest=repo(repositoryName).pullRequests.get(number);
     if (!pullRequest?.review_snapshot) throw new TypeError("review pull request does not exist");
     pullRequest.checks=structuredClone(value);
+    pullRequest.revision=bump("pull-request",pullRequest.revision);
     issue(pullRequest.work_item_id).work.checks=structuredClone(value);
   }
   function setReviewImplementationIdentity(repositoryName,number,evidence) {
