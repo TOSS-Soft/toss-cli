@@ -1,7 +1,9 @@
 import {types} from "node:util";
 
 import {canonicalJson} from "../../contracts/acp.js";
+import {compareCanonicalText} from "../canonical-order.js";
 import {validateCoreDocument} from "../contracts.js";
+import {parseWorkItemId} from "../domain/identity.js";
 import {CoreConflictError,CoreValidationError} from "../errors.js";
 
 export const REPOSITORY_RELEASE_PHASES=Object.freeze([
@@ -104,15 +106,18 @@ function exactKeys(value,expected,label) {
   }
 }
 
-function compareText(left,right) {
-  if (left===right) return 0;
-  return left<right ? -1 : 1;
-}
-
 function assertAsciiOrderedUnique(values,label) {
   for (let index=1;index<values.length;index+=1) {
-    if (values[index-1]>=values[index]) {
+    if (compareCanonicalText(values[index-1],values[index])>=0) {
       invalid(`${label} must use unique stable ASCII order`);
+    }
+  }
+}
+
+function assertIdentityOrderedUnique(values,identity,label) {
+  for (let index=1;index<values.length;index+=1) {
+    if (compareCanonicalText(identity(values[index-1]),identity(values[index]))>=0) {
+      invalid(`${label} must use unique stable raw code-point order`);
     }
   }
 }
@@ -166,6 +171,11 @@ function assertReleaseIdentities(release) {
     }
   }
   assertAsciiOrderedUnique(release.scope,"Repository release scope");
+  for (const scopeId of release.scope) {
+    if (parseWorkItemId(scopeId).repository!==release.repository) {
+      invalid(`Repository release scope ${scopeId} must belong to ${release.repository}`);
+    }
+  }
 
   const evidence=release.publication_evidence;
   if (evidence!==null) {
@@ -179,6 +189,11 @@ function assertReleaseIdentities(release) {
         evidence.github_release.target_revision!==evidence.expected_revision) {
       invalid("Publication evidence must bind the exact repository release identity and revision");
     }
+    assertIdentityOrderedUnique(
+      evidence.github_release.assets,
+      asset => asset.name,
+      "Publication evidence assets by name",
+    );
   }
 }
 
@@ -196,14 +211,31 @@ function normalizeRepositoryRelease(input,label="Repository release") {
       invalid(`${label} transition history is not contiguous`);
     }
   }
+  if (release.phase==="DRAFT") {
+    if (release.transitions.length!==0) {
+      invalid(`${label} in DRAFT must not have transition history`);
+    }
+  } else {
+    const first=release.transitions[0];
+    if (first===undefined || first.event!=="ACTIVATE" ||
+        first.source_phase!=="DRAFT" || first.target_phase!=="ACTIVE") {
+      invalid(`${label} transition history must begin with DRAFT to ACTIVE activation`);
+    }
+    if (release.transitions.at(-1).target_phase!==release.phase) {
+      invalid(`${label} phase must equal its final transition target`);
+    }
+  }
   return release;
 }
 
 function normalizeEvent(input) {
   const event=copyClosed(input,"Repository release event");
   exactKeys(event,EVENT_KEYS,"Repository release event");
+  if (typeof event.event!=="string") {
+    invalid("Repository release event name must be a string");
+  }
   if (!Object.hasOwn(TRANSITIONS,event.event)) {
-    invalid(`Unknown repository release event: ${String(event.event)}`);
+    invalid(`Unknown repository release event: ${event.event}`);
   }
   parseRevision(event.expected_revision,"Repository release expected revision");
   if (!isRfc3339DateTime(event.timestamp)) {
@@ -277,7 +309,8 @@ function assertProgramSemantics(program) {
     if (releaseIds.has(release.release_id)) {
       invalid(`Program ${program.program_id} contains duplicate release ${release.release_id}`);
     }
-    if (previousRepository!==undefined && previousRepository>=release.repository) {
+    if (previousRepository!==undefined &&
+        compareCanonicalText(previousRepository,release.repository)>=0) {
       invalid(`Program ${program.program_id} repository releases must use stable ASCII order`);
     }
     repositories.add(release.repository);
@@ -286,6 +319,17 @@ function assertProgramSemantics(program) {
   }
 
   assertAsciiOrderedUnique(program.selected_scope,`Program ${program.program_id} selected scope`);
+  assertIdentityOrderedUnique(
+    program.deferred_scope,
+    deferred => deferred.epic_id,
+    `Program ${program.program_id} deferred scope by epic id`,
+  );
+  for (const deferred of program.deferred_scope) {
+    assertAsciiOrderedUnique(
+      deferred.blocking_ids,
+      `Program ${program.program_id} deferred scope ${deferred.epic_id} blocking ids`,
+    );
+  }
   let previousStage=0;
   const stagedReleases=new Set();
   for (const stage of program.dependency_stages) {
@@ -315,7 +359,7 @@ function assertProgramSemantics(program) {
       scoped.add(scopeId);
     }
   }
-  if (canonicalJson([...scoped].sort(compareText))!==canonicalJson(program.selected_scope)) {
+  if (canonicalJson([...scoped].sort(compareCanonicalText))!==canonicalJson(program.selected_scope)) {
     invalid(`Program ${program.program_id} selected scope must equal its repository release scope`);
   }
 }
@@ -366,9 +410,9 @@ export function assertRepositoryConcurrency(programsInput) {
   }
 
   for (const [repository,releaseIds] of [...activeByRepository].sort(([left],[right]) =>
-    compareText(left,right))) {
+    compareCanonicalText(left,right))) {
     if (releaseIds.length>1) {
-      const ordered=[...releaseIds].sort(compareText);
+      const ordered=[...releaseIds].sort(compareCanonicalText);
       throw new CoreConflictError(
         `Repository ${repository} has concurrent active releases: ${ordered.join(", ")}`,
       );

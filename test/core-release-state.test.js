@@ -29,6 +29,7 @@ function publicationEvidence({
   repository="TOSS-Soft/toss-cli",
   releaseId="REL-toss-cli-2.2.0",
   version="2.2.0",
+  assets=null,
 }={}) {
   return {
     schema_version:"publication-evidence.v1",
@@ -45,7 +46,7 @@ function publicationEvidence({
       target_revision:COMMIT,
       draft:false,
       prerelease:false,
-      assets:[{name:`toss-cli-${version}.tgz`,sha256:"b".repeat(64)}],
+      assets:assets ?? [{name:`toss-cli-${version}.tgz`,sha256:"b".repeat(64)}],
     },
     evidence_sha256:"c".repeat(64),
     source_receipt:"RECEIPT-20260902-0001",
@@ -63,6 +64,52 @@ function releasePrIntent(version="2.2.0") {
   };
 }
 
+function releaseHistory(phase) {
+  const activate={
+    event:"ACTIVATE",
+    source_phase:"DRAFT",
+    target_phase:"ACTIVE",
+    timestamp:"2026-09-02T09:00:00.000Z",
+    source_receipt:"RECEIPT-20260902-0001",
+  };
+  const scopeDone={
+    event:"SCOPE_DONE",
+    source_phase:"ACTIVE",
+    target_phase:"READY_FOR_APPROVAL",
+    timestamp:"2026-09-02T09:01:00.000Z",
+    source_receipt:"RECEIPT-20260902-0002",
+  };
+  const approve={
+    event:"APPROVE",
+    source_phase:"READY_FOR_APPROVAL",
+    target_phase:"PUBLISHING",
+    timestamp:"2026-09-02T09:02:00.000Z",
+    source_receipt:"RECEIPT-20260902-0003",
+  };
+  const verify={
+    event:"VERIFY_PUBLICATION",
+    source_phase:"PUBLISHING",
+    target_phase:"RELEASED",
+    timestamp:"2026-09-02T09:03:00.000Z",
+    source_receipt:"RECEIPT-20260902-0004",
+  };
+  const pause={
+    event:"PAUSE_FOR_PATCH",
+    source_phase:"ACTIVE",
+    target_phase:"PAUSED",
+    timestamp:"2026-09-02T09:04:00.000Z",
+    source_receipt:"RECEIPT-20260902-0005",
+  };
+
+  if (phase==="DRAFT") return [];
+  if (phase==="ACTIVE") return [activate];
+  if (phase==="PAUSED") return [activate,pause];
+  if (phase==="READY_FOR_APPROVAL") return [activate,scopeDone];
+  if (phase==="PUBLISHING") return [activate,scopeDone,approve];
+  if (phase==="RELEASED") return [activate,scopeDone,approve,verify];
+  throw new Error(`Unsupported fixture phase: ${phase}`);
+}
+
 function repositoryRelease({
   repository="TOSS-Soft/toss-cli",
   releaseId="REL-toss-cli-2.2.0",
@@ -70,8 +117,9 @@ function repositoryRelease({
   phase="DRAFT",
   revision="REV-0042",
   version="2.2.0",
-  transitions=[],
+  transitions,
   evidence=null,
+  scope,
 }={}) {
   const materialized=phase!=="DRAFT";
   return {
@@ -85,9 +133,9 @@ function repositoryRelease({
     milestone:materialized ? `v${version}` : null,
     branch:materialized ? `release/v${version}` : null,
     release_pr_intent:materialized ? releasePrIntent(version) : null,
-    scope:[`${repository}#42`],
+    scope:scope ?? [`${repository}#42`],
     publication_evidence:evidence,
-    transitions,
+    transitions:transitions ?? releaseHistory(phase),
   };
 }
 
@@ -97,6 +145,7 @@ function releaseProgram({
   revision="REV-0007",
   releases=[repositoryRelease({phase:"ACTIVE"})],
   interrupts=null,
+  deferredScope=[],
 }={}) {
   return {
     schema_version:"release-program.v1",
@@ -109,7 +158,7 @@ function releaseProgram({
       repository_release_ids:releases.map(release => release.release_id),
     }],
     selected_scope:releases.flatMap(release => release.scope),
-    deferred_scope:[],
+    deferred_scope:deferredScope,
     rationale:releases.length===0 ? ["No eligible approved epic is available."] : [
       "Selected the highest-priority coherent outcome.",
     ],
@@ -288,6 +337,44 @@ test("repository release transitions follow only the six exact event pairs",asyn
   assert.equal(byPhase.get("RELEASED").publication_evidence.evidence_id,"PUB-20260902-0001");
 });
 
+test("persisted release history is anchored to DRAFT and the materialized phase",async () => {
+  const {assertRepositoryConcurrency,transitionRepositoryRelease}=await releaseState();
+  const invalidReleases=[
+    repositoryRelease({phase:"DRAFT",transitions:releaseHistory("ACTIVE")}),
+    repositoryRelease({phase:"ACTIVE",transitions:[]}),
+    repositoryRelease({
+      phase:"PAUSED",
+      transitions:[{
+        event:"PAUSE_FOR_PATCH",
+        source_phase:"ACTIVE",
+        target_phase:"PAUSED",
+        timestamp:"2026-09-02T09:04:00.000Z",
+        source_receipt:"RECEIPT-20260902-0005",
+      }],
+    }),
+    repositoryRelease({phase:"PUBLISHING",transitions:releaseHistory("READY_FOR_APPROVAL")}),
+  ];
+
+  for (const release of invalidReleases) {
+    assert.throws(
+      () => assertRepositoryConcurrency([releaseProgram({releases:[release]})]),
+      error => error instanceof CoreValidationError && error.exitCode===5,
+    );
+  }
+
+  const forgedPublishing=repositoryRelease({
+    phase:"PUBLISHING",
+    evidence:publicationEvidence(),
+    transitions:[],
+  });
+  assert.throws(
+    () => transitionRepositoryRelease(
+      forgedPublishing,transitionEvent("VERIFY_PUBLICATION",forgedPublishing.revision),
+    ),
+    error => error instanceof CoreValidationError && error.exitCode===5,
+  );
+});
+
 test("every release event rejects every illegal source phase",async () => {
   const {transitionRepositoryRelease}=await releaseState();
   const validSourceByEvent=new Map([
@@ -403,6 +490,20 @@ test("state inputs are trap-safe and transition outputs are detached",async () =
   assert.ok(deeplyFrozen(result));
 });
 
+test("ordinary closed hostile event names fail typed without primitive coercion",async () => {
+  const {transitionRepositoryRelease}=await releaseState();
+  const release=repositoryRelease();
+  const event=transitionEvent("ACTIVATE",release.revision,{
+    event:{toString:"not-callable",valueOf:"not-callable"},
+  });
+
+  assert.throws(
+    () => transitionRepositoryRelease(release,event),
+    error => error instanceof CoreValidationError && error.exitCode===5 &&
+      !/Cannot convert object to primitive/.test(error.message),
+  );
+});
+
 test("repository concurrency permits independent repositories and a retained paused branch",async () => {
   const {assertRepositoryConcurrency}=await releaseState();
   const cli=repositoryRelease({phase:"ACTIVE"});
@@ -463,6 +564,117 @@ test("repository concurrency rejects overlapping and duplicate repository tracks
     ]),
     CoreValidationError,
   );
+});
+
+test("release scope identities must belong to the release repository",async () => {
+  const {assertRepositoryConcurrency}=await releaseState();
+  const release=repositoryRelease({
+    phase:"ACTIVE",
+    scope:["TOSS-Soft/toss-console#42"],
+  });
+
+  assert.throws(
+    () => assertRepositoryConcurrency([releaseProgram({releases:[release]})]),
+    error => error instanceof CoreValidationError && error.exitCode===5,
+  );
+});
+
+test("nested set-like release collections require canonical logical identity order",async () => {
+  const {assertRepositoryConcurrency}=await releaseState();
+  const invalidPrograms=[
+    releaseProgram({deferredScope:[
+      {
+        epic_id:"TOSS-Soft/toss-cli#99",
+        reason_code:"DEPENDENCY",
+        blocking_ids:[],
+        explanation:"Later work first.",
+      },
+      {
+        epic_id:"TOSS-Soft/toss-cli#98",
+        reason_code:"CAPACITY",
+        blocking_ids:[],
+        explanation:"Earlier work second.",
+      },
+    ]}),
+    releaseProgram({deferredScope:[
+      {
+        epic_id:"TOSS-Soft/toss-cli#99",
+        reason_code:"DEPENDENCY",
+        blocking_ids:[],
+        explanation:"First explanation.",
+      },
+      {
+        epic_id:"TOSS-Soft/toss-cli#99",
+        reason_code:"CAPACITY",
+        blocking_ids:[],
+        explanation:"Different object with the same identity.",
+      },
+    ]}),
+    releaseProgram({deferredScope:[{
+      epic_id:"TOSS-Soft/toss-cli#99",
+      reason_code:"DEPENDENCY",
+      blocking_ids:["TOSS-Soft/toss-cli#42","TOSS-Soft/toss-cli#41"],
+      explanation:"Blocking identities are descending.",
+    }]}),
+    releaseProgram({deferredScope:[{
+      epic_id:"TOSS-Soft/toss-cli#99",
+      reason_code:"DEPENDENCY",
+      blocking_ids:["TOSS-Soft/toss-cli#41","TOSS-Soft/toss-cli#41"],
+      explanation:"Blocking identities are duplicated.",
+    }]}),
+  ];
+
+  for (const program of invalidPrograms) {
+    assert.throws(
+      () => assertRepositoryConcurrency([program]),
+      error => error instanceof CoreValidationError && error.exitCode===5,
+    );
+  }
+
+  for (const assets of [
+    [
+      {name:"z-package.tgz",sha256:"c".repeat(64)},
+      {name:"a-package.tgz",sha256:"d".repeat(64)},
+    ],
+    [
+      {name:"package.tgz",sha256:"c".repeat(64)},
+      {name:"package.tgz",sha256:"d".repeat(64)},
+    ],
+  ]) {
+    const release=repositoryRelease({
+      phase:"RELEASED",
+      evidence:publicationEvidence({assets}),
+    });
+    assert.throws(
+      () => assertRepositoryConcurrency([releaseProgram({releases:[release]})]),
+      error => error instanceof CoreValidationError && error.exitCode===5,
+    );
+  }
+
+  const canonicalRelease=repositoryRelease({
+    phase:"RELEASED",
+    evidence:publicationEvidence({assets:[
+      {name:"a-package.tgz",sha256:"c".repeat(64)},
+      {name:"z-package.tgz",sha256:"d".repeat(64)},
+    ]}),
+  });
+  assert.equal(assertRepositoryConcurrency([releaseProgram({
+    releases:[canonicalRelease],
+    deferredScope:[
+      {
+        epic_id:"TOSS-Soft/toss-cli#98",
+        reason_code:"CAPACITY",
+        blocking_ids:[],
+        explanation:"Earlier epic first.",
+      },
+      {
+        epic_id:"TOSS-Soft/toss-cli#99",
+        reason_code:"DEPENDENCY",
+        blocking_ids:["TOSS-Soft/toss-cli#41","TOSS-Soft/toss-cli#42"],
+        explanation:"Later epic second.",
+      },
+    ],
+  })]),true);
 });
 
 test("patch concurrency binds the exact paused program, release, and revision",async () => {
