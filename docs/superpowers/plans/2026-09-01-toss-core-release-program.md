@@ -12,6 +12,10 @@
 
 **Plan sequence:** 3 of 5. Requires `2026-09-01-toss-core-work-lifecycle.md`; continue with `2026-09-01-toss-core-reconciliation-actions.md`.
 
+## Execution Notes
+
+Work Lifecycle was accepted on 2026-09-02 at `be93be122e1b1b6969e0846b75feefd89edfd24b`. Release Program implementation must build from this exact candidate or a descendant that contains it. The package version remains `2.1.1`; version selection in this plan describes governed future repository releases and does not retroactively version existing work.
+
 **Global Constraints:**
 
 - A program coordinates repositories but never imposes one shared product version. Each repository owns its SemVer, milestone, release branch, tag, package, and evidence.
