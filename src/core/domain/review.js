@@ -1,11 +1,13 @@
 import {types} from "node:util";
 
-import {canonicalJson} from "../../contracts/acp.js";
+import {canonicalJson,sha256Canonical} from "../../contracts/acp.js";
 import {validateCoreDocument} from "../contracts.js";
 import {CoreBlockedError,CoreValidationError} from "../errors.js";
 import {parseWorkItemId} from "./identity.js";
 
 const SHA=/^[a-f0-9]{40}$/u;
+const SHA256=/^[a-f0-9]{64}$/u;
+const VISIBLE_IDENTITY=/^[A-Za-z0-9][A-Za-z0-9._@+-]{0,253}$/u;
 
 function invalid(message,options={}) {
   throw new CoreValidationError(message,options);
@@ -77,11 +79,10 @@ function sha(value,label) {
 }
 
 function identityKey(value,label) {
-  if (typeof value!=="string" || value.trim().length===0 ||
-      /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value)) {
-    invalid(`${label} must be a normalizable nonblank identity`);
+  if (typeof value!=="string" || !VISIBLE_IDENTITY.test(value)) {
+    invalid(`${label} must be a visible bounded ASCII GitHub-style identity`);
   }
-  return value.normalize("NFKC").trim().replace(/\s+/gu," ").toLowerCase();
+  return value.toLowerCase();
 }
 
 function summaryKey(value) {
@@ -149,11 +150,24 @@ export function normalizeReviewResult(input) {
 
 export function validateImplementationIdentity(input) {
   const value=copyClosed(input,"Implementation identity evidence");
-  exact(value,["revision","pull_request_author","commits"],"Implementation identity evidence");
+  exact(value,[
+    "base_revision","revision","pull_request_author","commit_count","commits_sha256","commits",
+  ],"Implementation identity evidence");
+  sha(value.base_revision,"Implementation identity base revision");
   sha(value.revision,"Implementation identity revision");
+  if (value.base_revision===value.revision) {
+    invalid("Implementation identity base and head revisions must differ");
+  }
   identityKey(value.pull_request_author,"Pull request author identity");
   if (!Array.isArray(value.commits) || value.commits.length===0) {
     invalid("Implementation identity evidence must contain every implementation commit identity");
+  }
+  if (!Number.isSafeInteger(value.commit_count) || value.commit_count<1 ||
+      value.commit_count!==value.commits.length) {
+    invalid("Implementation identity commit count must equal the complete commit evidence length");
+  }
+  if (typeof value.commits_sha256!=="string" || !SHA256.test(value.commits_sha256)) {
+    invalid("Implementation identity commit digest must be a lowercase SHA-256 digest");
   }
   const revisions=new Set();
   const commits=value.commits.map(commit => {
@@ -167,6 +181,9 @@ export function validateImplementationIdentity(input) {
   }).sort((left,right) => compare(left.revision,right.revision));
   if (!revisions.has(value.revision)) {
     invalid("Implementation identity evidence must include the exact current revision");
+  }
+  if (value.commits_sha256!==sha256Canonical(commits)) {
+    invalid("Implementation identity commit digest must bind the canonical complete commit evidence");
   }
   return Object.freeze({...value,commits:Object.freeze(commits)});
 }

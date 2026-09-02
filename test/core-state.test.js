@@ -146,6 +146,10 @@ test("the ordered state table covers every approved status and gate",() => {
   changesRequested.review={verdict:"CHANGES_REQUESTED",reviewed_revision:HEAD_A};
   changesRequested.checks={state:"PENDING",revision:HEAD_A};
 
+  const blockedReview=withPullRequest(snapshot());
+  blockedReview.review={verdict:"BLOCKED",reviewed_revision:HEAD_A};
+  blockedReview.checks={state:"PASSED",revision:HEAD_A};
+
   const reviewRequired=withPullRequest(snapshot());
   reviewRequired.review={verdict:"APPROVED",reviewed_revision:HEAD_B};
   reviewRequired.checks={state:"PASSED",revision:HEAD_A};
@@ -193,6 +197,10 @@ test("the ordered state table covers every approved status and gate",() => {
       next_command:"toss-core dependency check",
     }),
     stateCase("changes requested",changesRequested,{
+      status:"Blocked",gate:"CHANGES_REQUESTED",
+      next_command:"toss-core review status",
+    }),
+    stateCase("blocked review",blockedReview,{
       status:"Blocked",gate:"CHANGES_REQUESTED",
       next_command:"toss-core review status",
     }),

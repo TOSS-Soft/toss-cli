@@ -1,13 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {canonicalJson} from "../src/contracts/acp.js";
+import {canonicalJson,sha256Canonical} from "../src/contracts/acp.js";
 import {runReviewCommand} from "../src/core/commands/review.js";
 import {dispatchCoreCommand,parseCoreCommand} from "../src/core/commands/router.js";
 import {
   assertIndependentReviewer,
   normalizeReviewResult,
   reviewFreshness,
+  validateImplementationIdentity,
 } from "../src/core/domain/review.js";
 import {CoreConflictError,CoreValidationError} from "../src/core/errors.js";
 import {createOperationRunner} from "../src/core/operations/runner.js";
@@ -20,15 +21,19 @@ import {
 import {
   recordReview,
   reviewFollowUpMarker,
+  reviewObservationRevision,
   reviewStatus,
 } from "../src/core/review/recorder.js";
 import {createCoreGithubFixture} from "./support/core-github-fixture.js";
 
 const REPOSITORY="TOSS-Soft/toss-cli";
 const OTHER_REPOSITORY="TOSS-Soft/toss-console";
+const BASE_HEAD="0".repeat(40);
+const HISTORY_HEAD="9".repeat(40);
 const HEAD_A="a".repeat(40);
 const HEAD_B="b".repeat(40);
 const NOW="2026-09-03T08:00:00.000Z";
+const LATER="2026-09-03T09:00:00.000Z";
 const EARLIER="2026-09-03T07:55:00.000Z";
 const HASH_A="a".repeat(64);
 
@@ -93,23 +98,41 @@ function workSnapshot({head=HEAD_A,review=null,checks={state:"PASSED",revision:h
 }
 
 function implementationIdentity(overrides={}) {
+  const revision=overrides.revision ?? HEAD_A;
+  const commits=overrides.commits ?? [
+    {revision:HISTORY_HEAD,author:"first-author",committer:"first-committer"},
+    {revision:HEAD_A,author:"implementation-author",committer:"merge-committer"},
+    ...(revision===HEAD_A ? [] : [{
+      revision,author:"implementation-author",committer:"merge-committer",
+    }]),
+  ];
+  const sorted=[...commits].sort((left,right) => left.revision.localeCompare(right.revision));
   return {
-    revision:HEAD_A,
+    base_revision:BASE_HEAD,
+    revision,
     pull_request_author:"implementation-author",
-    commits:[
-      {revision:HEAD_A,author:"implementation-author",committer:"merge-committer"},
-      {revision:HEAD_B,author:"first-author",committer:"first-committer"},
-    ],
+    commit_count:commits.length,
+    commits_sha256:sha256Canonical(sorted),
+    commits,
     ...overrides,
   };
 }
 
 function pullRequest(overrides={}) {
   const head=overrides.head_sha ?? HEAD_A;
+  const identityEvidence=overrides.implementationIdentityEvidence ??
+    implementationIdentity({revision:head});
+  const nativeRevision=overrides.native_revision ?? "pull-request-1";
+  const checks=overrides.checks ?? {state:"PASSED",revision:head};
+  const publicOverrides={...overrides};
+  delete publicOverrides.implementationIdentityEvidence;
   return {
     repository:REPOSITORY,
     number:91,
-    revision:"pull-request-1",
+    native_revision:nativeRevision,
+    revision:reviewObservationRevision({
+      native_revision:nativeRevision,checks,implementation_identity:identityEvidence,
+    }),
     head_repository:REPOSITORY,
     base_repository:REPOSITORY,
     head:"issue/43-record-review",
@@ -118,9 +141,9 @@ function pullRequest(overrides={}) {
     body:"Human introduction.",
     formal_review:{state:"NONE",review_id:null,reviewed_revision:null},
     recorded_result:null,
-    checks:{state:"PASSED",revision:head},
+    checks,
     work:workSnapshot({head}),
-    ...overrides,
+    ...publicOverrides,
   };
 }
 
@@ -136,10 +159,11 @@ function project(overrides={}) {
 }
 
 function recording(overrides={}) {
+  const identity=overrides.implementationIdentity ?? implementationIdentity();
   return {
-    pullRequest:pullRequest(),
+    pullRequest:pullRequest({implementationIdentityEvidence:identity}),
     result:result(),
-    implementationIdentity:implementationIdentity(),
+    implementationIdentity:identity,
     project:project(),
     ...overrides,
   };
@@ -173,13 +197,27 @@ function followUpMapping(review=result(),finding=unresolvedFinding(),issueNumber
   };
 }
 
-function reservation(findingId="FINDING-minor",issueNumber=99,overrides={}) {
+function reservation(findingId="FINDING-minor",issueNumber=44,overrides={}) {
+  return boundReservation(
+    result(),unresolvedFinding({findingId}),pullRequest(),project(),issueNumber,overrides,
+  );
+}
+
+function boundReservation(review,finding,pull,projectEvidence,issueNumber=44,overrides={}) {
   return {
-    finding_id:findingId,
-    repository:REPOSITORY,
+    review_id:review.review_id,
+    finding_id:finding.finding_id,
+    source_pull_request_repository:pull.repository,
+    source_pull_request_number:pull.number,
+    source_pull_request_revision:pull.revision,
+    source_pull_request_head:pull.head_sha,
+    reviewed_repository:review.repository,
+    project_id:projectEvidence.project_id,
+    project_item_id:projectEvidence.item_id,
+    project_revision:projectEvidence.revision,
     issue_number:issueNumber,
+    repository:review.repository,
     repository_revision:"repository-1",
-    project_revision:"project-1",
     ...overrides,
   };
 }
@@ -283,7 +321,6 @@ test("managed review parser rejects duplicate nested reversed partial and marker
 
 test("review rendering is stable raw-order deterministic and injection-safe without mutating semantic evidence",() => {
   const first=result({
-    reviewer:{identity:"reviewer\n## forged",role:"independent-reviewer"},
     findings:[
       unresolvedFinding({findingId:"FINDING-z",summary:"z\n<!-- toss-core:review-results:end -->"}),
       {finding_id:"FINDING-a",severity:"Minor",summary:"a",resolved:true},
@@ -303,7 +340,6 @@ test("review rendering is stable raw-order deterministic and injection-safe with
   assert.equal(rendered.split(REVIEW_MARKERS.end).length-1,1);
   assert.equal(rendered.includes("\n## forged"),false);
   assert.equal(rendered.includes("\n- forged list"),false);
-  assert.equal(first.reviewer.identity,"reviewer\n## forged");
   assert.equal(first.findings[0].summary,"z\n<!-- toss-core:review-results:end -->");
 });
 
@@ -358,6 +394,59 @@ test("reviewer independence uses case-insensitive revision-pinned author and com
   );
 });
 
+test("review identities reject invisible whitespace control format and non-ASCII confusable values",() => {
+  const invalidIdentities=[
+    "reviewer\nother","reviewer\tother","reviewer\u200b","reviewer\u2060",
+    "r\u00e9viewer","\uff52eviewer",
+  ];
+  for (const identity of invalidIdentities) {
+    assert.throws(
+      () => normalizeReviewResult(result({
+        reviewer:{identity,role:"independent-reviewer"},
+      })),
+      CoreValidationError,
+    );
+    assert.throws(
+      () => validateImplementationIdentity(implementationIdentity({
+        pull_request_author:identity,
+      })),
+      CoreValidationError,
+    );
+  }
+});
+
+test("implementation identity requires revision-bound complete commit count and canonical digest proof",() => {
+  const commits=[
+    {revision:HEAD_A,author:"implementation-author",committer:"merge-committer"},
+    {revision:"c".repeat(40),author:"historical-author",committer:"historical-committer"},
+  ];
+  const complete={
+    base_revision:"0".repeat(40),revision:HEAD_A,
+    pull_request_author:"implementation-author",
+    commit_count:2,commits_sha256:sha256Canonical(commits),commits,
+  };
+  const validated=validateImplementationIdentity(complete);
+  assert.equal(validated.commit_count,2);
+  assert.equal(validated.commits_sha256,sha256Canonical(commits));
+  assert.throws(
+    () => assertIndependentReviewer("HISTORICAL-COMMITTER",complete),
+    error => error.exitCode===4,
+  );
+
+  const invalid=[
+    {...complete,commits:commits.slice(1)},
+    {...complete,commit_count:1},
+    {...complete,commits_sha256:"0".repeat(64)},
+    {...complete,base_revision:HEAD_A},
+    {...complete,revision:"d".repeat(40)},
+    {...complete,commits:[...commits,commits[1]],commit_count:3,
+      commits_sha256:sha256Canonical([...commits,commits[1]])},
+  ];
+  for (const value of invalid) {
+    assert.throws(() => validateImplementationIdentity(value),CoreValidationError);
+  }
+});
+
 test("recordReview binds exact PR identity head checks and independent evidence before producing intent operations",() => {
   const cases=[
     recording({result:result({repository:OTHER_REPOSITORY})}),
@@ -376,7 +465,7 @@ test("recordReview binds exact PR identity head checks and independent evidence 
     "project.update","pull_request.update",
   ]);
   const pull=operations.find(value => value.resource==="pull_request");
-  assert.equal(pull.expected_revision,"pull-request-1");
+  assert.equal(pull.expected_revision,pullRequest().revision);
   assert.equal(pull.payload.formal_review.action,"APPROVE");
   assert.equal(pull.payload.head_sha,HEAD_A);
   assert.equal(canonicalJson(pull.payload.review_result),canonicalJson(result()));
@@ -411,15 +500,23 @@ test("every unresolved Minor reuses exactly one governed follow-up or creates it
     "issue.create","project.create","project.update","pull_request.update",
   ]);
   const issueCreate=created.find(value => value.resource==="issue");
-  assert.equal(issueCreate.payload.issue_id,`${REPOSITORY}#99`);
-  assert.equal(issueCreate.payload.reserved_branch,"issue/99-document-the-remaining-edge-case");
+  assert.equal(issueCreate.payload.issue_id,`${REPOSITORY}#44`);
+  assert.equal(issueCreate.payload.reserved_branch,"issue/44-document-the-remaining-edge-case");
   assert.equal(issueCreate.payload.marker,reviewFollowUpMarker(createdInput.review_id,finding.finding_id));
   assert.deepEqual(
     issueCreate.payload.review_context.review_result.follow_up_issues,
-    [`${REPOSITORY}#99`],
+    [`${REPOSITORY}#44`],
   );
   const finalResult=created.find(value => value.resource==="pull_request").payload.review_result;
-  assert.deepEqual(finalResult.follow_up_issues,[`${REPOSITORY}#99`]);
+  assert.deepEqual(finalResult.follow_up_issues,[`${REPOSITORY}#44`]);
+  assert.equal(
+    created.find(value => value.resource==="pull_request").payload.formal_review.action,
+    "APPROVE",
+  );
+  assert.equal(
+    created.find(value => value.resource==="project" && value.action==="update").payload.fields.Gate,
+    "NONE",
+  );
 
   const reusedInput=result({
     findings:[finding],unresolved:[finding.finding_id],follow_up_issues:[`${REPOSITORY}#99`],
@@ -523,8 +620,15 @@ test("status recomputes stale freshness after a push and reports body formal and
       {revision:HEAD_B,author:"independent-reviewer",committer:"independent-reviewer"},
     ],
   });
+  const pushedWithBecameImplementer={
+    ...pushed,
+    revision:reviewObservationRevision({
+      native_revision:pushed.native_revision,checks:pushed.checks,
+      implementation_identity:becameImplementer,
+    }),
+  };
   assert.equal(reviewStatus(statusInput(recording({
-    pullRequest:pushed,result:prior,implementationIdentity:becameImplementer,
+    pullRequest:pushedWithBecameImplementer,result:prior,implementationIdentity:becameImplementer,
   }))).freshness,"STALE");
 
   const bodyDrift={...pushed,body:"Human introduction."};
@@ -541,6 +645,315 @@ test("status recomputes stale freshness after a push and reports body formal and
   })));
   assert.equal(drift.reconciliation,"RECONCILE_REQUIRED");
   assert.equal(drift.next_command,"toss-core sync");
+});
+
+test("stored review control evidence rejects foreign pull requests repositories and recorded STALE state",() => {
+  for (const stored of [
+    result({repository:OTHER_REPOSITORY}),
+    result({pull_request_number:92}),
+    result({freshness:"STALE"}),
+  ]) {
+    const current=pullRequest({
+      body:updateManagedReviewBlock("Human introduction.",stored),
+      formal_review:{
+        state:"APPROVED",review_id:stored.review_id,
+        reviewed_revision:stored.reviewed_revision,
+      },
+      recorded_result:stored,
+      work:workSnapshot({review:{
+        verdict:stored.verdict,reviewed_revision:stored.reviewed_revision,
+      }}),
+    });
+    assert.throws(
+      () => reviewStatus(statusInput(recording({pullRequest:current,result:stored}))),
+      error => error instanceof CoreConflictError && error.exitCode===6,
+    );
+  }
+});
+
+test("recording rejects stale checks while current pending checks can record approval without merge eligibility",() => {
+  const staleChecks={state:"PASSED",revision:HEAD_B};
+  assert.throws(
+    () => recordReview(recording({pullRequest:pullRequest({
+      checks:staleChecks,work:workSnapshot({checks:staleChecks}),
+    })})),
+    error => error instanceof CoreConflictError && error.exitCode===6,
+  );
+
+  const pending={state:"PENDING",revision:HEAD_A};
+  const operations=recordReview(recording({pullRequest:pullRequest({
+    checks:pending,work:workSnapshot({checks:pending}),
+  })}));
+  const pull=operations.find(value => value.resource==="pull_request");
+  assert.equal(pull.payload.formal_review.action,"APPROVE");
+  const stored=result();
+  const currentPull=pullRequest({
+    body:updateManagedReviewBlock("Human introduction.",stored),
+    formal_review:{state:"APPROVED",review_id:stored.review_id,reviewed_revision:HEAD_A},
+    recorded_result:stored,checks:pending,
+    work:workSnapshot({review:{verdict:"APPROVED",reviewed_revision:HEAD_A},checks:pending}),
+  });
+  const status=reviewStatus(statusInput(recording({pullRequest:currentPull,result:stored})));
+  assert.equal(status.merge_eligible,false);
+  assert.equal(status.state.gate,"REVIEW_REQUIRED");
+});
+
+test("review PR CAS detects check and identity mutations after snapshot and fake apply cannot overwrite them",async () => {
+  for (const mutation of ["checks","identity"]) {
+    const state=harness();
+    const observed=await state.fixture.github.snapshot({
+      kind:"review",repository:REPOSITORY,number:91,
+    });
+    const operations=recordReview({
+      pullRequest:observed.pullRequest,result:result(),
+      implementationIdentity:observed.implementationIdentity,project:observed.project,
+    });
+    const changedChecks=mutation==="checks"
+      ? {state:"FAILED",revision:HEAD_A}
+      : observed.pullRequest.checks;
+    const changedIdentity=mutation==="identity"
+      ? implementationIdentity({pull_request_author:"different-author"})
+      : observed.implementationIdentity;
+    if (mutation==="checks") {
+      state.fixture.setReviewChecks(REPOSITORY,91,changedChecks);
+    } else {
+      state.fixture.setReviewImplementationIdentity(REPOSITORY,91,changedIdentity);
+    }
+    await assert.rejects(
+      state.runner.execute({
+        command:command(["review","record",`${REPOSITORY}#91`,"--from","review.json","--apply","--non-interactive"]),
+        source:observed.source,operations,authority:null,
+      }),
+      error => error instanceof CoreConflictError && error.exitCode===6,
+    );
+    const retained=state.fixture.view().repositories[0].pull_requests[0];
+    assert.equal(canonicalJson(retained.checks),canonicalJson(changedChecks));
+    assert.equal(canonicalJson(retained.implementation_identity),canonicalJson(changedIdentity));
+  }
+});
+
+test("fake review apply verifies embedded check and identity evidence without treating it as writable state",async () => {
+  for (const mutation of ["checks","identity"]) {
+    const state=harness();
+    const observed=await state.fixture.github.snapshot({
+      kind:"review",repository:REPOSITORY,number:91,
+    });
+    const operations=recordReview({
+      pullRequest:observed.pullRequest,result:result(),
+      implementationIdentity:observed.implementationIdentity,project:observed.project,
+    });
+    const planned=operations.find(value => value.resource==="pull_request");
+    const forgedPayload=mutation==="checks" ? {
+      ...planned.payload,checks:{state:"FAILED",revision:HEAD_A},
+    } : {
+      ...planned.payload,
+      implementation_identity:implementationIdentity({pull_request_author:"different-author"}),
+    };
+    await assert.rejects(
+      state.fixture.github.apply([{
+        ...planned,operation_id:`OPERATION-20260903-${mutation==="checks" ? "0001" : "0002"}`,
+        payload:forgedPayload,
+      }],{idempotencyKey:mutation==="checks" ? HASH_A : "b".repeat(64)}),
+      error => error instanceof CoreConflictError && error.exitCode===6,
+    );
+    const retained=state.fixture.view().repositories[0].pull_requests[0];
+    assert.equal(retained.checks.state,"PASSED");
+    assert.equal(retained.implementation_identity.pull_request_author,"implementation-author");
+  }
+});
+
+test("review follow-up reservations bind the review source Project and native issue inventory",async () => {
+  const finding=unresolvedFinding();
+  const review=result({findings:[finding],unresolved:[finding.finding_id]});
+  const pull=pullRequest();
+  const projectEvidence=project();
+  const reserved=boundReservation(review,finding,pull,projectEvidence);
+  const operations=recordReview(recording({
+    pullRequest:pull,result:review,
+    project:{...projectEvidence,reservations:[reserved]},
+  }));
+  assert.equal(operations.find(value => value.resource==="issue").payload.issue_id,`${REPOSITORY}#44`);
+  for (const changed of [
+    {...reserved,review_id:"REVIEW-20260903-0002"},
+    {...reserved,source_pull_request_number:92},
+    {...reserved,source_pull_request_revision:"other-revision"},
+    {...reserved,source_pull_request_head:HEAD_B},
+    {...reserved,reviewed_repository:OTHER_REPOSITORY},
+    {...reserved,project_id:"PVT_OTHER"},
+    {...reserved,project_item_id:"PVTI_OTHER"},
+  ]) {
+    assert.throws(
+      () => recordReview(recording({
+        pullRequest:pull,result:review,
+        project:{...projectEvidence,reservations:[changed]},
+      })),
+      error => error instanceof CoreConflictError && error.exitCode===6,
+    );
+  }
+
+  const state=harness({
+    reviewResult:review,
+    snapshot:recording({
+      pullRequest:pull,result:review,
+      project:{...projectEvidence,reservations:[reserved]},
+    }),
+  });
+  await runReviewCommand(
+    command(["review","record",`${REPOSITORY}#91`,"--from","review.json","--apply","--non-interactive"]),
+    state.services,
+  );
+  const repository=state.fixture.view().repositories[0];
+  assert.equal(repository.issues.some(value => value.work.item.id===`${REPOSITORY}#44`),true);
+  assert.equal(repository.next_issue_number,45);
+  const replay=await runReviewCommand(
+    command(["review","record",`${REPOSITORY}#91`,"--from","review.json","--apply","--non-interactive"]),
+    state.services,
+  );
+  assert.equal(replay.status,"already-reconciled");
+  assert.equal(state.fixture.view().repositories[0].issues.length,2);
+
+  const collidingReservation=boundReservation(review,finding,pull,projectEvidence,43);
+  const collision=harness({
+    reviewResult:review,
+    snapshot:recording({
+      pullRequest:pull,result:review,
+      project:{...projectEvidence,reservations:[collidingReservation]},
+    }),
+  });
+  await assert.rejects(
+    runReviewCommand(
+      command(["review","record",`${REPOSITORY}#91`,"--from","review.json","--apply","--non-interactive"]),
+      collision.services,
+    ),
+    error => error instanceof CoreConflictError && error.exitCode===6,
+  );
+  assert.equal(collision.fixture.view().repositories[0].issues.length,1);
+});
+
+test("record review snapshot requests exact Minor reservations while status requests none",async () => {
+  const findingZ=unresolvedFinding({findingId:"FINDING-z",summary:"Z"});
+  const findingA=unresolvedFinding({findingId:"FINDING-a",summary:"A"});
+  const review=result({findings:[findingZ,findingA],unresolved:[findingZ.finding_id,findingA.finding_id]});
+  const pull=pullRequest();
+  const projectEvidence=project();
+  const reservations=[
+    boundReservation(review,findingZ,pull,projectEvidence,45),
+    boundReservation(review,findingA,pull,projectEvidence,44),
+  ];
+  const state=harness({reviewResult:review,snapshot:recording({
+    pullRequest:pull,result:review,project:{...projectEvidence,reservations},
+  })});
+  await runReviewCommand(command(["review","record",`${REPOSITORY}#91`,"--from","review.json"]),state.services);
+  assert.equal(canonicalJson(state.fixture.view().calls[0].query),canonicalJson({
+    kind:"review",repository:REPOSITORY,number:91,review_id:review.review_id,
+    unresolved_minor_finding_ids:["FINDING-a","FINDING-z"],
+  }));
+
+  const statusState=harness();
+  await runReviewCommand(command(["review","status",`${REPOSITORY}#91`]),statusState.services);
+  assert.equal(canonicalJson(statusState.fixture.view().calls[0].query),canonicalJson({
+    kind:"review",repository:REPOSITORY,number:91,
+  }));
+
+  const shared=boundReservation(review,findingA,pull,projectEvidence,44);
+  const sharedAcrossReviews={...shared,review_id:"REVIEW-20260903-0002"};
+  const reservedZ=boundReservation(review,findingZ,pull,projectEvidence,45);
+  const ambiguous=harness({reviewResult:review,snapshot:recording({
+    pullRequest:pull,result:review,
+    project:{...projectEvidence,reservations:[shared,sharedAcrossReviews,reservedZ]},
+  })});
+  await assert.rejects(
+    runReviewCommand(command(["review","record",`${REPOSITORY}#91`,"--from","review.json"]),ambiguous.services),
+    error => error instanceof CoreConflictError && error.exitCode===6,
+  );
+});
+
+test("review Project reconciliation preserves newer observed time on replay and state change",() => {
+  const review=result();
+  const replayWork=workSnapshot({review:{verdict:"APPROVED",reviewed_revision:HEAD_A}});
+  replayWork.project.fields.last_reconciled_at=LATER;
+  const replayPull=pullRequest({
+    body:updateManagedReviewBlock("Human introduction.",review),
+    formal_review:{state:"APPROVED",review_id:review.review_id,reviewed_revision:HEAD_A},
+    recorded_result:review,work:replayWork,
+  });
+  assert.deepEqual(recordReview(recording({pullRequest:replayPull,result:review})),[]);
+
+  const changedWork=workSnapshot();
+  changedWork.project.fields.last_reconciled_at=LATER;
+  const changed=recordReview(recording({pullRequest:pullRequest({work:changedWork})}));
+  const fields=changed.find(value => value.resource==="project").payload.fields;
+  assert.equal(fields.Gate,"NONE");
+  assert.equal(Object.hasOwn(fields,"last_reconciled_at"),false);
+});
+
+test("review verdict matrix maps only APPROVED to formal approval and every non-approved verdict to changes",() => {
+  const cases=[
+    {verdict:"APPROVED",severity:null,formal:"APPROVE",status:"In review",gate:"NONE"},
+    {verdict:"CHANGES_REQUESTED",severity:"Important",formal:"REQUEST_CHANGES",status:"Blocked",gate:"CHANGES_REQUESTED"},
+    {verdict:"BLOCKED",severity:"Critical",formal:"REQUEST_CHANGES",status:"Blocked",gate:"CHANGES_REQUESTED"},
+    {verdict:"CHANGES_REQUESTED",severity:"Minor",formal:"REQUEST_CHANGES",status:"Blocked",gate:"CHANGES_REQUESTED"},
+  ];
+  for (const expected of cases) {
+    const finding=expected.severity===null ? null : unresolvedFinding({severity:expected.severity});
+    const review=result({
+      verdict:expected.verdict,findings:finding===null ? [] : [finding],
+      unresolved:finding===null ? [] : [finding.finding_id],
+    });
+    const projectEvidence=finding?.severity==="Minor"
+      ? project({reservations:[boundReservation(review,finding,pullRequest(),project())]})
+      : project();
+    const operations=recordReview(recording({result:review,project:projectEvidence}));
+    const pull=operations.find(value => value.resource==="pull_request");
+    const projectUpdate=operations.find(value => value.resource==="project" && value.action==="update");
+    assert.equal(pull.payload.formal_review.action,expected.formal,expected.verdict);
+    assert.equal(
+      projectUpdate.payload.fields.Status ?? "In review",expected.status,expected.verdict,
+    );
+    assert.equal(
+      projectUpdate.payload.fields.Gate ?? "REVIEW_REQUIRED",expected.gate,expected.verdict,
+    );
+  }
+});
+
+test("review command validates closed nested snapshots and a semantic source hash before dereference",async () => {
+  const baseState=harness();
+  const base=await baseState.fixture.github.snapshot({kind:"review",repository:REPOSITORY,number:91});
+  let traps=0;
+  const proxied=new Proxy({}, {
+    get() { traps+=1; throw new Error("get trap"); },
+    getPrototypeOf() { traps+=1; throw new Error("prototype trap"); },
+    ownKeys() { traps+=1; throw new Error("keys trap"); },
+  });
+  const accessor={...base};
+  Object.defineProperty(accessor,"project",{enumerable:true,get() { traps+=1; return base.project; }});
+  const hidden={...base.project};
+  Object.defineProperty(hidden,"hidden",{value:true,enumerable:false});
+  const symbol={...base.source,[Symbol("hidden")]:true};
+  const sparse=[];
+  sparse.length=1;
+  const malformed=[
+    {...base,pullRequest:null},
+    {...base,implementationIdentity:proxied},
+    accessor,
+    {...base,project:hidden},
+    {...base,source:symbol},
+    {...base,project:{...base.project,reservations:sparse}},
+    {...base,source:{...base.source,sha256:"0".repeat(64)}},
+    {...base,pullRequest:{...base.pullRequest,body:"tampered after source hash"}},
+  ];
+  for (const snapshotValue of malformed) {
+    const state=harness();
+    const services=Object.freeze({
+      ...state.services,
+      github:Object.freeze({async snapshot() { return snapshotValue; }}),
+    });
+    await assert.rejects(
+      runReviewCommand(command(["review","record",`${REPOSITORY}#91`,"--from","review.json"]),services),
+      error => error instanceof CoreValidationError && error.exitCode===5,
+    );
+  }
+  assert.equal(traps,0);
 });
 
 test("review commands route one snapshot through the real runner for preview apply no-op and status",async () => {

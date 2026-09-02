@@ -2,9 +2,11 @@ import {types} from "node:util";
 
 import {canonicalJson,sha256Canonical} from "../../src/contracts/acp.js";
 import {closedData,exact} from "../../src/core/commands/common.js";
+import {validateCoreDocument} from "../../src/core/contracts.js";
 import {validateDependencyGraph} from "../../src/core/domain/dependencies.js";
 import {parseWorkItemId} from "../../src/core/domain/identity.js";
 import {CoreConflictError,CoreValidationError} from "../../src/core/errors.js";
+import {reviewObservationRevision} from "../../src/core/review/recorder.js";
 
 const SHA=/^[a-f0-9]{40}$/u;
 const PROJECT_ID="PVT_TOSS_OS_2";
@@ -35,7 +37,6 @@ function repositoryState(repository) {
     issues:new Map(),
     branches:new Map(),
     pullRequests:new Map(),
-    reviewFollowUps:new Map(),
     reviewReservations:new Set(),
     nextPullRequestNumber:1,
   };
@@ -231,7 +232,17 @@ export function createCoreGithubFixture(options={}) {
       return graphSnapshot(query.root);
     }
     if (query.kind==="review") {
-      exact(query,["kind","repository","number"],"review snapshot query");
+      const requestsReservations=Object.hasOwn(query,"review_id") ||
+        Object.hasOwn(query,"unresolved_minor_finding_ids");
+      exact(query,requestsReservations
+        ? ["kind","repository","number","review_id","unresolved_minor_finding_ids"]
+        : ["kind","repository","number"],"review snapshot query");
+      if (requestsReservations &&
+          (!Array.isArray(query.unresolved_minor_finding_ids) ||
+           query.unresolved_minor_finding_ids.some((value,index,values) =>
+             typeof value!=="string" || (index>0 && values[index-1]>=value)))) {
+        throw new CoreValidationError("Review reservation query findings must be unique canonical order");
+      }
       const repository=repo(query.repository);
       const pullRequest=repository.pullRequests.get(query.number);
       if (!pullRequest || pullRequest.review_snapshot!==true) {
@@ -248,16 +259,48 @@ export function createCoreGithubFixture(options={}) {
         reviewed_revision:pullRequest.recorded_result.reviewed_revision,
       };
       work.checks=structuredClone(pullRequest.checks);
-      const projectEvidence=reviewProjects.get(`${query.repository}#${query.number}`);
+      const storedProjectEvidence=reviewProjects.get(`${query.repository}#${query.number}`);
+      if (requestsReservations) {
+        const requested=storedProjectEvidence.reservations.filter(value =>
+          value.review_id===query.review_id &&
+          query.unresolved_minor_finding_ids.includes(value.finding_id));
+        const allReservations=[...reviewProjects.values()]
+          .flatMap(value => value.reservations);
+        if (requested.some(candidate => allReservations.some(other =>
+          other.repository===candidate.repository &&
+          other.issue_number===candidate.issue_number &&
+          other.review_id!==candidate.review_id))) {
+          throw new CoreConflictError("Review issue reservation is shared across review identities");
+        }
+      }
+      const projectEvidence=requestsReservations ? {
+        ...storedProjectEvidence,
+        reservations:storedProjectEvidence.reservations.filter(value =>
+          value.review_id===query.review_id &&
+          query.unresolved_minor_finding_ids.includes(value.finding_id)),
+      } : {...storedProjectEvidence,reservations:[]};
+      const observationRevision=reviewObservationRevision({
+        native_revision:pullRequest.revision,checks:pullRequest.checks,
+        implementation_identity:pullRequest.implementation_identity,
+      });
+      const pullRequestEvidence={
+        repository:query.repository,number:pullRequest.number,
+        native_revision:pullRequest.revision,revision:observationRevision,
+        head_repository:pullRequest.head_repository,base_repository:pullRequest.base_repository,
+        head:pullRequest.head,base:pullRequest.base,head_sha:pullRequest.head_sha,
+        body:pullRequest.body,formal_review:pullRequest.formal_review,
+        recorded_result:pullRequest.recorded_result,checks:pullRequest.checks,work,
+      };
+      const semantic={
+        kind:"review",pullRequest:pullRequestEvidence,
+        implementationIdentity:pullRequest.implementation_identity,project:projectEvidence,
+      };
       return copy({
-        kind:"review",source:source(query.repository,pullRequest.revision),
-        pullRequest:{
-          repository:query.repository,number:pullRequest.number,revision:pullRequest.revision,
-          head_repository:pullRequest.head_repository,base_repository:pullRequest.base_repository,
-          head:pullRequest.head,base:pullRequest.base,head_sha:pullRequest.head_sha,
-          body:pullRequest.body,formal_review:pullRequest.formal_review,
-          recorded_result:pullRequest.recorded_result,checks:pullRequest.checks,work,
+        kind:"review",source:{
+          repository:query.repository,revision:observationRevision,
+          sha256:sha256Canonical(semantic),
         },
+        pullRequest:pullRequestEvidence,
         implementationIdentity:pullRequest.implementation_identity,
         project:projectEvidence,
       },"review snapshot");
@@ -273,6 +316,12 @@ export function createCoreGithubFixture(options={}) {
         ? repo(operation.repository).pullRequests.get(operation.payload.pull_request_number)
         : [...repo(operation.repository).pullRequests.values()].find(value =>
           value.work_item_id===operation.payload.work_item_id);
+      if (operation.payload.kind==="review-record" && existing) {
+        return reviewObservationRevision({
+          native_revision:existing.revision,checks:existing.checks,
+          implementation_identity:existing.implementation_identity,
+        });
+      }
       return existing?.revision ?? repo(operation.repository).revision;
     }
     if (operation.resource==="issue" && ["dependency-add","dependency-remove"].includes(operation.payload.kind)) {
@@ -329,20 +378,49 @@ export function createCoreGithubFixture(options={}) {
       "reserved_branch","work_item","source_pull_request","source_revision","review_context",
     ],"review follow-up issue payload");
     const identity=parseWorkItemId(payload.issue_id);
+    validateCoreDocument(payload.work_item,"work-item.v1");
+    const reservationKey=`${payload.review_id}\u0000${payload.finding_id}\u0000${identity.issueNumber}`;
     if (identity.repository!==operation.repository ||
         identity.issueNumber!==payload.work_item.issue_number ||
-        !repository.reviewReservations.has(identity.issueNumber) ||
-        repository.reviewFollowUps.has(identity.issueNumber)) {
+        payload.work_item.id!==payload.issue_id ||
+        payload.work_item.repository!==operation.repository ||
+        payload.work_item.branch!==payload.reserved_branch ||
+        identity.issueNumber!==repository.nextIssueNumber ||
+        !repository.reviewReservations.has(reservationKey) ||
+        repository.issues.has(identity.issueNumber) ||
+        [...repository.issues.values()].some(value => value.marker===payload.marker)) {
       throw new CoreConflictError("Review follow-up reservation conflicts with repository state");
     }
-    repository.reviewFollowUps.set(identity.issueNumber,{
-      issue_id:payload.issue_id,review_id:payload.review_id,finding_id:payload.finding_id,
-      marker:payload.marker,title:payload.title,summary:payload.summary,
-      reserved_branch:payload.reserved_branch,work_item:structuredClone(payload.work_item),
+    const sourceIdentity=parseWorkItemId(payload.source_pull_request);
+    if (sourceIdentity.repository!==operation.repository) {
+      throw new CoreConflictError("Review follow-up source pull request belongs to another repository");
+    }
+    const sourcePullRequest=repository.pullRequests.get(sourceIdentity.issueNumber);
+    const sourceRecord=sourcePullRequest ? issue(sourcePullRequest.work_item_id) : null;
+    if (!sourceRecord) throw new CoreConflictError("Review follow-up source pull request is missing");
+    const work=initialWork(
+      structuredClone(payload.work_item),`PVTI_REVIEW_${identity.issueNumber}`,
+      project.revision,payload.review_context.review_result.recorded_at,
+    );
+    if (work.item.kind==="issue") {
+      work.parent=sourceRecord.work.item.kind==="epic" ? {
+        id:sourceRecord.work.item.id,branch:sourceRecord.work.item.branch,
+        revision:sourceRecord.revision,
+      } : structuredClone(sourceRecord.work.parent);
+    }
+    repository.issues.set(identity.issueNumber,{
+      request_identity:`review-${payload.review_id}-${payload.finding_id}`,
+      marker:payload.marker,title:payload.title,description:payload.summary,
+      priority:null,change_class:null,labels:[payload.work_item.kind],
+      affected_version:null,scope:[],work,
       revision:`issue-${identity.issueNumber}-1`,projected:false,
+      review_follow_up:{
+        issue_id:payload.issue_id,review_id:payload.review_id,finding_id:payload.finding_id,
+        summary:payload.summary,reserved_branch:payload.reserved_branch,
+      },
     });
-    repository.reviewReservations.delete(identity.issueNumber);
-    repository.nextIssueNumber=Math.max(repository.nextIssueNumber,identity.issueNumber+1);
+    repository.reviewReservations.delete(reservationKey);
+    repository.nextIssueNumber+=1;
     repository.revision=bump("repository",repository.revision);
     return repository.revision;
   }
@@ -376,20 +454,25 @@ export function createCoreGithubFixture(options={}) {
         "fields","review_context",
       ],"Review follow-up Project membership payload");
       const identity=parseWorkItemId(payload.issue_id);
-      const followUp=repo(identity.repository).reviewFollowUps.get(identity.issueNumber);
-      if (!followUp || followUp.projected || followUp.marker!==payload.marker ||
+      const followUp=repo(identity.repository).issues.get(identity.issueNumber);
+      if (!followUp?.review_follow_up || followUp.projected || followUp.marker!==payload.marker ||
           payload.project_id!==project.id) {
         throw new CoreConflictError("Review follow-up Project membership conflicts");
       }
       followUp.projected=true;
       followUp.project_fields=structuredClone(payload.fields);
+      Object.assign(followUp.work.project.fields,Object.fromEntries(
+        ["Status","Gate","branch","base_branch","last_reconciled_at"]
+          .map(key => [key,payload.fields[key]]),
+      ));
+      followUp.visible_project_fields=structuredClone(payload.fields);
       const projectEvidence=reviewProjects.get(payload.review_context.review_result.repository+
         `#${payload.review_context.review_result.pull_request_number}`);
       if (!projectEvidence) throw new CoreConflictError("Review follow-up has no Project evidence owner");
       projectEvidence.follow_up_mappings.push({
         review_id:payload.review_id,finding_id:payload.finding_id,issue_id:payload.issue_id,
         repository:identity.repository,project_id:payload.project_id,
-        project_item_id:`PVTI_REVIEW_${identity.issueNumber}`,
+        project_item_id:followUp.work.project.item_id,
         issue_revision:followUp.revision,project_revision:project.revision,marker:payload.marker,
       });
       projectEvidence.reservations=projectEvidence.reservations.filter(value =>
@@ -418,6 +501,10 @@ export function createCoreGithubFixture(options={}) {
     if (!new Set(["APPROVE","REQUEST_CHANGES"]).has(payload.formal_review.action)) {
       throw new CoreValidationError("Formal review action is invalid");
     }
+    if (canonicalJson(payload.checks)!==canonicalJson(pullRequest.checks) ||
+        canonicalJson(payload.implementation_identity)!==canonicalJson(pullRequest.implementation_identity)) {
+      throw new CoreConflictError("Review operation evidence does not match authoritative checks or implementation identity");
+    }
     pullRequest.body=payload.body;
     pullRequest.formal_review={
       state:payload.formal_review.action==="APPROVE" ? "APPROVED" : "CHANGES_REQUESTED",
@@ -425,8 +512,6 @@ export function createCoreGithubFixture(options={}) {
       reviewed_revision:payload.formal_review.reviewed_revision,
     };
     pullRequest.recorded_result=structuredClone(payload.review_result);
-    pullRequest.implementation_identity=structuredClone(payload.implementation_identity);
-    pullRequest.checks=structuredClone(payload.checks);
     pullRequest.revision=bump("pull-request",pullRequest.revision);
     const record=issue(pullRequest.work_item_id);
     record.work.review={
@@ -434,7 +519,10 @@ export function createCoreGithubFixture(options={}) {
       reviewed_revision:payload.review_result.reviewed_revision,
     };
     record.work.checks=structuredClone(payload.checks);
-    return pullRequest.revision;
+    return reviewObservationRevision({
+      native_revision:pullRequest.revision,checks:pullRequest.checks,
+      implementation_identity:pullRequest.implementation_identity,
+    });
   }
 
   function applyBranch(operation) {
@@ -588,7 +676,7 @@ export function createCoreGithubFixture(options={}) {
       number:pullRequest.number,work_item_id:pullRequest.work.item.id,
       head_repository:pullRequest.head_repository,base_repository:pullRequest.base_repository,
       head:pullRequest.head,base:pullRequest.base,head_sha:pullRequest.head_sha,
-      state:"READY",merged_sha:null,revision:pullRequest.revision,
+      state:"READY",merged_sha:null,revision:pullRequest.native_revision,
       body:pullRequest.body,formal_review:structuredClone(pullRequest.formal_review),
       recorded_result:structuredClone(pullRequest.recorded_result),
       checks:structuredClone(pullRequest.checks),
@@ -596,10 +684,13 @@ export function createCoreGithubFixture(options={}) {
     });
     repository.nextPullRequestNumber=Math.max(repository.nextPullRequestNumber,pullRequest.number+1);
     reviewProjects.set(`${pullRequest.repository}#${pullRequest.number}`,structuredClone(value.project));
-    const reservedNumbers=value.project.reservations
-      .filter(candidate => candidate.repository===pullRequest.repository)
-      .map(candidate => candidate.issue_number);
-    for (const number of reservedNumbers) repository.reviewReservations.add(number);
+    const reservations=value.project.reservations
+      .filter(candidate => candidate.repository===pullRequest.repository);
+    for (const candidate of reservations) {
+      repository.reviewReservations.add(
+        `${candidate.review_id}\u0000${candidate.finding_id}\u0000${candidate.issue_number}`,
+      );
+    }
     return `${pullRequest.repository}#${pullRequest.number}`;
   }
 
@@ -632,6 +723,11 @@ export function createCoreGithubFixture(options={}) {
         committer:pullRequest.implementation_identity.pull_request_author,
       });
     }
+    pullRequest.implementation_identity.commits.sort((left,right) => compare(left.revision,right.revision));
+    pullRequest.implementation_identity.commit_count=pullRequest.implementation_identity.commits.length;
+    pullRequest.implementation_identity.commits_sha256=sha256Canonical(
+      pullRequest.implementation_identity.commits,
+    );
     const record=issue(pullRequest.work_item_id);
     record.work.physical_branch={exists:true,head_sha:headSha};
     record.work.pull_request={state:"READY",head_sha:headSha,merged_sha:null};
@@ -652,6 +748,19 @@ export function createCoreGithubFixture(options={}) {
       }
     }
   }
+  function setReviewChecks(repositoryName,number,checks) {
+    const value=copy(checks,"review check mutation");
+    exact(value,["state","revision"],"review check mutation");
+    const pullRequest=repo(repositoryName).pullRequests.get(number);
+    if (!pullRequest?.review_snapshot) throw new TypeError("review pull request does not exist");
+    pullRequest.checks=structuredClone(value);
+    issue(pullRequest.work_item_id).work.checks=structuredClone(value);
+  }
+  function setReviewImplementationIdentity(repositoryName,number,evidence) {
+    const pullRequest=repo(repositoryName).pullRequests.get(number);
+    if (!pullRequest?.review_snapshot) throw new TypeError("review pull request does not exist");
+    pullRequest.implementation_identity=structuredClone(copy(evidence,"review identity mutation"));
+  }
   function view() {
     return copy({
       project,
@@ -659,7 +768,9 @@ export function createCoreGithubFixture(options={}) {
         repository:value.repository,revision:value.revision,next_issue_number:value.nextIssueNumber,
         issues:[...value.issues.values()],branches:[...value.branches.values()],
         pull_requests:[...value.pullRequests.values()],
-        review_follow_ups:[...value.reviewFollowUps.values()],
+        review_follow_ups:[...value.issues.values()].filter(record => record.review_follow_up)
+          .map(record => ({...record.review_follow_up,marker:record.marker,title:record.title,
+            work_item:record.work.item,revision:record.revision,projected:record.projected})),
       })).sort((left,right) => compare(left.repository,right.repository)),
       dependency:{revision:dependency.revision,edges:[...dependency.edges.values()],relationships:[...dependency.relationships.values()],tombstones:[...dependency.tombstones.values()]},
       review_projects:[...reviewProjects.entries()].map(([pull_request,value]) => ({pull_request,...value})),
@@ -670,7 +781,7 @@ export function createCoreGithubFixture(options={}) {
   const github=Object.freeze({snapshot,inspect,apply});
   return Object.freeze({
     github,seedWork,seedReviewPullRequest,setFailureMode,setRepositoryRevision,setBranchHead,
-    setPullRequestHead,view,
+    setPullRequestHead,setReviewChecks,setReviewImplementationIdentity,view,
   });
 }
 

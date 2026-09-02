@@ -431,8 +431,8 @@ const RULES=Object.freeze([
   }),
   Object.freeze({
     matches:snapshot => snapshot.review.verdict!=="APPROVED",
-    result:() => state("Blocked","REVIEW_REQUIRED",
-      "The current independent review does not approve the pull request.",
+    result:() => state("Blocked","CHANGES_REQUESTED",
+      "The current independent review requests changes before the pull request may merge.",
       "toss-core review status"),
   }),
   Object.freeze({

@@ -85,16 +85,30 @@ function validateChecks(value) {
   return value;
 }
 
+export function reviewObservationRevision(input) {
+  const value=closedData(input,"review observation revision input");
+  exact(value,[
+    "native_revision","checks","implementation_identity",
+  ],"review observation revision input");
+  text(value.native_revision,"Native pull request revision");
+  const checks=validateChecks(value.checks);
+  const identity=validateImplementationIdentity(value.implementation_identity);
+  return `review-observation:${sha256Canonical({
+    native_revision:value.native_revision,checks,implementation_identity:identity,
+  })}`;
+}
+
 function validatePullRequest(input) {
   const value=closedData(input,"review pull request");
   exact(value,[
-    "repository","number","revision","head_repository","base_repository","head","base",
+    "repository","number","native_revision","revision","head_repository","base_repository","head","base",
     "head_sha","body","formal_review","recorded_result","checks","work",
   ],"review pull request");
   repository(value.repository,"Pull request repository");
   repository(value.head_repository,"Pull request head repository");
   repository(value.base_repository,"Pull request base repository");
   if (!Number.isSafeInteger(value.number) || value.number<1) invalid("Pull request number must be a positive safe integer");
+  text(value.native_revision,"Native pull request revision");
   text(value.revision,"Pull request revision");
   sha(value.head_sha,"Pull request head");
   if (typeof value.body!=="string") invalid("Pull request body must be text");
@@ -115,6 +129,9 @@ function validatePullRequest(input) {
   });
   if (value.work.checks===null || canonicalJson(value.work.checks)!==canonicalJson(value.checks)) {
     conflict("Pull request checks do not bind the exact Task 3 work snapshot");
+  }
+  if (value.checks.revision!==value.head_sha) {
+    conflict("Pull request checks do not bind the current pull request head");
   }
   const recorded=value.recorded_result===null ? null : normalizeReviewResult(value.recorded_result);
   return Object.freeze({value,state,recorded});
@@ -149,22 +166,53 @@ function validateMapping(mapping,project) {
   return mapping;
 }
 
-function validateReservation(reservation,project) {
+function validateReservation(reservation,project,pullRequest,result) {
   exact(reservation,[
-    "finding_id","repository","issue_number","repository_revision","project_revision",
+    "review_id","finding_id","source_pull_request_repository","source_pull_request_number",
+    "source_pull_request_revision","source_pull_request_head","reviewed_repository",
+    "project_id","project_item_id","project_revision","issue_number","repository",
+    "repository_revision",
   ],"Review follow-up reservation");
+  repository(reservation.source_pull_request_repository,"Review follow-up source repository");
+  repository(reservation.reviewed_repository,"Review follow-up reviewed repository");
   repository(reservation.repository,"Review follow-up reservation repository");
-  if (typeof reservation.finding_id!=="string" || !FINDING_ID.test(reservation.finding_id) ||
+  if (typeof reservation.review_id!=="string" || !REVIEW_ID.test(reservation.review_id) ||
+      typeof reservation.finding_id!=="string" || !FINDING_ID.test(reservation.finding_id) ||
+      !Number.isSafeInteger(reservation.source_pull_request_number) ||
+      reservation.source_pull_request_number<1 ||
       !Number.isSafeInteger(reservation.issue_number) || reservation.issue_number<1) {
     conflict("Review follow-up reservation identity is corrupt");
   }
+  text(reservation.source_pull_request_revision,"Review follow-up source pull request revision");
+  sha(reservation.source_pull_request_head,"Review follow-up source pull request head");
+  text(reservation.project_id,"Review follow-up Project identity");
+  text(reservation.project_item_id,"Review follow-up Project item identity");
   text(reservation.repository_revision,"Review follow-up repository revision");
   text(reservation.project_revision,"Review follow-up Project revision");
-  if (reservation.project_revision!==project.revision) conflict("Review follow-up reservation has a stale Project revision");
+  if (reservation.source_pull_request_repository!==pullRequest.repository ||
+      reservation.source_pull_request_number!==pullRequest.number ||
+      reservation.source_pull_request_revision!==pullRequest.revision ||
+      reservation.source_pull_request_head!==pullRequest.head_sha ||
+      reservation.reviewed_repository!==pullRequest.repository ||
+      reservation.repository!==pullRequest.repository ||
+      reservation.project_id!==project.project_id ||
+      reservation.project_item_id!==project.item_id ||
+      reservation.project_revision!==project.revision) {
+    conflict("Review follow-up reservation does not bind the exact review source and Project snapshot");
+  }
+  if (result!==null) {
+    const finding=result.findings.find(candidate =>
+      candidate.finding_id===reservation.finding_id && !candidate.resolved &&
+      candidate.severity==="Minor");
+    if (reservation.review_id!==result.review_id ||
+        reservation.reviewed_repository!==result.repository || !finding) {
+      conflict("Review follow-up reservation belongs to a different review or finding");
+    }
+  }
   return reservation;
 }
 
-function validateProject(input,pullRequest) {
+function validateProject(input,pullRequest,result=null) {
   const value=closedData(input,"review Project evidence");
   exact(value,[
     "project_id","item_id","revision","follow_up_mappings","reservations",
@@ -181,7 +229,8 @@ function validateProject(input,pullRequest) {
     invalid("Review Project follow-up evidence must be arrays");
   }
   const mappings=value.follow_up_mappings.map(mapping => validateMapping(mapping,value));
-  const reservations=value.reservations.map(reservation => validateReservation(reservation,value));
+  const reservations=value.reservations.map(reservation =>
+    validateReservation(reservation,value,pullRequest,result));
   const mappingKeys=new Set();
   const mappingIssues=new Set();
   for (const mapping of mappings) {
@@ -196,10 +245,11 @@ function validateProject(input,pullRequest) {
   const reservationIssues=new Set();
   for (const reservation of reservations) {
     const issueId=workItemId(reservation.repository,reservation.issue_number);
-    if (reservationKeys.has(reservation.finding_id) || reservationIssues.has(issueId)) {
+    const reservationKey=`${reservation.review_id}\u0000${reservation.finding_id}`;
+    if (reservationKeys.has(reservationKey) || reservationIssues.has(issueId)) {
       conflict("Review follow-up reservations are duplicated or ambiguous");
     }
-    reservationKeys.add(reservation.finding_id);
+    reservationKeys.add(reservationKey);
     reservationIssues.add(issueId);
     if (mappingIssues.has(issueId)) {
       conflict("Review follow-up reservation conflicts with an existing governed issue mapping");
@@ -219,6 +269,10 @@ function validateRecordedSurfaces(pullRequest,recorded) {
       conflict("Review body, formal state, and work evidence disagree about the recorded result");
     }
     return parsed;
+  }
+  if (recorded.repository!==pullRequest.repository ||
+      recorded.pull_request_number!==pullRequest.number || recorded.freshness!=="CURRENT") {
+    conflict("The stored review result does not identify an originally current result for this pull request");
   }
   if (parsed===null || parsed.block!==renderManagedReviewBlock(recorded)) {
     conflict("The managed PR review body conflicts with the recorded review result");
@@ -240,8 +294,12 @@ function validateRecordedSurfaces(pullRequest,recorded) {
 }
 
 function projectOperation(projected,state,result,identity,pullRequest) {
+  const observedAt=projected.project.fields.last_reconciled_at;
+  const reconciledAt=Date.parse(result.recorded_at)>=Date.parse(observedAt)
+    ? result.recorded_at
+    : observedAt;
   const base=projectReconciliationOperations(
-    projected,state,result.recorded_at,
+    projected,state,reconciledAt,
   );
   return base.map(operation => Object.freeze({
     ...operation,
@@ -359,19 +417,27 @@ function validateRecordingInput(input,{requireResult}) {
     ? ["pullRequest","result","implementationIdentity","project"]
     : ["pullRequest","implementationIdentity","project"];
   exact(value,keys,requireResult ? "record review input" : "review status input");
+  const result=requireResult ? normalizeReviewResult(value.result) : null;
   const pull=validatePullRequest(value.pullRequest);
   const identity=validateImplementationIdentity(value.implementationIdentity);
   if (identity.revision!==pull.value.head_sha) {
     conflict("Implementation identity evidence is not bound to the current pull request head");
   }
-  const projectEvidence=validateProject(value.project,pull.value);
+  if (pull.value.revision!==reviewObservationRevision({
+    native_revision:pull.value.native_revision,
+    checks:pull.value.checks,
+    implementation_identity:identity,
+  })) {
+    conflict("Pull request observation revision does not bind checks and implementation identity evidence");
+  }
+  const projectEvidence=validateProject(value.project,pull.value,result);
   validateRecordedSurfaces(pull.value,pull.recorded);
-  return Object.freeze({value,pull,identity,projectEvidence});
+  return Object.freeze({value,pull,identity,projectEvidence,result});
 }
 
 export function recordReview(input) {
   const normalized=validateRecordingInput(input,{requireResult:true});
-  const incoming=normalizeReviewResult(normalized.value.result);
+  const incoming=normalized.result;
   const pullRequest=normalized.pull.value;
   if (incoming.repository!==pullRequest.repository || incoming.pull_request_number!==pullRequest.number) {
     conflict("Review result does not identify the exact pull request");
