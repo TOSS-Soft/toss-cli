@@ -44,6 +44,29 @@ function deeplyFrozen(value,seen=new Set()) {
     .every(key => deeplyFrozen(value[key],seen));
 }
 
+function deeplyNestedUnknown(onRead) {
+  const leaf={};
+  Object.defineProperty(leaf,"trap",{
+    enumerable:true,
+    get() {
+      onRead();
+      throw new Error("unknown-field getter trap");
+    },
+  });
+  let value=leaf;
+  for (let depth=0;depth<12_000;depth+=1) value={next:value};
+  return value;
+}
+
+function assertTypedWithoutTrap(invoke,reads) {
+  let caught;
+  try { invoke(); }
+  catch (error) { caught=error; }
+  assert.equal(reads(),0);
+  assert.ok(caught instanceof CoreValidationError);
+  assert.equal(caught.exitCode,5);
+}
+
 test("parseSemVer accepts only canonical stable safe-integer components",() => {
   for (const [value,expected] of [
     ["0.0.0",{major:0,minor:0,patch:0}],
@@ -275,6 +298,48 @@ test("scope boundaries reject sparse hidden symbol accessor and proxy data witho
     assert.throws(() => classifyReleaseChange(scope),CoreValidationError);
   }
   assert.equal(reads,0);
+});
+
+test("selection rejects a deeply nested unknown top-level field without traversal",() => {
+  let reads=0;
+  assertTypedWithoutTrap(() => selectRepositoryVersion({
+    latestPublishedVersion:"2.1.2",
+    epics:[epic(1)],
+    bugs:[],
+    unknown:deeplyNestedUnknown(() => { reads+=1; }),
+  }),() => reads);
+});
+
+test("classification rejects a deeply nested unknown scope-item field without traversal",() => {
+  let reads=0;
+  assertTypedWithoutTrap(() => classifyReleaseChange([{
+    ...scopeEpic(1),
+    unknown:deeplyNestedUnknown(() => { reads+=1; }),
+  }]),() => reads);
+});
+
+test("selection rejects a deeply nested unknown epic field without traversal",() => {
+  let reads=0;
+  assertTypedWithoutTrap(() => selectRepositoryVersion({
+    latestPublishedVersion:"2.1.2",
+    epics:[{
+      ...epic(1),
+      unknown:deeplyNestedUnknown(() => { reads+=1; }),
+    }],
+    bugs:[],
+  }),() => reads);
+});
+
+test("selection rejects a deeply nested unknown bug field without traversal",() => {
+  let reads=0;
+  assertTypedWithoutTrap(() => selectRepositoryVersion({
+    latestPublishedVersion:"2.1.2",
+    epics:[],
+    bugs:[{
+      ...bug(1),
+      unknown:deeplyNestedUnknown(() => { reads+=1; }),
+    }],
+  }),() => reads);
 });
 
 test("selection normalization is detached from mutable caller input",() => {

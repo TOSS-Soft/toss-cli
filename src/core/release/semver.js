@@ -1,3 +1,5 @@
+import {types} from "node:util";
+
 import {compareCanonicalText} from "../canonical-order.js";
 import {closedData,exact} from "../commands/common.js";
 import {parseWorkItemId} from "../domain/identity.js";
@@ -28,6 +30,101 @@ function checkedAdd(value) {
   return value+1;
 }
 
+function shallowExactRecord(value,keys,label) {
+  if (value===null || typeof value!=="object" || Array.isArray(value) ||
+      types.isProxy(value)) {
+    invalid(`${label} must be a plain non-proxy record`);
+  }
+  const prototype=Object.getPrototypeOf(value);
+  const descriptors=Object.getOwnPropertyDescriptors(value);
+  const ownKeys=Reflect.ownKeys(descriptors);
+  if (![Object.prototype,null].includes(prototype) || ownKeys.length!==keys.length ||
+      ownKeys.some(key => typeof key!=="string") ||
+      keys.some(key => !Object.hasOwn(descriptors,key))) {
+    invalid(`${label} must use an exact closed shape`);
+  }
+  const captured=Object.create(null);
+  for (const key of keys) {
+    const descriptor=descriptors[key];
+    if (!descriptor.enumerable || !("value" in descriptor)) {
+      invalid(`${label}.${key} must be an own enumerable data property`);
+    }
+    captured[key]=descriptor.value;
+  }
+  return captured;
+}
+
+function shallowDenseArray(value,label) {
+  if (value===null || typeof value!=="object" || types.isProxy(value) ||
+      !Array.isArray(value) || Object.getPrototypeOf(value)!==Array.prototype) {
+    invalid(`${label} must be a dense plain array`);
+  }
+  const descriptors=Object.getOwnPropertyDescriptors(value);
+  const ownKeys=Reflect.ownKeys(descriptors);
+  const lengthDescriptor=Object.getOwnPropertyDescriptor(descriptors,"length")?.value;
+  const length=lengthDescriptor?.value;
+  if (!lengthDescriptor || !("value" in lengthDescriptor) ||
+      lengthDescriptor.enumerable!==false || lengthDescriptor.configurable!==false ||
+      typeof lengthDescriptor.writable!=="boolean" || !Number.isSafeInteger(length) ||
+      length<0 || length>0xffffffff || ownKeys.length!==length+1 ||
+      (lengthDescriptor.writable===false && Object.isExtensible(value))) {
+    invalid(`${label} must be a dense plain array`);
+  }
+  const captured=[];
+  for (let index=0;index<length;index+=1) {
+    const descriptor=descriptors[String(index)];
+    if (!descriptor || !descriptor.enumerable || !("value" in descriptor) ||
+        (lengthDescriptor.writable===false &&
+         (descriptor.writable!==false || descriptor.configurable!==false))) {
+      invalid(`${label} must contain dense own data`);
+    }
+    captured.push(descriptor.value);
+  }
+  return captured;
+}
+
+function scalar(value,typesAllowed,label,{nullable=false}={}) {
+  if ((nullable && value===null) || typesAllowed.includes(typeof value)) return;
+  invalid(`${label} must be a bounded scalar`);
+}
+
+function preflightScope(scopeInput) {
+  const scope=shallowDenseArray(scopeInput,"Release scope");
+  for (let index=0;index<scope.length;index+=1) {
+    const item=shallowExactRecord(scope[index],SCOPE_KEYS,`Release scope[${index}]`);
+    scalar(item.id,["string"],`Release scope[${index}].id`);
+    scalar(item.kind,["string"],`Release scope[${index}].kind`);
+    scalar(item.change_class,["string"],`Release scope[${index}].change_class`,{
+      nullable:true,
+    });
+    scalar(item.affects_published_product,["boolean"],
+      `Release scope[${index}].affects_published_product`);
+  }
+}
+
+function preflightSelection(input) {
+  const value=shallowExactRecord(input,SELECTION_KEYS,"Repository version selection");
+  scalar(value.latestPublishedVersion,["string"],
+    "Repository version selection.latestPublishedVersion");
+  const epics=shallowDenseArray(value.epics,"Repository version selection epics");
+  const bugs=shallowDenseArray(value.bugs,"Repository version selection bugs");
+  for (let index=0;index<epics.length;index+=1) {
+    const epic=shallowExactRecord(epics[index],EPIC_KEYS,
+      `Repository version selection epic[${index}]`);
+    scalar(epic.id,["string"],`Repository version selection epic[${index}].id`);
+    scalar(epic.change_class,["string"],
+      `Repository version selection epic[${index}].change_class`);
+  }
+  for (let index=0;index<bugs.length;index+=1) {
+    const bug=shallowExactRecord(bugs[index],BUG_KEYS,
+      `Repository version selection bug[${index}]`);
+    scalar(bug.id,["string"],`Repository version selection bug[${index}].id`);
+    scalar(bug.kind,["string"],`Repository version selection bug[${index}].kind`);
+    scalar(bug.affects_published_product,["boolean"],
+      `Repository version selection bug[${index}].affects_published_product`);
+  }
+}
+
 export function parseSemVer(value) {
   const match=typeof value==="string" ? SEMVER.exec(value) : null;
   if (!match) invalid("Version must be canonical stable SemVer");
@@ -40,6 +137,7 @@ export function parseSemVer(value) {
 }
 
 function normalizeScope(scopeInput) {
+  preflightScope(scopeInput);
   const scope=closedData(scopeInput,"Release scope");
   if (!Array.isArray(scope) || scope.length===0) {
     invalid("Release scope must be a nonempty dense array");
@@ -112,6 +210,7 @@ export function nextVersion(currentVersion,changeClass) {
 }
 
 export function selectRepositoryVersion(input) {
+  preflightSelection(input);
   const value=closedData(input,"Repository version selection");
   exact(value,SELECTION_KEYS,"Repository version selection");
   parseSemVer(value.latestPublishedVersion);
