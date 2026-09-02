@@ -231,6 +231,14 @@ async function withReconciliation(snapshot,id,services) {
   };
 }
 
+async function mutationSnapshot(snapshot,id,services,label) {
+  const reconciled=await withReconciliation(snapshot,id,services);
+  if (!reconciled.reconciliation.required) return reconciled.snapshot;
+  const work=assertEpic(reconciled.snapshot,id,label);
+  const current=workStatusResult({kind:"work-item",source:snapshot.source,work},id).state;
+  throw new CoreBlockedError(`${label} cannot run while ${current.status} / ${current.gate}`);
+}
+
 function assertLifecycleCombination(plan,approval,work,label) {
   if (plan===null) {
     if (approval!==null || work.prepared!==false || work.scope_approved!==false) {
@@ -447,8 +455,8 @@ async function prepare(command,services) {
   if (plan.epic.id!==id) throw new CoreValidationError("Epic plan does not bind the requested epic");
   const github=ownDataValue(services,"github","services");
   const observed=closedData(await ownDataFunction(github,"snapshot","github")({kind:"epic-prepare",id}),"epic preparation snapshot");
-  const reconciled=await withReconciliation(observed,id,services);
-  const snapshot=await withImmutableApproval(reconciled.snapshot,id,services,"epic_plan","epic preparation snapshot");
+  const current=await mutationSnapshot(observed,id,services,"Epic preparation");
+  const snapshot=await withImmutableApproval(current,id,services,"epic_plan","epic preparation snapshot");
   exact(snapshot,["kind","source","epic","epic_plan","epic_approval","preparation","dependency"],"epic preparation snapshot");
   if (snapshot.kind!=="epic-prepare") throw new CoreValidationError("Epic preparation snapshot kind is invalid");
   const work=assertEpic(snapshot,id,"epic preparation snapshot");
@@ -485,8 +493,8 @@ async function approve(command,services) {
   const authority=await requireAuthority(command,services);
   const github=ownDataValue(services,"github","services");
   const observed=closedData(await ownDataFunction(github,"snapshot","github")({kind:"epic-approval",id}),"epic approval snapshot");
-  const reconciled=await withReconciliation(observed,id,services);
-  const snapshot=await withImmutableApproval(reconciled.snapshot,id,services,"plan","epic approval snapshot");
+  const current=await mutationSnapshot(observed,id,services,"Epic approval");
+  const snapshot=await withImmutableApproval(current,id,services,"plan","epic approval snapshot");
   exact(snapshot,["kind","source","epic","epic_revision","plan","epic_approval","children","edges","project"],"epic approval snapshot");
   if (snapshot.kind!=="epic-approval" || typeof snapshot.epic_revision!=="string") throw new CoreValidationError("Epic approval snapshot is invalid");
   const work=assertEpic(snapshot,id,"epic approval snapshot");
@@ -527,8 +535,8 @@ async function submit(command,services) {
   if (command.options.from!==null || command.options.authority!==null) throw new CoreValidationError("epic submit does not consume plan input or authority");
   const id=command.args[0]; parseWorkItemId(id);
   const observed=closedData(await ownDataFunction(ownDataValue(services,"github","services"),"snapshot","github")({kind:"epic-submit",id}),"epic submit snapshot");
-  const reconciled=await withReconciliation(observed,id,services);
-  const snapshot=await withImmutableApproval(reconciled.snapshot,id,services,"plan","epic submit snapshot");
+  const current=await mutationSnapshot(observed,id,services,"Epic submit");
+  const snapshot=await withImmutableApproval(current,id,services,"plan","epic submit snapshot");
   exact(snapshot,["kind","source","epic","epic_revision","plan","epic_approval","children","edges","release","branch","pull_request","project"],"epic submit snapshot");
   const work=assertEpic(snapshot,id,"epic submit snapshot");
   if (snapshot.kind!=="epic-submit" || !Array.isArray(snapshot.children) || !Array.isArray(snapshot.edges)) throw new CoreValidationError("Epic submit snapshot is invalid");
@@ -564,8 +572,8 @@ async function accept(command,services) {
   const id=command.args[0]; parseWorkItemId(id);
   const authority=await requireAuthority(command,services);
   const observed=closedData(await ownDataFunction(ownDataValue(services,"github","services"),"snapshot","github")({kind:"epic-accept",id}),"epic acceptance snapshot");
-  const reconciled=await withReconciliation(observed,id,services);
-  const snapshot=await withImmutableApproval(reconciled.snapshot,id,services,"plan","epic acceptance snapshot");
+  const current=await mutationSnapshot(observed,id,services,"Epic acceptance");
+  const snapshot=await withImmutableApproval(current,id,services,"plan","epic acceptance snapshot");
   exact(snapshot,["kind","source","epic","epic_revision","plan","epic_approval","children","edges","release","branch","pull_request","review","checks","project"],"epic acceptance snapshot");
   const work=assertEpic(snapshot,id,"epic acceptance snapshot");
   if (snapshot.kind!=="epic-accept" || !Array.isArray(snapshot.children) || !Array.isArray(snapshot.edges)) throw new CoreValidationError("Epic acceptance snapshot is invalid");

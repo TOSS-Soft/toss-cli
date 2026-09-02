@@ -487,6 +487,42 @@ test("public epic prepare persists exact plan and native governed scope through 
   assert.equal(control.events.length,2);
 });
 
+test("unresolved partial Epic preparation blocks a public apply before another intent or remote write",async () => {
+  const plan={plan_id:"EPIC-PLAN-0042",created_at:"2026-09-01T10:00:00.000Z",source:{repository:"TOSS-Soft/toss-cli",revision:"feature-request@42",sha256:"a".repeat(64)},epic:work.item,children:[child],dependencies:[]};
+  const state=fakeHarness({"plan.json":plan});
+  state.fixture.seedWork(work);
+  state.fixture.setFailureMode("fail-epic-prepare-after-child");
+  const argv=["epic","prepare",EPIC,"--from","plan.json","--apply","--non-interactive"];
+
+  const failed=await dispatchCoreCommand(parseCoreCommand(argv),{services:state.services});
+
+  assert.equal(failed.exitCode,70);
+  const intent=state.control.events.at(-2).value;
+  const receipt=state.control.events.at(-1).value;
+  assert.equal(receipt.status,"failed");
+  assert.equal(receipt.observed_revisions.length,1);
+  const completed=intent.operations.find(value => value.operation_id===receipt.observed_revisions[0].operation_id);
+  assert.equal(Object.hasOwn(completed.payload,"native_parent_id"),true);
+  assert.equal(state.fixture.view().repositories.find(value => value.repository==="TOSS-Soft/toss-cli").issues.some(value => value.work.item.id===child.id),true);
+
+  const status=await dispatchCoreCommand(parseCoreCommand(["epic","status",EPIC]),{services:state.services});
+  assert.equal(status.exitCode,0,status.result.error?.message);
+  assert.equal(status.result.data.state.status,"Blocked");
+  assert.equal(status.result.data.state.gate,"RECONCILE_REQUIRED");
+  assert.equal(status.result.data.reconciliation.required,true);
+  assert.deepEqual(status.result.data.reconciliation.receipts[0].completed_operation_ids,[completed.operation_id]);
+
+  state.fixture.setFailureMode(null);
+  const eventCount=state.control.events.length;
+  const mutationCallCount=state.fixture.view().calls.filter(value => ["inspect","apply"].includes(value.method)).length;
+  const retry=await dispatchCoreCommand(parseCoreCommand(argv),{services:state.services});
+
+  assert.equal(retry.exitCode,4,retry.result.data?.status ?? retry.result.error?.message);
+  assert.match(retry.result.error.message,/Blocked \/ RECONCILE_REQUIRED/u);
+  assert.equal(state.control.events.length,eventCount);
+  assert.equal(state.fixture.view().calls.filter(value => ["inspect","apply"].includes(value.method)).length,mutationCallCount);
+});
+
 test("epic prepare reconciles exact dependency evidence and replays without another intent",async () => {
   const plan={plan_id:"EPIC-PLAN-0042",created_at:"2026-09-01T10:00:00.000Z",source:{repository:"TOSS-Soft/toss-cli",revision:"feature-request@42",sha256:"a".repeat(64)},epic:work.item,children:[dependentChild,child],dependencies:[dependencyEdge]};
   const {fixture,control,services}=fakeHarness({"plan.json":plan});
@@ -649,6 +685,88 @@ test("public epic submit creates one replay-safe PR only against the active rele
   assert.equal(replay.result.data.status,"already-reconciled");
   assert.equal(control.events.length,eventCount);
   assert.equal(fixture.view().repositories.find(value => value.repository==="TOSS-Soft/toss-cli").pull_requests.filter(value => value.work_item_id===EPIC).length,1);
+});
+
+test("public epic submit promotes an exact existing DRAFT pull request and status immediately composes READY",async () => {
+  const state=await approvedFakeHarness();
+  state.fixture.assignActiveRelease(EPIC,"v2.1.2");
+  await dispatchCoreCommand(parseCoreCommand(["issue","start",child.id,"--apply","--non-interactive"]),{services:state.services});
+  state.fixture.setBranchHead("TOSS-Soft/toss-cli",child.branch,"d".repeat(40));
+  await dispatchCoreCommand(parseCoreCommand(["issue","submit",child.id,"--apply","--non-interactive"]),{services:state.services});
+  state.fixture.mergeWorkPullRequest(child.id);
+  const before=await state.fixture.github.snapshot({kind:"epic-submit",id:EPIC});
+  const draftIntent=createOperationIntent({
+    intent_id:"INTENT-20260902-0900",created_at:"2026-09-02T07:55:00.000Z",
+    command:"epic.submit",policy_revision:"POLICY-0001",source:before.source,authority:null,
+    operations:[{resource:"pull_request",action:"create",repository:work.item.repository,
+      expected_revision:before.source.revision,payload:{kind:"work-pull-request",work_item_id:EPIC,
+        head:work.item.branch,base:before.release.branch,head_sha:before.branch.head_sha,draft:true}}],
+  });
+  await state.fixture.github.apply(draftIntent.operations,{idempotencyKey:sha256Canonical(draftIntent)});
+  const draft=state.fixture.view().repositories.find(value => value.repository==="TOSS-Soft/toss-cli").pull_requests.find(value => value.work_item_id===EPIC);
+  assert.equal(draft.state,"DRAFT");
+
+  const argv=["epic","submit",EPIC,"--apply","--non-interactive"];
+  const submitted=await dispatchCoreCommand(parseCoreCommand(argv),{services:state.services});
+
+  assert.equal(submitted.exitCode,0,submitted.result.error?.message);
+  const ready=state.fixture.view().repositories.find(value => value.repository==="TOSS-Soft/toss-cli").pull_requests.find(value => value.work_item_id===EPIC);
+  assert.equal(ready.state,"READY");
+  assert.notEqual(ready.revision,draft.revision);
+  const status=await dispatchCoreCommand(parseCoreCommand(["epic","status",EPIC]),{services:state.services});
+  assert.equal(status.exitCode,0,status.result.error?.message);
+  assert.equal(status.result.data.pull_request.state,"READY");
+  assert.equal(status.result.data.state.status,"In review");
+  assert.equal(status.result.data.state.gate,"REVIEW_REQUIRED");
+  assert.equal(status.result.data.project.id,"PVT_TOSS_OS_2");
+  const composed=await state.fixture.github.snapshot({kind:"work-item",id:EPIC});
+  assert.equal(composed.work.pull_request.state,"READY");
+  assert.equal(composed.work.item.status,"In review");
+  assert.equal(composed.work.item.gate,"EPIC_ACCEPTANCE_REQUIRED");
+  assert.equal(composed.work.project.fields.Status,"In review");
+  assert.equal(composed.work.project.fields.Gate,"EPIC_ACCEPTANCE_REQUIRED");
+
+  const eventCount=state.control.events.length;
+  const applyCount=state.fixture.view().calls.filter(value => value.method==="apply").length;
+  const replay=await dispatchCoreCommand(parseCoreCommand(argv),{services:state.services});
+  assert.equal(replay.exitCode,0,replay.result.error?.message);
+  assert.equal(replay.result.data.status,"already-reconciled");
+  assert.equal(state.control.events.length,eventCount);
+  assert.equal(state.fixture.view().calls.filter(value => value.method==="apply").length,applyCount);
+});
+
+test("existing Epic pull request updates preserve exact base and current head checks",async () => {
+  const state=await approvedFakeHarness();
+  state.fixture.assignActiveRelease(EPIC,"v2.1.2");
+  await dispatchCoreCommand(parseCoreCommand(["issue","start",child.id,"--apply","--non-interactive"]),{services:state.services});
+  state.fixture.setBranchHead("TOSS-Soft/toss-cli",child.branch,"d".repeat(40));
+  await dispatchCoreCommand(parseCoreCommand(["issue","submit",child.id,"--apply","--non-interactive"]),{services:state.services});
+  state.fixture.mergeWorkPullRequest(child.id);
+  await dispatchCoreCommand(parseCoreCommand(["epic","submit",EPIC,"--apply","--non-interactive"]),{services:state.services});
+  const snapshot=await state.fixture.github.snapshot({kind:"epic-submit",id:EPIC});
+  const cases=[
+    ["wrong base","release/v9.9.9",snapshot.branch.head_sha,/base or head conflicts/u],
+    ["stale head",snapshot.release.branch,"0".repeat(40),/head is stale/u],
+  ];
+
+  for (let index=0;index<cases.length;index+=1) {
+    const [label,base,headSha,message]=cases[index];
+    const intent=createOperationIntent({
+      intent_id:`INTENT-20260902-09${String(index+1).padStart(2,"0")}`,
+      created_at:`2026-09-02T07:${String(56+index).padStart(2,"0")}:00.000Z`,
+      command:"epic.submit",policy_revision:"POLICY-0001",source:snapshot.source,authority:null,
+      operations:[{resource:"pull_request",action:"update",repository:work.item.repository,
+        expected_revision:snapshot.pull_request.revision,payload:{kind:"work-pull-request",work_item_id:EPIC,
+          head:work.item.branch,base,head_sha:headSha,draft:false}}],
+    });
+    await assert.rejects(
+      state.fixture.github.apply(intent.operations,{idempotencyKey:sha256Canonical(intent)}),
+      error => message.test(error.message),label,
+    );
+  }
+  const unchanged=state.fixture.view().repositories.find(value => value.repository==="TOSS-Soft/toss-cli").pull_requests.find(value => value.work_item_id===EPIC);
+  assert.equal(unchanged.state,"READY");
+  assert.equal(unchanged.revision,snapshot.pull_request.revision);
 });
 
 test("epic submit atomically projects its ready PR acceptance authority and Project review state",async () => {
@@ -953,15 +1071,21 @@ test("epic acceptance records failed reconciliation when Project Done fails afte
   assert.equal(status.result.data.reconciliation.receipts[0].receipt_id,receipt.receipt_id);
   assert.deepEqual(status.result.data.reconciliation.receipts[0].completed_operation_ids,[completed.operation_id]);
 
-  const eventCount=state.control.events.length;
-  const applyCount=state.fixture.view().calls.filter(value => value.method==="apply").length;
-  const retry=await dispatchCoreCommand(
-    parseCoreCommand(["epic","accept",EPIC,"--authority","accept.json","--apply","--non-interactive"]),
-    {services:state.services},
-  );
-  assert.equal(retry.exitCode,4);
-  assert.equal(state.control.events.length,eventCount);
-  assert.equal(state.fixture.view().calls.filter(value => value.method==="apply").length,applyCount);
+  const mutations=[
+    ["prepare",["epic","prepare",EPIC,"--from","plan.json","--apply","--non-interactive"]],
+    ["approve",["epic","approve",EPIC,"--authority","approve.json","--apply","--non-interactive"]],
+    ["submit",["epic","submit",EPIC,"--apply","--non-interactive"]],
+    ["accept",["epic","accept",EPIC,"--authority","accept.json","--apply","--non-interactive"]],
+  ];
+  for (const [label,argv] of mutations) {
+    const eventCount=state.control.events.length;
+    const mutationCallCount=state.fixture.view().calls.filter(value => ["inspect","apply"].includes(value.method)).length;
+    const retry=await dispatchCoreCommand(parseCoreCommand(argv),{services:state.services});
+    assert.equal(retry.exitCode,4,`${label}: ${retry.result.data?.status ?? retry.result.error?.message}`);
+    assert.match(retry.result.error.message,/Blocked \/ RECONCILE_REQUIRED/u,label);
+    assert.equal(state.control.events.length,eventCount,label);
+    assert.equal(state.fixture.view().calls.filter(value => ["inspect","apply"].includes(value.method)).length,mutationCallCount,label);
+  }
 });
 
 test("epic mutation confirmation sees the exact final preview and decline is write-free",async () => {

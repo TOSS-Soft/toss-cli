@@ -805,6 +805,9 @@ export function createCoreGithubFixture(options={}) {
   function applyEpicPrepare(operation) {
     const payload=operation.payload;
     exact(payload,["kind","plan","work"],"epic preparation payload");
+    if (failureMode==="fail-epic-prepare-after-child") {
+      throw new Error("injected epic preparation failure after managed child creation");
+    }
     const record=issue(payload.plan.epic.id);
     if (!record || record.work.item.kind!=="epic" ||
         record.work.item.id!==payload.work.item.id ||
@@ -1080,6 +1083,7 @@ export function createCoreGithubFixture(options={}) {
     if (existing) {
       if (existing.base!==payload.base || existing.head!==payload.head) throw new CoreConflictError("Existing pull request base or head conflicts");
       existing.head_sha=payload.head_sha;
+      existing.state=payload.draft ? "DRAFT" : "READY";
       existing.revision=bump("pull-request",existing.revision);
       revision=existing.revision;
     } else {
