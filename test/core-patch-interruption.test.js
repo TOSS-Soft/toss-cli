@@ -39,6 +39,7 @@ const SECOND_MERGED_SHA="8".repeat(40);
 const RECONCILED_AT="2026-09-03T10:10:00.000Z";
 const REVIEW_GATE_AT="2026-09-03T10:20:00.000Z";
 const REREVIEWED_AT="2026-09-03T10:30:00.000Z";
+const PACKAGE_SRI=`sha512-${"A".repeat(86)}==`;
 
 function releaseId(programId,repository=REPOSITORY) {
   return `REL-${programId}-${createHash("sha256").update(repository,"utf8").digest("hex")}`;
@@ -120,7 +121,7 @@ function publicationEvidence() {
   const evidence={schema_version:"publication-evidence.v1",evidence_id:"PUB-20260903-0002",
     release_id:"REL-published-2.1.2",repository:REPOSITORY,version:"2.1.2",
     expected_revision:MAIN_SHA,tag:{name:"v2.1.2",target_revision:MAIN_SHA},
-    package:{name:"@toss-software/cli",version:"2.1.2",integrity:"sha512-dGVzdA=="},
+    package:{name:"@toss-software/cli",version:"2.1.2",integrity:PACKAGE_SRI},
     github_release:{release_id:"R_2_1_2",tag_name:"v2.1.2",target_revision:MAIN_SHA,
       draft:false,prerelease:false,assets:[{name:"toss-cli-2.1.2.tgz",sha256:"c".repeat(64)}]},
     source_receipt:"RECEIPT-20260903-0002",verified_at:NOW};
@@ -362,7 +363,7 @@ function releasedPatchProgram(active) {
   const githubPublication={kind:"release-publication",
     control_revision:publicationState.revision,repository_revision:"repository-published-55",
     publication:{tag:{name:"v2.1.3",target_revision:PATCH_SHA},
-      package:{name:"@toss-software/cli",version:"2.1.3",integrity:"sha512-dGVzdA=="},
+      package:{name:"@toss-software/cli",version:"2.1.3",integrity:PACKAGE_SRI},
       github_release:{release_id:"R_2_1_3",tag_name:"v2.1.3",target_revision:PATCH_SHA,
         draft:false,prerelease:false,assets:[]}},
     planning:{candidates:[],completed:[BUG],repositories:[{
@@ -2391,9 +2392,23 @@ test("public release approve restarts patch reconciliation review gate and resum
     operation.payload.kind==="release-patch-reconcile"),true);
   const reconciliation=evidenceForRequest(first.request,{intentId:"INTENT-20260903-0795",
     receiptId:"RECEIPT-20260903-0795",createdAt:RECONCILED_AT});
+  const nextAfterReconciliation={...next,updated_at:"2026-09-03T10:15:00.000Z"};
   const afterReconciliation={...baseState,revision:"control-completion-2",
+    programs:[paused,patch,nextAfterReconciliation],
     intents:[...baseState.intents,reconciliation.intent],
     receipts:[...baseState.receipts,reconciliation.receipt]};
+  await rejectBeforeSnapshot({...afterReconciliation,
+    revision:"control-completion-linked-patch-drift",
+    programs:[paused,{...patch,updated_at:"2026-09-03T10:14:00.000Z"},
+      nextAfterReconciliation]});
+  await rejectBeforeSnapshot({...afterReconciliation,
+    revision:"control-completion-linked-policy-drift",
+    organization:{...afterReconciliation.organization,policy_revision:"POLICY-0002"}});
+  await rejectBeforeSnapshot({...afterReconciliation,
+    revision:"control-completion-linked-config-drift",
+    repositories:[{...repositoryConfiguration(),publication:{
+      ...repositoryConfiguration().publication,workflow:"changed-publish.yml",
+    }}]});
 
   const second=await invoke({state:afterReconciliation,receiptId:"RECEIPT-20260903-0794",
     at:REVIEW_GATE_AT,observation:query => observed(query,{reconciled:true,
@@ -2406,11 +2421,17 @@ test("public release approve restarts patch reconciliation review gate and resum
     operation.payload.kind==="release-check-request"),true);
   const reviewGate=evidenceForRequest(second.request,{intentId:"INTENT-20260903-0791",
     receiptId:"RECEIPT-20260903-0794",createdAt:REVIEW_GATE_AT});
-  const afterReviewGate={...baseState,revision:"control-completion-3",
+  const afterReviewGate={...afterReconciliation,revision:"control-completion-3",
     intents:[...baseState.intents,reconciliation.intent,reviewGate.intent],
     receipts:[...baseState.receipts,reconciliation.receipt,reviewGate.receipt]};
   const feature=paused.repository_releases[0];
-  const third=await invoke({state:afterReviewGate,receiptId:"RECEIPT-20260903-0793",
+  const nextAfterReviewGate={...nextAfterReconciliation,
+    updated_at:"2026-09-03T10:25:00.000Z"};
+  const afterReviewGateEvolution={...afterReviewGate,
+    revision:"control-completion-3-evolved",
+    programs:[paused,patch,nextAfterReviewGate]};
+  const third=await invoke({state:afterReviewGateEvolution,
+    receiptId:"RECEIPT-20260903-0793",
     at:REREVIEWED_AT,observation:query => observed(query,{reconciled:false,
       currentMain:SECOND_MERGED_SHA})});
   assert.equal(third.request.operations.some(operation =>
@@ -2422,7 +2443,8 @@ test("public release approve restarts patch reconciliation review gate and resum
   const secondReconciliation=evidenceForRequest(third.request,{
     intentId:"INTENT-20260903-0794",receiptId:"RECEIPT-20260903-0793",
     createdAt:REREVIEWED_AT});
-  const afterSecondReconciliation={...baseState,revision:"control-completion-4",
+  const afterSecondReconciliation={...afterReviewGateEvolution,
+    revision:"control-completion-4",
     intents:[...baseState.intents,reconciliation.intent,reviewGate.intent,
       secondReconciliation.intent],
     receipts:[...baseState.receipts,reconciliation.receipt,reviewGate.receipt,
@@ -2493,7 +2515,8 @@ test("public release approve restarts patch reconciliation review gate and resum
   const secondReviewGate=evidenceForRequest(fourth.request,{
     intentId:"INTENT-20260903-0792",receiptId:"RECEIPT-20260903-0792",
     createdAt:"2026-09-03T10:50:00.000Z"});
-  const afterSecondReviewGate={...baseState,revision:"control-completion-5",
+  const afterSecondReviewGate={...afterSecondReconciliation,
+    revision:"control-completion-5",
     intents:[...baseState.intents,reconciliation.intent,reviewGate.intent,
       secondReconciliation.intent,secondReviewGate.intent],
     receipts:[...baseState.receipts,reconciliation.receipt,reviewGate.receipt,
@@ -2519,7 +2542,8 @@ test("public release approve restarts patch reconciliation review gate and resum
   const resume=evidenceForRequest(fifth.request,{intentId:"INTENT-20260903-0793",
     receiptId:"RECEIPT-20260903-0791",createdAt:"2026-09-03T11:10:00.000Z"});
   const terminalState={...baseState,revision:"control-completion-6",
-    programs:[resumed,patch,next],intents:[...baseState.intents,reconciliation.intent,
+    programs:[resumed,patch,nextAfterReviewGate],
+    intents:[...baseState.intents,reconciliation.intent,
       reviewGate.intent,secondReconciliation.intent,secondReviewGate.intent,resume.intent],
     receipts:[...baseState.receipts,reconciliation.receipt,reviewGate.receipt,
       secondReconciliation.receipt,secondReviewGate.receipt,resume.receipt]};
@@ -2531,7 +2555,7 @@ test("public release approve restarts patch reconciliation review gate and resum
   assert.equal(terminal.reservations,0);
   assert.equal(terminal.request,null);
 
-  const evolvedNext={...next,updated_at:"2026-09-03T11:15:00.000Z"};
+  const evolvedNext={...nextAfterReviewGate,updated_at:"2026-09-03T11:15:00.000Z"};
   const evolvedTerminal={...terminalState,revision:"control-completion-7",
     programs:[resumed,patch,evolvedNext]};
   const evolvedReplay=await invoke({state:evolvedTerminal,

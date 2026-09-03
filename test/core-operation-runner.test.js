@@ -5,7 +5,7 @@ import test from "node:test";
 import {canonicalJson,sha256Canonical} from "../src/contracts/acp.js";
 import {authorityReference,verifyAuthority} from "../src/core/authority.js";
 import {parseCoreCommand} from "../src/core/commands/router.js";
-import {CoreBlockedError,CoreConflictError,CoreRemoteError} from "../src/core/errors.js";
+import {CoreBlockedError,CoreConflictError,CoreRemoteError,CoreValidationError} from "../src/core/errors.js";
 import {createOperationIntent,operationPreview} from "../src/core/operations/plan.js";
 import {createOperationRunner} from "../src/core/operations/runner.js";
 
@@ -677,6 +677,124 @@ test("execute rejects symbol hidden accessor and proxy request fields without in
   }
   assert.equal(hostileCalls,0);
   assert.deepEqual(events,[]);
+});
+
+test("runner and authority clones reject over-depth data before unsafe recursion or remote mutation",async () => {
+  const nested=() => {
+    let value={leaf:true};
+    for (let index=0;index<10_000;index+=1) value={next:value};
+    return value;
+  };
+  const events=[];
+  const runner=createOperationRunner({
+    control:memoryControl(events),github:{
+      async snapshot() { events.push("snapshot"); return {}; },
+      async inspect() { events.push("inspect"); return [nested()]; },
+      async apply() { events.push("apply"); return {status:"completed",observed_revisions:[]}; },
+    },authorityRegistry:null,clock:() => "2026-09-01T08:01:00.000Z",
+    idGenerator:kind => kind==="intent" ? "INTENT-20260901-0001" : "RECEIPT-20260901-0001",
+    policyRevision:() => "POLICY-0001",
+  });
+  await assert.rejects(runner.apply({...operationInput(),unexpected:nested()}),CoreValidationError);
+  await assert.rejects(runner.execute({
+    command:parseCoreCommand(["repo","add","TOSS-Soft/toss-cli"]),
+    source:{...operationInput().source,unexpected:nested()},
+    operations:operationInput().operations,authority:null,
+  }),CoreValidationError);
+  assert.deepEqual(events,[]);
+
+  const authority={schema_version:"authority-record.v1",document_type:"authority-record",
+    record_id:"AUTH-20260901-0001",actor:"independent-approver",command:"repo.add",
+    targets:["TOSS-Soft/toss-cli"],expected_revisions:[{
+      repository:"TOSS-Soft/toss-cli",revision:"rev-1",
+    }],policy_revision:"POLICY-0001",issued_at:"2026-09-01T07:00:00.000Z",
+    expires_at:"2026-09-01T09:00:00.000Z",
+    signature:{algorithm:"ed25519",key_id:"approver",value:"a".repeat(86)+"=="},
+    unexpected:nested()};
+  assert.throws(() => authorityReference(authority),CoreValidationError);
+  assert.throws(() => verifyAuthority(authority,{},null),CoreValidationError);
+
+  const persistedEvents=[];
+  const persistedRunner=createOperationRunner({control:{
+    async head() { return "head-0"; },
+    async findIntent() { persistedEvents.push("find-intent");
+      return {...operationInput(),unexpected:nested()}; },
+    async findReceipt() { persistedEvents.push("find-receipt"); return null; },
+    async commitIntent() { persistedEvents.push("commit-intent"); throw new Error("must not commit"); },
+    async commitReceipt() { persistedEvents.push("commit-receipt"); throw new Error("must not commit"); },
+  },github:{async snapshot() { return {}; },async inspect() {
+    persistedEvents.push("inspect"); return [];
+  },async apply() { persistedEvents.push("apply"); return {}; }},authorityRegistry:null,
+  clock:() => "2026-09-01T08:01:00.000Z",idGenerator:() => "RECEIPT-20260901-0001",
+  policyRevision:() => "POLICY-0001"});
+  await assert.rejects(persistedRunner.apply(createOperationIntent(operationInput()),{
+    authority:null,
+  }),CoreValidationError);
+  assert.deepEqual(persistedEvents,["find-intent"]);
+
+  await assert.rejects(runner.apply(createOperationIntent(operationInput()),{
+    authority:null,
+  }),CoreValidationError);
+  assert.deepEqual(events,["intent","inspect","receipt"]);
+});
+
+test("runner and authority clones never invoke accessor-backed array elements",async () => {
+  let traps=0;
+  const accessorArray=() => {
+    const value=[];
+    Object.defineProperty(value,"0",{enumerable:true,configurable:true,get() {
+      traps+=1;
+      throw new Error("must not read an accessor-backed array element");
+    }});
+    return value;
+  };
+  const events=[];
+  const runner=createOperationRunner({control:memoryControl(events),github:{
+    async snapshot() { events.push("snapshot"); return {}; },
+    async inspect() { events.push("inspect"); return []; },
+    async apply() { events.push("apply"); return {status:"completed",observed_revisions:[]}; },
+  },authorityRegistry:null,clock:() => "2026-09-01T08:01:00.000Z",
+  idGenerator:kind => kind==="intent" ? "INTENT-20260901-0001" : "RECEIPT-20260901-0001",
+  policyRevision:() => "POLICY-0001"});
+  await assert.rejects(runner.apply({...operationInput(),unexpected:accessorArray()}),
+    CoreValidationError);
+  await assert.rejects(runner.execute({
+    command:parseCoreCommand(["repo","add","TOSS-Soft/toss-cli"]),
+    source:{...operationInput().source,unexpected:accessorArray()},
+    operations:operationInput().operations,authority:null,
+  }),CoreValidationError);
+  assert.deepEqual(events,[]);
+
+  const persistedEvents=[];
+  const persistedRunner=createOperationRunner({control:{
+    async head() { return "head-0"; },
+    async findIntent() { persistedEvents.push("find-intent");
+      return {...operationInput(),unexpected:accessorArray()}; },
+    async findReceipt() { persistedEvents.push("find-receipt"); return null; },
+    async commitIntent() { persistedEvents.push("commit-intent"); throw new Error("must not commit"); },
+    async commitReceipt() { persistedEvents.push("commit-receipt"); throw new Error("must not commit"); },
+  },github:{async snapshot() { return {}; },async inspect() {
+    persistedEvents.push("inspect"); return [];
+  },async apply() { persistedEvents.push("apply"); return {}; }},authorityRegistry:null,
+  clock:() => "2026-09-01T08:01:00.000Z",idGenerator:() => "RECEIPT-20260901-0001",
+  policyRevision:() => "POLICY-0001"});
+  await assert.rejects(persistedRunner.apply(createOperationIntent(operationInput()),{
+    authority:null,
+  }),CoreValidationError);
+  assert.deepEqual(persistedEvents,["find-intent"]);
+
+  const authority={schema_version:"authority-record.v1",document_type:"authority-record",
+    record_id:"AUTH-20260901-0001",actor:"independent-approver",command:"repo.add",
+    targets:["TOSS-Soft/toss-cli"],expected_revisions:[{
+      repository:"TOSS-Soft/toss-cli",revision:"rev-1",
+    }],policy_revision:"POLICY-0001",issued_at:"2026-09-01T07:00:00.000Z",
+    expires_at:"2026-09-01T09:00:00.000Z",
+    signature:{algorithm:"ed25519",key_id:"approver",value:"a".repeat(86)+"=="},
+    unexpected:accessorArray()};
+  assert.throws(() => authorityReference(authority),CoreValidationError);
+  assert.throws(() => verifyAuthority({...authority,unexpected:accessorArray()},{},null),
+    CoreValidationError);
+  assert.equal(traps,0);
 });
 
 test("runner rejects accessor-backed remote ports before they can be trusted",() => {

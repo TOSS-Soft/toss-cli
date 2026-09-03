@@ -11,6 +11,7 @@ import {promisify} from "node:util";
 import {canonicalJson} from "../src/contracts/acp.js";
 import {authoritySigningPayload} from "../src/core/authority.js";
 import {runCoreCli} from "../src/core/cli.js";
+import {CoreBlockedError} from "../src/core/errors.js";
 import {createCoreRuntime} from "../src/core/runtime.js";
 
 const repositoryRoot=fileURLToPath(new URL("..",import.meta.url));
@@ -308,10 +309,11 @@ test("interactive init and repo add confirm their exact previews before any writ
   assert.equal(prompts.length,2); assert.equal(prompts[0].preview.operations.length,7); assert.equal(prompts[1].preview.operations.length,1);
 });
 
-test("interactive release mutations receive the shared CLI confirmation bridge",async t => {
+test("every interactive release mutation receives the generic CLI confirmation bridge",async t => {
   const {root}=await controlRepository(t);
   const prompts=[];
   const previews=[];
+  let approvalPhase=0;
   const provider=async () => ({
     services:{},
     handlers:{
@@ -329,6 +331,15 @@ test("interactive release mutations receive the shared CLI confirmation bridge",
         assert.equal(await services.confirm(preview),true);
         return {status:"confirmed"};
       },
+      "release.approve":async (command,services) => {
+        approvalPhase+=1;
+        const preview={schema_version:"operation-preview.v1",
+          intent_id:`INTENT-20260903-000${approvalPhase+2}`,
+          intent_sha256:String(approvalPhase+1).repeat(64),command:command.name,operations:[]};
+        previews.push(preview);
+        assert.equal(await services.confirm(preview),true);
+        return {status:["approval","publication","patch-completion"][approvalPhase-1]};
+      },
     },
     prompt:async request => { prompts.push(request); return true; },
   });
@@ -336,14 +347,40 @@ test("interactive release mutations receive the shared CLI confirmation bridge",
   for (const argv of [
     ["release","plan","--apply","--json"],
     ["release","activate","TOSS-OS-R0001","--apply","--json"],
+    ["release","approve","TOSS-Soft/toss-cli@2.2.0","--apply",
+      "--authority","authority.json","--json"],
+    ["release","approve","TOSS-Soft/toss-cli@2.2.0","--apply","--json"],
+    ["release","approve","TOSS-Soft/toss-cli@2.2.0","--apply","--json"],
   ]) {
     const result=await runProgrammatic(argv,{cwd:root,runtimeProvider:provider});
     assert.equal(result.exitCode,0,result.stderr);
   }
-  assert.equal(prompts.length,2);
-  assert.deepEqual(prompts.map(value => value.kind),["confirm-apply","confirm-apply"]);
-  assert.deepEqual(prompts.map(value => value.command.name),["release.plan","release.activate"]);
+  assert.equal(prompts.length,5);
+  assert.deepEqual(prompts.map(value => value.kind),Array(5).fill("confirm-apply"));
+  assert.deepEqual(prompts.map(value => value.command.name),[
+    "release.plan","release.activate","release.approve","release.approve","release.approve",
+  ]);
   assert.deepEqual(prompts.map(value => value.preview),previews);
+
+  let writes=0;
+  let declines=0;
+  const declineProvider=async () => ({services:{},handlers:{
+    "release.approve":async (command,services) => {
+      const preview={schema_version:"operation-preview.v1",intent_id:"INTENT-20260903-0099",
+        intent_sha256:"f".repeat(64),command:command.name,operations:[]};
+      if (await services.confirm(preview)!==true) {
+        throw new CoreBlockedError("Interactive apply was not confirmed");
+      }
+      writes+=1;
+      return {status:"written"};
+    },
+  },prompt:async () => { declines+=1; return false; }});
+  const declined=await runProgrammatic([
+    "release","approve","TOSS-Soft/toss-cli@2.2.0","--apply","--json",
+  ],{cwd:root,runtimeProvider:declineProvider});
+  assert.equal(declined.exitCode,4);
+  assert.equal(declines,1);
+  assert.equal(writes,0);
 });
 
 test("interactive decline receives the exact preview and performs no init or repo-add write",async t => {

@@ -197,13 +197,17 @@ function completedPatchPhaseEvidence(state,patch,paused,publication,{excludeInte
     }
     const aggregate=targeted[0];
     const query=aggregate.payload.query;
+    const queryConfiguration=query.repositories?.find(value =>
+      value.repository===publication.repository) ?? null;
     if (query.control_repository!==state.organization.control_repository ||
-        canonicalJson(query.organization)!==canonicalJson(state.organization) ||
-        canonicalJson(query.repositories)!==canonicalJson(state.repositories) ||
-        canonicalJson(query.programs)!==canonicalJson(state.programs) ||
+        query.organization?.organization!==state.organization.organization ||
+        query.organization?.control_repository!==state.organization.control_repository ||
+        query.organization?.policy_revision!==state.organization.policy_revision ||
+        canonicalJson(query.organization?.project)!==canonicalJson(state.organization.project) ||
         canonicalJson(query.patch_program)!==canonicalJson(patch) ||
         canonicalJson(query.paused_program)!==canonicalJson(paused) ||
         canonicalJson(query.publication)!==canonicalJson(publication) ||
+        canonicalJson(queryConfiguration)!==canonicalJson(configuration) ||
         canonicalJson(query.repository_configuration)!==canonicalJson(configuration) ||
         canonicalJson(query.project)!==canonicalJson(state.organization.project)) {
       throw new CoreConflictError("Patch completion intent does not bind the current exact target set");

@@ -109,6 +109,8 @@ function completedPhaseEvidence(value,label,{paused,patch,patchRelease,featureRe
   const defaultBranch=defaultBranches[0];
   const featureBranch=featureBranches[0];
   const evidenceQuery=aggregate.payload.query;
+  const evidenceConfiguration=evidenceQuery.repositories?.find(configuration =>
+    configuration.repository===patchRelease.repository) ?? null;
   const expectedPhaseEvidence=label==="reconciliation"
     ? {reconciliation:null,review_gate:null}
     : {reconciliation:completionQuery.phase_evidence.reconciliation,review_gate:null};
@@ -116,9 +118,17 @@ function completedPhaseEvidence(value,label,{paused,patch,patchRelease,featureRe
       aggregate.resource!=="project" || aggregate.action!=="verify" ||
       aggregate.repository!==null || aggregate.payload.project_id!==completionQuery.project.node_id ||
       evidenceQuery.control_repository!==completionQuery.control_repository ||
-      canonicalJson(evidenceQuery.organization)!==canonicalJson(completionQuery.organization) ||
-      canonicalJson(evidenceQuery.repositories)!==canonicalJson(completionQuery.repositories) ||
-      canonicalJson(evidenceQuery.programs)!==canonicalJson(completionQuery.programs) ||
+      evidenceQuery.organization?.organization!==completionQuery.organization.organization ||
+      evidenceQuery.organization?.control_repository!==completionQuery.organization.control_repository ||
+      evidenceQuery.organization?.policy_revision!==completionQuery.organization.policy_revision ||
+      canonicalJson(evidenceQuery.organization?.project)!==
+        canonicalJson(completionQuery.organization.project) ||
+      canonicalJson(evidenceConfiguration)!==
+        canonicalJson(completionQuery.repository_configuration) ||
+      canonicalJson(evidenceQuery.programs?.find(program =>
+        program.program_id===patch.program_id))!==canonicalJson(patch) ||
+      canonicalJson(evidenceQuery.programs?.find(program =>
+        program.program_id===paused.program_id))!==canonicalJson(paused) ||
       canonicalJson(evidenceQuery.patch_program)!==canonicalJson(patch) ||
       canonicalJson(evidenceQuery.paused_program)!==canonicalJson(paused) ||
       canonicalJson(evidenceQuery.publication)!==canonicalJson(completionQuery.publication) ||

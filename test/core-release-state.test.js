@@ -14,6 +14,7 @@ const RELEASE_PHASES=Object.freeze([
 ]);
 const TIMESTAMP="2026-09-02T10:00:00.000Z";
 const COMMIT="a".repeat(40);
+const PACKAGE_SRI=`sha512-${"A".repeat(86)}==`;
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
@@ -42,7 +43,7 @@ function publicationEvidence({
     version,
     expected_revision:COMMIT,
     tag:{name:`v${version}`,target_revision:COMMIT},
-    package:{name:"@toss-software/cli",version,integrity:"sha512-dGVzdA=="},
+    package:{name:"@toss-software/cli",version,integrity:PACKAGE_SRI},
     github_release:{
       release_id:"R_kgDORelease1",
       tag_name:`v${version}`,
@@ -258,6 +259,19 @@ test("release contracts accept closed release, program, and publication evidence
   ]) {
     assert.equal(validateDocument(value,schemaId).valid,true,schemaId);
   }
+});
+
+test("publication integrity rejects noncanonical SHA-512 Base64 low bits in schema and state",async () => {
+  const evidence=publicationEvidence();
+  evidence.package.integrity=`sha512-${"A".repeat(85)}B==`;
+  const {evidence_sha256:_,...unsigned}=evidence;
+  void _;
+  evidence.evidence_sha256=sha256Canonical(unsigned);
+  assert.equal(validateDocument(evidence,"publication-evidence.v1").valid,false);
+  const released=repositoryRelease({phase:"RELEASED",evidence});
+  const program=releaseProgram({phase:"RELEASED",releases:[released]});
+  const {assertRepositoryConcurrency}=await releaseState();
+  assert.throws(() => assertRepositoryConcurrency([program]),CoreValidationError);
 });
 
 test("approval source-program and current release revisions may share the same canonical text",async () => {

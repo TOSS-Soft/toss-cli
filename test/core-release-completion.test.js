@@ -8,7 +8,7 @@ import {authorityReference} from "../src/core/authority.js";
 import {CoreBlockedError,CoreConflictError,CoreValidationError} from "../src/core/errors.js";
 import {createOperationIntent} from "../src/core/operations/plan.js";
 import {createOperationRunner} from "../src/core/operations/runner.js";
-import {normalizeReleasePlanningState} from "../src/core/release/operations.js";
+import {normalizeReleasePlanningState,releasePlanOperations} from "../src/core/release/operations.js";
 import {
   approvalOperations,completeProgram,publicationComplete,publicationOperations,
   publicationSource,releasePublicationQuery,verifyPublication,
@@ -20,6 +20,7 @@ const CONTROL_REPOSITORY="TOSS-Soft/toss-os-control";
 const REPOSITORY="TOSS-Soft/toss-cli";
 const VERSION="2.2.0";
 const NOW="2026-09-03T12:00:00.000Z";
+const PACKAGE_SRI=`sha512-${"A".repeat(86)}==`;
 
 function organization(repositories=[REPOSITORY]) {
   return {schema_version:"organization-config.v1",organization:"TOSS-Soft",
@@ -194,7 +195,7 @@ function publicationObservation() {
   return {kind:"release-publication",control_revision:"control-18",
     repository_revision:"repository-published-18",publication:{
       tag:{name:`v${VERSION}`,target_revision:"a".repeat(40)},
-      package:{name:"@toss-software/cli",version:VERSION,integrity:"sha512-YWJjZA=="},
+      package:{name:"@toss-software/cli",version:VERSION,integrity:PACKAGE_SRI},
       github_release:{release_id:"GH-18",tag_name:`v${VERSION}`,
         target_revision:"a".repeat(40),draft:false,prerelease:false,
         assets:[{name:"checksums.txt",sha256:"d".repeat(64)}]},
@@ -234,7 +235,7 @@ function evidenceFor(releaseValue,{sourceReceipt="RECEIPT-20260903-0004",overrid
     version:releaseValue.version,expected_revision:releaseValue.approval.merge_result_revision,
     tag:{name:`v${releaseValue.version}`,target_revision:releaseValue.approval.merge_result_revision},
     package:{name:releaseValue.approval.publication.package_name,version:releaseValue.version,
-      integrity:"sha512-YWJjZA=="},
+      integrity:PACKAGE_SRI},
     github_release:{release_id:"GH-17",tag_name:`v${releaseValue.version}`,
       target_revision:releaseValue.approval.merge_result_revision,draft:false,prerelease:false,
       assets:[{name:"checksums.txt",sha256:"d".repeat(64)}]},
@@ -345,6 +346,16 @@ test("publication verification binds tag, package, final release, assets, receip
     ["TAG_TARGET_MISMATCH",{tag:{...evidence.tag,target_revision:"e".repeat(40)}}],
     ["PACKAGE_MISSING",{package:null}],
     ["PACKAGE_VERSION_MISMATCH",{package:{...evidence.package,version:"2.1.9"}}],
+    ["PACKAGE_INTEGRITY_INVALID",{package:{...evidence.package,
+      integrity:"sha512-YWJjZA=="}}],
+    ["PACKAGE_INTEGRITY_INVALID",{package:{...evidence.package,
+      integrity:PACKAGE_SRI.slice(0,-1)}}],
+    ["PACKAGE_INTEGRITY_INVALID",{package:{...evidence.package,
+      integrity:`${PACKAGE_SRI.slice(0,-3)}R==`}}],
+    ["PACKAGE_INTEGRITY_INVALID",{package:{...evidence.package,
+      integrity:`sha512-${"A".repeat(85)}B==`}}],
+    ["PACKAGE_INTEGRITY_INVALID",{package:{...evidence.package,
+      integrity:`sha512-${"A".repeat(85)}-==`}}],
     ["GITHUB_RELEASE_NOT_FINAL",{github_release:{...evidence.github_release,draft:true}}],
     ["GITHUB_RELEASE_NOT_FINAL",{github_release:{...evidence.github_release,prerelease:true}}],
     ["EVIDENCE_HASH_MISMATCH",{evidence_sha256:"f".repeat(64)}],
@@ -1041,6 +1052,36 @@ test("Publishing re-entry independently verifies publication and atomically crea
   assert.equal(intent.operations[0].payload.kind,"release-publication-precondition");
 });
 
+test("last-track publication reuses one preexisting future program without appending a duplicate",() => {
+  const state=publishingState();
+  const createdAt="2026-09-02T09:00:00.000Z";
+  const waiting={schema_version:"release-program.v1",program_id:"TOSS-OS-R0002",
+    phase:"WAITING_FOR_EPIC",revision:"REV-0001",repository_releases:[],
+    dependency_stages:[],selected_scope:[],deferred_scope:[],rationale:[],interrupts:null,
+    created_at:createdAt,updated_at:createdAt};
+  state.programs.push(waiting);
+  const candidate={id:`${REPOSITORY}#20`,repository:REPOSITORY,approved:true,version:null,
+    decomposed:true,priority:9,risk:"low",outcome:"next",
+    change_class:"backward_compatible_feature",dependencies:[]};
+  const github={...publicationObservation(),planning:{candidates:[candidate],
+    completed:[`${REPOSITORY}#10`],
+    repositories:[{repository:REPOSITORY,latest_published_version:VERSION}]}};
+  const query=releasePublicationQuery(state,"TOSS-OS-R0001",
+    state.programs[0].repository_releases[0].release_id);
+  const decision=publicationOperations({planningState:state,programId:"TOSS-OS-R0001",
+    releaseId:state.programs[0].repository_releases[0].release_id,
+    snapshot:{...github,source:publicationSource(query,github)},
+    receiptId:"RECEIPT-20260903-0004",clock:() => NOW});
+  const set=decision.operations.find(operation =>
+    operation.payload.kind==="release-program-manifest-set").payload;
+  assert.equal(set.entries.length,2);
+  const future=set.entries.find(entry => entry.program_id===waiting.program_id);
+  assert.equal(future.expected_program_revision,waiting.revision);
+  assert.equal(future.program.created_at,createdAt);
+  assert.equal(future.program.revision,"REV-0002");
+  assert.equal(future.program.phase,"DRAFT");
+});
+
 test("non-final publication requires exact source-program bytes in its single-manifest CAS",() => {
   const consoleRepository="TOSS-Soft/toss-console";
   const cli=readyRelease();
@@ -1254,6 +1295,27 @@ test("completeProgram closes every independently verified track and uses the pur
   assert(Object.isFrozen(result) && Object.isFrozen(result.program) && Object.isFrozen(result.nextProgram));
   assert.equal(canonicalJson(completeProgram(current,[firstReleased,consoleReleased],fresh,
     () => NOW).nextProgram),canonicalJson(result.nextProgram));
+  const waitingCreatedAt="2026-09-02T09:00:00.000Z";
+  const waiting={schema_version:"release-program.v1",program_id:"TOSS-OS-R0002",
+    phase:"WAITING_FOR_EPIC",revision:"REV-0001",repository_releases:[],
+    dependency_stages:[],selected_scope:[],deferred_scope:[],rationale:[],interrupts:null,
+    created_at:waitingCreatedAt,updated_at:waitingCreatedAt};
+  const reused=completeProgram(current,[firstReleased,consoleReleased],
+    {...fresh,activePrograms:[current,waiting]},() => NOW);
+  assert.equal(reused.nextProgram.program_id,waiting.program_id);
+  assert.equal(reused.nextProgram.created_at,waitingCreatedAt);
+  assert.equal(reused.nextProgram.revision,"REV-0002");
+  assert.equal(reused.nextProgram.phase,"DRAFT");
+  assert.deepEqual(reused.nextProgram.rationale.map(value => value.version),["2.3.0"]);
+  const unchangedWaiting=completeProgram(current,[firstReleased,consoleReleased],
+    {...fresh,candidates:[],activePrograms:[current,waiting]},() => NOW);
+  assert.equal(canonicalJson(unchangedWaiting.nextProgram),canonicalJson(waiting));
+  const unchanged=completeProgram(current,[firstReleased,consoleReleased],
+    {...fresh,activePrograms:[current,reused.nextProgram]},() => "2026-09-03T12:05:00.000Z");
+  assert.equal(canonicalJson(unchanged.nextProgram),canonicalJson(reused.nextProgram));
+  assert.throws(() => completeProgram(current,[firstReleased,consoleReleased],
+    {...fresh,activePrograms:[current,waiting,{...waiting,program_id:"TOSS-OS-R0003"}]},
+    () => NOW),CoreConflictError);
   assert.throws(() => completeProgram(current,[consoleReleased,firstReleased],fresh,() => NOW),
     CoreConflictError);
   assert.throws(() => completeProgram(current,[firstReleased,firstReleased],fresh,() => NOW),
@@ -1287,6 +1349,52 @@ test("completeProgram closes every independently verified track and uses the pur
       repositories:[{repository:REPOSITORY,latest_published_version:VERSION}],
       activePrograms:[singleCurrent]},() => NOW),
   error => error instanceof CoreConflictError || error instanceof CoreValidationError);
+});
+
+test("release planning never regresses or reuses a version below verified Released history",() => {
+  const state=releasedPlanningState();
+  const snapshot=(sourceState,latest) => {
+    const github={kind:"release-plan",control_revision:sourceState.revision,
+      project:{id:"PVT_TOSS_OS_2",revision:"project-plan-20"},
+      candidates:[{id:`${REPOSITORY}#20`,repository:REPOSITORY,approved:true,version:null,
+        decomposed:true,priority:9,risk:"low",outcome:"next",
+        change_class:"backward_compatible_feature",dependencies:[]}],
+      completed:[`${REPOSITORY}#10`],
+      repositories:[{repository:REPOSITORY,latest_published_version:latest}]};
+    return {...github,source:{repository:CONTROL_REPOSITORY,revision:sourceState.revision,
+      sha256:sha256Canonical({control:sourceState,github})}};
+  };
+  assert.throws(() => releasePlanOperations({planningState:state,
+    snapshot:snapshot(state,"2.1.0"),clock:() => NOW}),CoreConflictError);
+
+  const equal=releasePlanOperations({planningState:state,
+    snapshot:snapshot(state,VERSION),clock:() => NOW});
+  assert.equal(equal.program.program_id,"TOSS-OS-R0002");
+  assert.equal(equal.program.revision,"REV-0002");
+  assert.equal(equal.program.rationale[0].version,"2.3.0");
+
+  const advanced=releasePlanOperations({planningState:state,
+    snapshot:snapshot(state,"2.10.0"),clock:() => NOW});
+  assert.equal(advanced.program.rationale[0].version,"2.11.0");
+
+  const occupied=readyProgram();
+  occupied.program_id="TOSS-OS-R0003";
+  occupied.selected_scope[0].epic_id=`${REPOSITORY}#30`;
+  occupied.rationale[0].version="2.10.0";
+  occupied.rationale[0].reasons[0].scope_ids=[`${REPOSITORY}#30`];
+  const occupiedRelease=occupied.repository_releases[0];
+  occupiedRelease.program_id=occupied.program_id;
+  occupiedRelease.release_id="REL-TOSS-OS-R0003-toss-cli";
+  occupiedRelease.version="2.10.0";
+  occupiedRelease.milestone="v2.10.0";
+  occupiedRelease.branch="release/v2.10.0";
+  occupiedRelease.release_pr_intent.head="release/v2.10.0";
+  occupiedRelease.scope=[`${REPOSITORY}#30`];
+  occupied.dependency_stages[0].repository_release_ids=[occupiedRelease.release_id];
+  const duplicateState={...state,revision:"control-20",
+    programs:[...state.programs,occupied]};
+  assert.throws(() => releasePlanOperations({planningState:duplicateState,
+    snapshot:snapshot(duplicateState,VERSION),clock:() => NOW}),CoreConflictError);
 });
 
 test("Released publication evidence must cite the exact VERIFY_PUBLICATION receipt",() => {

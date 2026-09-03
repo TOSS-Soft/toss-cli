@@ -136,6 +136,15 @@ export function parseSemVer(value) {
   return Object.freeze({major,minor,patch});
 }
 
+export function compareSemVer(left,right) {
+  const leftValue=parseSemVer(left);
+  const rightValue=parseSemVer(right);
+  for (const key of ["major","minor","patch"]) {
+    if (leftValue[key]!==rightValue[key]) return leftValue[key]<rightValue[key] ? -1 : 1;
+  }
+  return 0;
+}
+
 function normalizeScope(scopeInput) {
   preflightScope(scopeInput);
   const scope=closedData(scopeInput,"Release scope");

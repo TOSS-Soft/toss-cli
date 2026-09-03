@@ -42,7 +42,7 @@
       "properties": {
         "name": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"},
         "version": {"$ref": "#/$defs/version"},
-        "integrity": {"type": "string", "pattern": "^sha512-[A-Za-z0-9+/]+={0,2}$"}
+        "integrity": {"type": "string", "pattern": "^sha512-[A-Za-z0-9+/]{85}[AQgw]==$"}
       }
     },
     "asset": {

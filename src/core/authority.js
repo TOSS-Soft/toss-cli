@@ -6,28 +6,44 @@ import {compareCanonicalText} from "./canonical-order.js";
 import {validateCoreDocument} from "./contracts.js";
 import {CoreBlockedError,CoreValidationError} from "./errors.js";
 
+const MAX_CLOSED_DATA_DEPTH=64;
+
 function validation(message) { throw new CoreValidationError(message); }
 function blocked(message) { throw new CoreBlockedError(message); }
 
-function clone(value,path="$",ancestors=new Set()) {
+function clone(value,path="$",ancestors=new Set(),depth=0) {
+  if (depth>MAX_CLOSED_DATA_DEPTH) {
+    validation(`Authority ${path} exceeds the maximum closed-data depth`);
+  }
   if (value===null || ["string","number","boolean"].includes(typeof value)) return value;
   if (typeof value!=="object" || types.isProxy(value) || ancestors.has(value)) validation(`Authority ${path} must be a closed non-proxy JSON value`);
   ancestors.add(value);
   try {
     if (Array.isArray(value)) {
-      if (Object.getPrototypeOf(value)!==Array.prototype || Object.getOwnPropertySymbols(value).length!==0 || Object.getOwnPropertyNames(value).length!==value.length+1) validation(`Authority ${path} must be a dense array`);
-      return Object.freeze(value.map((_,index) => {
-        const descriptor=Object.getOwnPropertyDescriptor(value,String(index));
+      const descriptors=Object.getOwnPropertyDescriptors(value);
+      const keys=Reflect.ownKeys(descriptors);
+      const lengthDescriptor=descriptors.length;
+      const length=lengthDescriptor?.value;
+      if (Object.getPrototypeOf(value)!==Array.prototype ||
+          keys.some(key => typeof key!=="string") || !lengthDescriptor ||
+          !("value" in lengthDescriptor) || lengthDescriptor.enumerable ||
+          lengthDescriptor.configurable || typeof lengthDescriptor.writable!=="boolean" ||
+          !Number.isSafeInteger(length) || length<0 || length>0xffffffff ||
+          keys.length!==length+1) validation(`Authority ${path} must be a dense array`);
+      const output=[];
+      for (let index=0;index<length;index+=1) {
+        const descriptor=descriptors[String(index)];
         if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) validation(`Authority ${path} has an accessor`);
-        return clone(descriptor.value,`${path}[${index}]`,ancestors);
-      }));
+        output.push(clone(descriptor.value,`${path}[${index}]`,ancestors,depth+1));
+      }
+      return Object.freeze(output);
     }
     if (![Object.prototype,null].includes(Object.getPrototypeOf(value)) || Object.getOwnPropertySymbols(value).length!==0) validation(`Authority ${path} must be a plain object`);
     const output=Object.create(null);
     for (const key of Object.getOwnPropertyNames(value)) {
       const descriptor=Object.getOwnPropertyDescriptor(value,key);
       if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) validation(`Authority ${path}.${key} has an accessor or hidden field`);
-      output[key]=clone(descriptor.value,`${path}.${key}`,ancestors);
+      output[key]=clone(descriptor.value,`${path}.${key}`,ancestors,depth+1);
     }
     return Object.freeze(output);
   } finally { ancestors.delete(value); }

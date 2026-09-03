@@ -8,8 +8,7 @@ import {CoreConflictError,CoreValidationError} from "../errors.js";
 import {validatePersistedOperationIntent} from "../operations/intent-contract.js";
 import {assertReleaseReceiptCoverage,previousReleaseRevision,
   releaseApprovalLedgerEvidence} from "./approval-ledger.js";
-import {planReleaseProgram} from "./planner.js";
-import {nextReleaseProgramId} from "./program-id.js";
+import {planCurrentReleaseProgram} from "./current-program.js";
 import {parseSemVer} from "./semver.js";
 import {assertRepositoryConcurrency,transitionRepositoryRelease} from "./state.js";
 
@@ -347,35 +346,17 @@ export function releasePlanOperations(input) {
   if (typeof clock!=="function" || types.isProxy(clock)) invalid("Release planning clock must be a non-proxy function");
   const state=normalizeReleasePlanningState(planningState);
   const observed=normalizedPlanSnapshot(snapshot,state);
-  const currentRecords=state.programs.filter(program => ["DRAFT","WAITING_FOR_EPIC"].includes(program.phase));
-  if (currentRecords.length>1) {
-    throw new CoreConflictError("Release planning has more than one current Draft or Waiting program");
-  }
-  const current=currentRecords[0] ?? null;
-  const proposed=planReleaseProgram({
-    programId:current?.program_id ?? nextReleaseProgramId(state.programs),
+  const selection=planCurrentReleaseProgram({
+    programs:state.programs,
     candidates:observed.candidates,
     completed:observed.completed,
     repositories:observed.repositories,
-    activePrograms:state.programs.filter(program => program.program_id!==current?.program_id),
     clock,
   });
-  const comparable=program => {
-    const {revision:_revision,created_at:_createdAt,updated_at:_updatedAt,...content}=program;
-    return content;
-  };
-  if (current!==null && canonicalJson(comparable(current))===canonicalJson(comparable(proposed))) {
+  const {current,program}=selection;
+  if (!selection.changed) {
     return Object.freeze({source:observed.source,program:current,operations:Object.freeze([])});
   }
-  const program=current===null ? proposed : clone({
-    ...proposed,
-    revision:incrementRevision(current.revision,"Release program revision"),
-    created_at:current.created_at,
-  },"Replanned release program");
-  const programsForConcurrency=current===null
-    ? [...state.programs,program]
-    : [...state.programs.filter(value => value.program_id!==current.program_id),program];
-  assertRepositoryConcurrency(programsForConcurrency);
   const precondition=Object.freeze({
     resource:"project",
     action:"verify",

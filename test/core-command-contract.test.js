@@ -276,42 +276,41 @@ test("core CLI renders usage and internal failures to the correct stream for hum
   }
 });
 
-test("core CLI reserves exact confirmation for implemented interactive applies",async () => {
-  const missing=cliOptions();
-  assert.equal(await runCoreCli(["feature","add","Core lifecycle","--apply","--json"],missing.options),69);
-  assert.equal(JSON.parse(missing.stdout.read()).error.code,"COMMAND_NOT_IMPLEMENTED");
-
-  const rejected=cliOptions(async () => ({prompt:async () => false}));
-  assert.equal(
-    await runCoreCli(["feature","add","Core lifecycle","--apply","--json"],rejected.options),
-    69,
-  );
-  assert.equal(JSON.parse(rejected.stdout.read()).error.code,"COMMAND_NOT_IMPLEMENTED");
-
+test("core CLI injects confirmation only for generic interactive mutations",async () => {
+  let handlerCalls=0;
   let confirmations=0;
-  const accepted=cliOptions(async ({command}) => ({
-    prompt:async request => {
-      confirmations+=1;
-      assert.equal(request.kind,"confirm-apply");
-      assert.equal(request.command,command);
-      return true;
+  const provider=async ({command}) => ({services:{},handlers:{
+    "feature.add":async (_command,services) => {
+      handlerCalls+=1;
+      const hasConfirmation=Object.hasOwn(services,"confirm");
+      assert.equal(hasConfirmation,command.options.apply && command.interactive);
+      if (hasConfirmation) assert.equal(await services.confirm({command:command.name}),true);
+      return {status:"handled"};
     },
-  }));
-  assert.equal(
-    await runCoreCli(["feature","add","Core lifecycle","--apply","--json"],accepted.options),
-    69,
-  );
-  assert.equal(confirmations,0);
-  assert.equal(JSON.parse(accepted.stdout.read()).error.code,"COMMAND_NOT_IMPLEMENTED");
+  },prompt:async request => {
+    confirmations+=1;
+    assert.equal(request.kind,"confirm-apply");
+    return true;
+  }});
 
-  const automated=cliOptions();
+  const missing=cliOptions();
   assert.equal(
-    await runCoreCli([
-      "feature","add","Core lifecycle","--apply","--non-interactive","--json",
-    ],automated.options),
-    69,
+    await runCoreCli(["feature","add","Core lifecycle","--apply","--json"],missing.options),
+    4,
   );
-  assert.equal(JSON.parse(automated.stdout.read()).error.code,"COMMAND_NOT_IMPLEMENTED");
+  assert.equal(JSON.parse(missing.stdout.read()).error.code,"CONFIRMATION_REQUIRED");
+
+  for (const argv of [
+    ["feature","add","Core lifecycle","--json"],
+    ["feature","add","Core lifecycle","--dry-run","--json"],
+    ["feature","add","Core lifecycle","--apply","--non-interactive","--json"],
+    ["feature","add","Core lifecycle","--apply","--json"],
+  ]) {
+    const run=cliOptions(provider);
+    assert.equal(await runCoreCli(argv,run.options),0,run.stderr.read() || run.stdout.read());
+  }
+  assert.equal(handlerCalls,4);
+  assert.equal(confirmations,1);
 });
 
 test("confirmation bridge rejects exotic service objects without invoking service getters",async () => {

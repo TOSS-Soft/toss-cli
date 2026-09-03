@@ -6,8 +6,7 @@ import {closedData,exact} from "../commands/common.js";
 import {validateCoreDocument} from "../contracts.js";
 import {CoreConflictError,CoreValidationError} from "../errors.js";
 import {releaseApprovalLedgerEvidence} from "./approval-ledger.js";
-import {planReleaseProgram} from "./planner.js";
-import {nextReleaseProgramId} from "./program-id.js";
+import {planCurrentReleaseProgram} from "./current-program.js";
 import {assertRepositoryConcurrency,transitionRepositoryRelease} from "./state.js";
 
 const EVIDENCE_KEYS=Object.freeze([
@@ -31,7 +30,7 @@ const PUBLICATION_OBSERVATION_KEYS=Object.freeze([
 const COMMIT=/^[a-f0-9]{40}$/u;
 const RECEIPT=/^RECEIPT-[0-9]{8}-[0-9]{4,}$/u;
 const EVIDENCE_ID=/^PUB-[0-9]{8}-[0-9]{4,}$/u;
-const INTEGRITY=/^sha512-[A-Za-z0-9+/]+={0,2}$/u;
+const SHA512_INTEGRITY=/^sha512-([A-Za-z0-9+/]{85}[AQgw]==)$/u;
 const RFC3339_DATE_TIME=/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?(?:Z|[+-](\d{2}):(\d{2}))$/u;
 
 function failure(code,message) {
@@ -71,6 +70,13 @@ function evidenceHash(value) {
   const {evidence_sha256,...unsigned}=value;
   void evidence_sha256;
   return sha256Canonical(unsigned);
+}
+
+function validSha512Integrity(value) {
+  const match=typeof value==="string" ? SHA512_INTEGRITY.exec(value) : null;
+  if (!match) return false;
+  const decoded=Buffer.from(match[1],"base64");
+  return decoded.length===64 && decoded.toString("base64")===match[1];
 }
 
 function validTimestamp(value) {
@@ -167,8 +173,7 @@ export function verifyPublication(releaseInput,evidenceInput) {
         "PACKAGE_VERSION_MISMATCH","Published package version differs from the release.",
       ));
     }
-    if (typeof packageEvidence.integrity!=="string" ||
-        !INTEGRITY.test(packageEvidence.integrity)) {
+    if (!validSha512Integrity(packageEvidence.integrity)) {
       failures.push(failure(
         "PACKAGE_INTEGRITY_INVALID","Published package integrity is missing or invalid.",
       ));
@@ -371,9 +376,12 @@ export function projectPublicationTransaction(queryInput,descriptorInput) {
     expected_revision:descriptor.repository_revision,payload:{kind:"release-publication-precondition",
       query,descriptor,snapshot_sha256:sha256Canonical(observation)}}];
   if (last) {
-    const resulting=query.programs.map(value =>
-      value.program_id===query.program.program_id ? program : value);
-    resulting.push(nextProgram);
+    const resulting=query.programs.map(value => value.program_id===query.program.program_id
+      ? program
+      : value.program_id===nextProgram.program_id ? nextProgram : value);
+    if (!query.programs.some(value => value.program_id===nextProgram.program_id)) {
+      resulting.push(nextProgram);
+    }
     resulting.sort((left,right) => compareCanonicalText(left.program_id,right.program_id));
     operations.push({resource:"repository",action:"commit",repository:query.control_repository,
       expected_revision:sha256Canonical(query.programs),payload:{kind:"release-program-manifest-set",
@@ -462,9 +470,8 @@ export function completeProgram(programInput,releasesInput,candidatesInput,clock
   const activePrograms=bundle.activePrograms.map(value =>
     value.program_id===program.program_id ? completed : value);
   assertRepositoryConcurrency(activePrograms);
-  const nextProgram=planReleaseProgram({
-    programId:nextReleaseProgramId(activePrograms),candidates:bundle.candidates,
-    completed:bundle.completed,repositories:bundle.repositories,activePrograms,clock,
-  });
+  const nextProgram=planCurrentReleaseProgram({programs:activePrograms,
+    candidates:bundle.candidates,completed:bundle.completed,
+    repositories:bundle.repositories,clock}).program;
   return deepFreeze({program:completed,nextProgram});
 }

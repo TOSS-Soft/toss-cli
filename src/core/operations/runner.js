@@ -9,6 +9,8 @@ import {CoreBlockedError,CoreConflictError,CoreInternalError,CoreRemoteError,Cor
 import {validateOperationIntent} from "./intent-contract.js";
 import {createOperationIntent,operationPreview} from "./plan.js";
 
+const MAX_CLOSED_DATA_DEPTH=64;
+
 function ownFunction(value,key,label) {
   if (!value || typeof value!=="object" || types.isProxy(value)) throw new CoreValidationError(`${label} must be a non-proxy object`);
   const descriptor=Object.getOwnPropertyDescriptor(value,key);
@@ -24,25 +26,39 @@ function optionalOwnFunction(value,key,label) {
   return descriptor.value;
 }
 
-function clone(value,path="$",ancestors=new Set()) {
+function clone(value,path="$",ancestors=new Set(),depth=0) {
+  if (depth>MAX_CLOSED_DATA_DEPTH) {
+    throw new CoreValidationError(`Remote ${path} exceeds the maximum closed-data depth`);
+  }
   if (value===null || ["string","number","boolean"].includes(typeof value)) return value;
   if (typeof value!=="object" || types.isProxy(value) || ancestors.has(value)) throw new CoreValidationError(`Remote ${path} must be a closed non-proxy JSON value`);
   ancestors.add(value);
   try {
     if (Array.isArray(value)) {
-      if (Object.getPrototypeOf(value)!==Array.prototype || Object.getOwnPropertySymbols(value).length!==0 || Object.getOwnPropertyNames(value).length!==value.length+1) throw new CoreValidationError(`Remote ${path} must be a dense array`);
-      return Object.freeze(value.map((_,index) => {
-        const descriptor=Object.getOwnPropertyDescriptor(value,String(index));
+      const descriptors=Object.getOwnPropertyDescriptors(value);
+      const keys=Reflect.ownKeys(descriptors);
+      const lengthDescriptor=descriptors.length;
+      const length=lengthDescriptor?.value;
+      if (Object.getPrototypeOf(value)!==Array.prototype ||
+          keys.some(key => typeof key!=="string") || !lengthDescriptor ||
+          !("value" in lengthDescriptor) || lengthDescriptor.enumerable ||
+          lengthDescriptor.configurable || typeof lengthDescriptor.writable!=="boolean" ||
+          !Number.isSafeInteger(length) || length<0 || length>0xffffffff ||
+          keys.length!==length+1) throw new CoreValidationError(`Remote ${path} must be a dense array`);
+      const output=[];
+      for (let index=0;index<length;index+=1) {
+        const descriptor=descriptors[String(index)];
         if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) throw new CoreValidationError(`Remote ${path} contains an accessor`);
-        return clone(descriptor.value,`${path}[${index}]`,ancestors);
-      }));
+        output.push(clone(descriptor.value,`${path}[${index}]`,ancestors,depth+1));
+      }
+      return Object.freeze(output);
     }
     if (![Object.prototype,null].includes(Object.getPrototypeOf(value)) || Object.getOwnPropertySymbols(value).length!==0) throw new CoreValidationError(`Remote ${path} must be a plain object`);
     const out=Object.create(null);
     for (const key of Object.getOwnPropertyNames(value)) {
       const descriptor=Object.getOwnPropertyDescriptor(value,key);
       if (!descriptor || !("value" in descriptor) || !descriptor.enumerable) throw new CoreValidationError(`Remote ${path}.${key} contains an accessor or hidden field`);
-      out[key]=clone(descriptor.value,`${path}.${key}`,ancestors);
+      out[key]=clone(descriptor.value,`${path}.${key}`,ancestors,depth+1);
     }
     return Object.freeze(out);
   } finally { ancestors.delete(value); }
@@ -201,8 +217,9 @@ function remoteResult(value,operations) {
 function exactReceipt(value,intent) {
   if (value===null) return null;
   if (Array.isArray(value)) throw new CoreConflictError("Operation receipt lookup is ambiguous");
+  const closed=clone(value,"stored receipt");
   let receipt;
-  try { receipt=validateCoreDocument(clone(value,"stored receipt"),"operation-receipt.v1"); } catch (error) {
+  try { receipt=validateCoreDocument(closed,"operation-receipt.v1"); } catch (error) {
     throw new CoreConflictError("Operation receipt ledger is corrupt",{cause:error});
   }
   if (receipt.intent_id!==intent.intent_id || receipt.intent_sha256!==sha256Canonical(intent)) throw new CoreConflictError("Operation receipt conflicts with the intent ledger");
@@ -331,8 +348,9 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
       throw error;
     }
     if (prior!==null) {
+      const closedPrior=clone(prior,"stored intent");
       let storedIntent;
-      try { storedIntent=validateOperationIntent(clone(prior,"stored intent")); } catch (error) {
+      try { storedIntent=validateOperationIntent(closedPrior); } catch (error) {
         throw new CoreConflictError("Operation intent ledger is corrupt",{cause:error});
       }
       if (sha256Canonical(storedIntent)!==sha256Canonical(valid)) throw new CoreConflictError("Intent identity conflicts with the ledger");
@@ -465,8 +483,9 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
       throw error;
     }
     if (prior!==null) {
+      const closedPrior=clone(prior,"stored legacy intent");
       let storedIntent;
-      try { storedIntent=validateOperationIntent(clone(prior,"stored legacy intent")); } catch (error) {
+      try { storedIntent=validateOperationIntent(closedPrior); } catch (error) {
         throw new CoreConflictError("Legacy operation intent ledger is corrupt",{cause:error});
       }
       if (storedIntent.planned_receipt_id!==undefined) {
