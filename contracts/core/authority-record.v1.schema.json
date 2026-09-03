@@ -30,13 +30,27 @@
   },
   "$defs": {
     "expected_revision": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["repository", "revision"],
-      "properties": {
-        "repository": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
-        "revision": {"type": ["string", "null"], "minLength": 1}
-      }
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["repository", "revision"],
+          "properties": {
+            "repository": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
+            "revision": {"type": ["string", "null"], "minLength": 1}
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["target", "repository", "revision"],
+          "properties": {
+            "target": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"},
+            "repository": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
+            "revision": {"type": ["string", "null"], "minLength": 1}
+          }
+        }
+      ]
     },
     "signature": {
       "type": "object",

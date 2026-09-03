@@ -86,6 +86,7 @@ test("core foundation schemas accept one closed valid document each",() => {
     active_release:null,
     project_item_id:"PVTITEM_123",
     project_fields:{status:"PVTSSF_STATUS",gate:"PVTSSF_GATE"},
+    publication:{package_name:"@toss-software/console",workflow:"publish.yml",required_assets:[]},
     registered_at:"2026-09-01T08:00:00.000Z",
   };
 
@@ -114,6 +115,27 @@ test("organization configuration rejects unknown fields and duplicate repositori
     ...organization,
     repositories:["TOSS-Soft/toss-console","TOSS-Soft/toss-console"],
   },"organization-config.v1").valid,false);
+});
+
+test("repository publication policy requires canonical identities and raw-ordered unique assets",async () => {
+  const {CoreValidationError,validateCoreDocument}=await import("../src/core/contracts.js");
+  const repository={schema_version:"repository-config.v1",repository:"TOSS-Soft/toss-cli",
+    repository_node_id:"R_cli",default_branch:"main",active_release:null,
+    project_item_id:"PVTI_cli",project_fields:{status:"Status",gate:"Gate"},
+    publication:{package_name:"@toss-software/cli",workflow:"publish.yml",
+      required_assets:["checksums.txt","toss-cli.tgz"]},
+    registered_at:"2026-09-01T08:00:00.000Z"};
+  assert.doesNotThrow(() => validateCoreDocument(repository,"repository-config.v1"));
+  for (const publication of [
+    {...repository.publication,package_name:" @toss-software/cli"},
+    {...repository.publication,workflow:"publish.yml "},
+    {...repository.publication,required_assets:[" checksums.txt","toss-cli.tgz"]},
+    {...repository.publication,required_assets:[...repository.publication.required_assets].reverse()},
+    {...repository.publication,required_assets:["checksums.txt","checksums.txt"]},
+  ]) {
+    assert.throws(() => validateCoreDocument({...repository,publication},"repository-config.v1"),
+      CoreValidationError);
+  }
 });
 
 test("authority records reject malformed expiry timestamps",() => {

@@ -2,6 +2,10 @@ import {types} from "node:util";
 
 import {canonicalJson,sha256Canonical} from "../../contracts/acp.js";
 import {validateCoreDocument} from "../contracts.js";
+import {
+  validateOperationIntent,
+  validatePersistedOperationIntent,
+} from "../operations/intent-contract.js";
 import {createOperationIntent} from "../operations/plan.js";
 import {assertRepositoryConcurrency} from "../release/state.js";
 import {
@@ -435,7 +439,10 @@ export function createCoreControlStore({repository}) {
         throw ledgerRead ? ledgerConflict(`listed ${label} is absent: ${path}`) : new Error(`listed ${label} is absent: ${path}`);
       }
       let valid;
-      try { valid=validateCoreDocument(document,schemaId); } catch (error) {
+      try {
+        valid=schemaId==="operation-intent.v1"
+          ? validatePersistedOperationIntent(document) : validateCoreDocument(document,schemaId);
+      } catch (error) {
         if (ledgerRead) throw ledgerConflict(`persisted ${label} is corrupt: ${path}`,{cause:error});
         throw error;
       }
@@ -502,7 +509,7 @@ export function createCoreControlStore({repository}) {
 
   async function loadReleaseProgramsAt(validated) {
     if (validated.classification==="absent") return Object.freeze([]);
-    const paths=documentsUnder(validated.currentPaths,CONTROL_PATHS.programs).sort(rawCompare);
+    const paths=[...documentsUnder(validated.currentPaths,CONTROL_PATHS.programs)].sort(rawCompare);
     const programs=[];
     const identities=new Set();
     try {
@@ -544,7 +551,7 @@ export function createCoreControlStore({repository}) {
   }
 
   function findReceiptInLedger(intent,validated) {
-    const valid=validateCoreDocument(intent,"operation-intent.v1");
+    const valid=validateOperationIntent(intent);
     const matches=validated.receiptRecords.filter(record =>
       record.document.intent_id===valid.intent_id);
     const persisted=validated.intentRecords.filter(record =>
@@ -615,7 +622,8 @@ export function createCoreControlStore({repository}) {
   async function commitGlobalImmutable({
     expectedHead,document,schemaId,label,prefix,idField,pathFor,beforeWrite,
   }) {
-    const valid=validateCoreDocument(document,schemaId);
+    const valid=schemaId==="operation-intent.v1"
+      ? validateOperationIntent(document) : validateCoreDocument(document,schemaId);
     const path=pathFor(valid);
     const current=await head();
     if (current!==expectedHead) {
@@ -636,7 +644,7 @@ export function createCoreControlStore({repository}) {
   }
 
   async function commitIntent({expectedHead,intent}) {
-    const valid=validateCoreDocument(intent,"operation-intent.v1");
+    const valid=validateOperationIntent(intent);
     return commitGlobalImmutable({
       expectedHead,
       document:valid,
@@ -701,7 +709,7 @@ export function createCoreControlStore({repository}) {
   }
 
   async function findIntent(intent) {
-    const valid=validateCoreDocument(intent,"operation-intent.v1");
+    const valid=validateOperationIntent(intent);
     const validated=await loadValidatedLedgerAt(await head());
     const existing=validated.intentRecords.find(record => record.document.intent_id===valid.intent_id);
     if (!existing) return null;
@@ -757,10 +765,18 @@ export function createCoreControlStore({repository}) {
       throw new TypeError("release program operation must use the exact persisted operation shape");
     }
     const payload=operation.payload;
+    const payloadKeys=payload && typeof payload==="object" && !Array.isArray(payload) && !types.isProxy(payload)
+      ? Object.keys(payload).sort() : [];
+    const legacyKeys=["expected_program_revision","kind","program"].sort();
+    const authorityKeys=["authority_binding",...legacyKeys].sort();
+    const byteCasKeys=["expected_program_sha256",...legacyKeys].sort();
+    const authorityByteCasKeys=["authority_binding",...byteCasKeys].sort();
     if (!payload || typeof payload!=="object" || Array.isArray(payload) || types.isProxy(payload) ||
-        canonicalJson(Object.keys(payload).sort())!==canonicalJson([
-          "expected_program_revision","kind","program",
-        ]) || payload.kind!=="release-program-manifest") {
+        ![legacyKeys,authorityKeys,byteCasKeys,authorityByteCasKeys].some(keys =>
+          canonicalJson(payloadKeys)===canonicalJson(keys)) ||
+        payload.kind!=="release-program-manifest" ||
+        (Object.hasOwn(payload,"expected_program_sha256") &&
+         !/^[a-f0-9]{64}$/u.test(payload.expected_program_sha256))) {
       throw new TypeError("release program operation payload must use the exact closed shape");
     }
     const program=validateCoreDocument(payload.program,"release-program.v1");
@@ -774,6 +790,10 @@ export function createCoreControlStore({repository}) {
     const current=programs.find(value => value.program_id===program.program_id) ?? null;
     if ((current?.revision ?? null)!==payload.expected_program_revision) {
       throw ledgerConflict(`release program expected revision conflict: ${program.program_id}`);
+    }
+    if (Object.hasOwn(payload,"expected_program_sha256") &&
+        (current===null || sha256Canonical(current)!==payload.expected_program_sha256)) {
+      throw ledgerConflict(`release program expected byte digest conflict: ${program.program_id}`);
     }
     if (current===null) {
       if (program.revision!=="REV-0001") throw new TypeError("new release program must begin at REV-0001");
@@ -799,6 +819,90 @@ export function createCoreControlStore({repository}) {
       operation_id:operation.operation_id,
       repository:operation.repository,
       revision:mutation.current?.revision ?? null,
+    });
+  }
+
+  async function releaseProgramSetMutation(operation,validated) {
+    if (!operation || typeof operation!=="object" || Array.isArray(operation) || types.isProxy(operation) ||
+        canonicalJson(Object.keys(operation).sort())!==canonicalJson([
+          "action","expected_revision","operation_id","payload","repository","resource",
+        ])) {
+      throw new TypeError("release program set operation must use the exact persisted operation shape");
+    }
+    const payload=operation.payload;
+    if (!payload || typeof payload!=="object" || Array.isArray(payload) || types.isProxy(payload) ||
+        canonicalJson(Object.keys(payload).sort())!==canonicalJson([
+          "entries","expected_set_sha256","kind","resulting_set_sha256",
+        ]) || payload.kind!=="release-program-manifest-set" ||
+        !/^[a-f0-9]{64}$/u.test(payload.expected_set_sha256) ||
+        !/^[a-f0-9]{64}$/u.test(payload.resulting_set_sha256) ||
+        !Array.isArray(payload.entries) || payload.entries.length===0) {
+      throw new TypeError("release program set operation payload must use the exact closed shape");
+    }
+    if (operation.resource!=="repository" || operation.action!=="commit" ||
+        operation.repository!==validated.currentBaseline.organization.control_repository ||
+        operation.expected_revision!==payload.expected_set_sha256) {
+      throw new TypeError("release program set operation does not bind the control repository and set digest");
+    }
+    const current=await loadReleaseProgramsAt(validated);
+    if (sha256Canonical(current)!==payload.expected_set_sha256) {
+      throw ledgerConflict("release program expected set digest conflict");
+    }
+    const currentById=new Map(current.map(program => [program.program_id,program]));
+    const programs=[];
+    let added=0;
+    let previous=null;
+    for (const entry of payload.entries) {
+      if (!entry || typeof entry!=="object" || Array.isArray(entry) || types.isProxy(entry) ||
+          canonicalJson(Object.keys(entry).sort())!==canonicalJson([
+            "expected_program_revision","program","program_id",
+          ])) {
+        throw new TypeError("release program set entry must use the exact closed shape");
+      }
+      const program=validateCoreDocument(entry.program,"release-program.v1");
+      if (entry.program_id!==program.program_id ||
+          (previous!==null && rawCompare(previous,entry.program_id)>=0)) {
+        throw new TypeError("release program set entries must be unique and canonically ordered");
+      }
+      previous=entry.program_id;
+      const existing=currentById.get(entry.program_id) ?? null;
+      if ((existing?.revision ?? null)!==entry.expected_program_revision) {
+        throw ledgerConflict(`release program set expected revision conflict: ${entry.program_id}`);
+      }
+      if (existing===null) {
+        added+=1;
+        if (program.revision!=="REV-0001") throw new TypeError("new release program must begin at REV-0001");
+      } else if (program.revision===existing.revision) {
+        if (!equivalent(program,existing)) {
+          throw ledgerConflict(`release program set same-revision content conflict: ${entry.program_id}`);
+        }
+      } else if (program.revision!==nextReleaseRevision(existing.revision) ||
+          program.created_at!==existing.created_at) {
+        throw new TypeError("release program set update must advance once and retain its creation time");
+      }
+      programs.push(program);
+    }
+    if (current.some(program => !programs.some(candidate =>
+      candidate.program_id===program.program_id))) {
+      throw ledgerConflict("release program set cannot omit an existing manifest");
+    }
+    if (added!==1 || programs.length!==current.length+1) {
+      throw ledgerConflict("release program set must add exactly one next manifest without extra programs");
+    }
+    if (sha256Canonical(programs)!==payload.resulting_set_sha256) {
+      throw new TypeError("release program resulting set digest is inconsistent");
+    }
+    assertRepositoryConcurrency(programs);
+    return Object.freeze({current,programs:frozenCanonicalCopy(programs)});
+  }
+
+  async function inspectReleaseProgramSetOperation(operation) {
+    const validated=await loadValidatedLedgerAt(await head());
+    if (validated.classification==="absent") throw ledgerConflict("release program set mutation requires a bootstrapped control repository");
+    await releaseProgramSetMutation(operation,validated);
+    return frozenCanonicalCopy({
+      operation_id:operation.operation_id,repository:operation.repository,
+      revision:operation.payload.expected_set_sha256,
     });
   }
 
@@ -836,6 +940,35 @@ export function createCoreControlStore({repository}) {
     });
   }
 
+  async function commitReleaseProgramSetReceipt({expectedHead,operation,receipt}) {
+    const current=await head();
+    if (current!==expectedHead) {
+      throw ledgerConflict(`control repository expected head conflict: expected ${String(expectedHead)}, found ${String(current)}`);
+    }
+    const validated=await loadValidatedLedgerAt(current);
+    if (validated.classification==="absent") throw ledgerConflict("release program set mutation requires a bootstrapped control repository");
+    const mutation=await releaseProgramSetMutation(operation,validated);
+    const validReceipt=validateCoreDocument(receipt,"operation-receipt.v1");
+    if (validReceipt.status!=="completed") throw new TypeError("release program set finalization requires a completed receipt");
+    if (validated.receiptRecords.some(record => record.document.receipt_id===validReceipt.receipt_id)) {
+      throw ledgerConflict(`receipt identity is immutable and already exists: ${validReceipt.receipt_id}`);
+    }
+    await assertReceiptBinding(validReceipt,current);
+    const persistedIntents=validated.intentRecords.filter(record => record.document.intent_id===validReceipt.intent_id);
+    const persistedOperation=persistedIntents[0]?.document.operations.find(value => value.operation_id===operation.operation_id);
+    if (persistedIntents.length!==1 || !persistedOperation || !equivalent(persistedOperation,operation)) {
+      throw ledgerConflict("release program set operation does not equal its persisted intent operation");
+    }
+    const observations=validReceipt.observed_revisions.filter(value => value.operation_id===operation.operation_id);
+    if (observations.length!==1 || observations[0].repository!==operation.repository ||
+        observations[0].revision!==operation.payload.resulting_set_sha256) {
+      throw new TypeError("release program set receipt must observe the exact resulting set digest");
+    }
+    const files={[receiptPath(validReceipt)]:validReceipt};
+    for (const program of mutation.programs) files[programPath(program.program_id)]=program;
+    return commitFiles({expectedHead:current,message:"core: record release program set",files});
+  }
+
   async function commitBootstrap({expectedHead,files}) {
     if (expectedHead!==null) throw new TypeError("bootstrap is permitted only for an unborn control repository");
     const current=await head();
@@ -850,7 +983,7 @@ export function createCoreControlStore({repository}) {
     const organization=validateCoreDocument(organizationEntry[1],"organization-config.v1");
     if (organization.repositories.length!==0) throw new TypeError("bootstrap organization must not register repositories");
     canonicalJson(lifecycleEntry[1]); canonicalJson(releaseEntry[1]);
-    const intent=validateCoreDocument(intentEntries[0][1],"operation-intent.v1");
+    const intent=validateOperationIntent(intentEntries[0][1]);
     const receipt=validateCoreDocument(receiptEntries[0][1],"operation-receipt.v1");
     if (intentPath(intent)!==intentEntries[0][0] || receiptPath(receipt)!==receiptEntries[0][0]) throw new TypeError("bootstrap intent and receipt must use canonical bootstrap identities");
     try { bootstrapProof({organization,lifecycle:lifecycleEntry[1],release:releaseEntry[1],intent,receipt}); } catch (error) { throw new TypeError("bootstrap proof is not exact",{cause:error}); }
@@ -900,6 +1033,8 @@ export function createCoreControlStore({repository}) {
     commitReceipt,
     inspectReleaseProgramOperation,
     commitReleaseProgramReceipt,
+    inspectReleaseProgramSetOperation,
+    commitReleaseProgramSetReceipt,
     commitBootstrap,
     commitConfiguration,
     head,

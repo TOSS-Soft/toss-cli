@@ -593,6 +593,7 @@ export function planReleaseProgram(input) {
       branch:null,
       release_pr_intent:null,
       scope:scope.map(candidate => candidate.id),
+      approval:null,
       publication_evidence:null,
       transitions:[],
     });

@@ -5,9 +5,16 @@ import {compareCanonicalText} from "../canonical-order.js";
 import {validateCoreDocument} from "../contracts.js";
 import {deriveWorkItemState} from "../domain/state.js";
 import {CoreConflictError,CoreValidationError} from "../errors.js";
+import {validatePersistedOperationIntent} from "../operations/intent-contract.js";
+import {assertReleaseReceiptCoverage,previousReleaseRevision,
+  releaseApprovalLedgerEvidence} from "./approval-ledger.js";
 import {planReleaseProgram} from "./planner.js";
+import {nextReleaseProgramId} from "./program-id.js";
 import {parseSemVer} from "./semver.js";
 import {assertRepositoryConcurrency,transitionRepositoryRelease} from "./state.js";
+
+export {nextReleaseProgramId} from "./program-id.js";
+export {releaseApprovalLedgerEvidence} from "./approval-ledger.js";
 
 const PLANNING_STATE_KEYS=Object.freeze([
   "revision","organization","repositories","programs","intents","receipts",
@@ -109,23 +116,6 @@ function optionRecord(input,keys,label) {
   return result;
 }
 
-function nextProgramId(programs) {
-  let greatest=0n;
-  let width=4;
-  for (const program of programs) {
-    const match=/^TOSS-OS-R([0-9]{4,})$/u.exec(program?.program_id);
-    if (!match) invalid("Persisted release program identity is not canonical");
-    let value;
-    try { value=BigInt(match[1]); } catch (error) {
-      invalid("Persisted release program identity cannot be incremented",{cause:error});
-    }
-    if (value>greatest) greatest=value;
-    width=Math.max(width,match[1].length);
-  }
-  const next=String(greatest+1n);
-  return `TOSS-OS-R${next.padStart(Math.max(width,next.length),"0")}`;
-}
-
 function compareProgramIds(left,right) {
   const leftMatch=/^TOSS-OS-R([0-9]{4,})$/u.exec(left);
   const rightMatch=/^TOSS-OS-R([0-9]{4,})$/u.exec(right);
@@ -138,33 +128,99 @@ function compareProgramIds(left,right) {
 function releaseIntentAffects(intent,{programId,repository}) {
   if (programId===null && repository===null) return true;
   const programMatch=programId!==null && intent.operations.some(operation =>
-    operation.payload?.program_id===programId || operation.payload?.program?.program_id===programId);
+    operation.payload?.program_id===programId || operation.payload?.program?.program_id===programId ||
+    operation.payload?.entries?.some(entry => entry?.program_id===programId));
   const repositoryMatch=repository!==null && intent.operations.some(operation =>
-    (operation.payload?.kind!=="release-program-manifest" && operation.repository===repository) ||
+    (!["release-program-manifest","release-program-manifest-set"].includes(operation.payload?.kind) &&
+      operation.repository===repository) ||
     (Array.isArray(operation.payload?.program?.repository_releases) &&
-      operation.payload.program.repository_releases.some(release => release?.repository===repository)));
+      operation.payload.program.repository_releases.some(release => release?.repository===repository)) ||
+    operation.payload?.entries?.some(entry => entry?.program?.repository_releases?.some(release =>
+      release?.repository===repository)));
   return programMatch || repositoryMatch;
 }
 
-function assertReleaseReceiptCoverage(receipt,intent) {
-  if (receipt.intent_id!==intent.intent_id || receipt.intent_sha256!==sha256Canonical(intent)) {
-    throw new CoreConflictError("Release reconciliation receipt does not bind its immutable intent");
-  }
-  if (intent.planned_receipt_id!==undefined &&
-      receipt.receipt_id!==intent.planned_receipt_id) {
-    throw new CoreConflictError("Release reconciliation receipt does not own its planned identity");
-  }
-  const operations=new Map(intent.operations.map(operation => [operation.operation_id,operation]));
-  const observed=new Set();
-  for (const observation of receipt.observed_revisions) {
-    const operation=operations.get(observation.operation_id);
-    if (!operation || operation.repository!==observation.repository || observed.has(observation.operation_id)) {
-      throw new CoreConflictError("Release reconciliation receipt contains incompatible operation evidence");
+function assertPersistedPublicationEvidence(programs,intents,receipts,controlRepository) {
+  for (const program of programs) {
+    for (const release of program.repository_releases) {
+      if (release.phase!=="RELEASED") continue;
+      const evidence=release.publication_evidence;
+      const matchingReceipts=receipts.filter(receipt => receipt.receipt_id===evidence.source_receipt);
+      if (matchingReceipts.length!==1 || matchingReceipts[0].status!=="completed") {
+        throw new CoreConflictError("Released publication evidence requires one completed receipt");
+      }
+      const receipt=matchingReceipts[0];
+      const matchingIntents=intents.filter(intent => intent.intent_id===receipt.intent_id);
+      if (matchingIntents.length!==1) {
+        throw new CoreConflictError("Released publication receipt requires one immutable intent");
+      }
+      const intent=matchingIntents[0];
+      assertReleaseReceiptCoverage(receipt,intent);
+      if (intent.command!=="release.approve" || intent.authority!==null ||
+          intent.planned_receipt_id!==receipt.receipt_id ||
+          intent.operations.length!==2) {
+        throw new CoreConflictError("Released publication transaction envelope is incompatible");
+      }
+      const verification=intent.operations.find(operation =>
+        operation.payload.kind==="release-publication-precondition");
+      const local=intent.operations.find(operation =>
+        ["release-program-manifest","release-program-manifest-set"].includes(operation.payload.kind));
+      if (!verification || !local || verification.repository!==release.repository ||
+          verification.action!=="verify" || local.repository!==controlRepository ||
+          local.action!=="commit") {
+        throw new CoreConflictError("Released publication transaction operations are incompatible");
+      }
+      const approvalEvidence=verification.payload.query.approval_evidence;
+      const approvalIntent=approvalEvidence.intent;
+      const approvalReceipt=approvalEvidence.receipt;
+      assertReleaseReceiptCoverage(approvalReceipt,approvalIntent);
+      const actualApprovalIntents=intents.filter(value => value.intent_id===approvalIntent.intent_id);
+      const actualApprovalReceipts=receipts.filter(value =>
+        value.receipt_id===approvalReceipt.receipt_id);
+      const approvedRelease=approvalIntent.operations.find(operation =>
+        operation.payload.kind==="release-program-manifest")?.payload.program.repository_releases
+        .find(value => value.release_id===release.release_id);
+      if (approvalReceipt.status!=="completed" ||
+          approvalReceipt.receipt_id!==release.approval.source_receipt ||
+          approvalIntent.command!=="release.approve" ||
+          approvalIntent.planned_receipt_id!==approvalReceipt.receipt_id ||
+          canonicalJson(approvalIntent.authority)!==canonicalJson(release.approval.authority) ||
+          canonicalJson(approvedRelease?.approval)!==canonicalJson(release.approval) ||
+          actualApprovalIntents.length!==1 || actualApprovalReceipts.length!==1 ||
+          canonicalJson(actualApprovalIntents[0])!==canonicalJson(approvalIntent) ||
+          canonicalJson(actualApprovalReceipts[0])!==canonicalJson(approvalReceipt)) {
+        throw new CoreConflictError("Released publication transaction approval proof is incompatible");
+      }
+      const prior=verification.payload.query.release;
+      const transition=release.transitions.at(-1);
+      const expectedPrior={...release,phase:"PUBLISHING",
+        revision:previousReleaseRevision(release.revision),publication_evidence:null,
+        transitions:release.transitions.slice(0,-1)};
+      if (transition?.event!=="VERIFY_PUBLICATION" ||
+          verification.payload.query.program_id!==undefined ||
+          verification.payload.query.program.program_id!==program.program_id ||
+          prior.release_id!==release.release_id ||
+          canonicalJson(prior)!==canonicalJson(expectedPrior)) {
+        throw new CoreConflictError("Released publication transaction does not bind its Publishing predecessor");
+      }
+      const recordedPrograms=local.payload.kind==="release-program-manifest"
+        ? [local.payload.program] : local.payload.entries.map(entry => entry.program);
+      const recorded=recordedPrograms.filter(value => value.program_id===program.program_id);
+      const recordedReleases=recorded.flatMap(value => value.repository_releases)
+        .filter(value => value.release_id===release.release_id);
+      if (recorded.length!==1 || recordedReleases.length!==1 ||
+          canonicalJson(recordedReleases[0])!==canonicalJson(release)) {
+        throw new CoreConflictError("Released publication transaction does not persist the exact release");
+      }
+      const observations=new Map(receipt.observed_revisions.map(value =>
+        [value.operation_id,value]));
+      const localResult=local.payload.kind==="release-program-manifest"
+        ? local.payload.program.revision : local.payload.resulting_set_sha256;
+      if (observations.get(verification.operation_id)?.revision!==verification.expected_revision ||
+          observations.get(local.operation_id)?.revision!==localResult) {
+        throw new CoreConflictError("Released publication receipt observations are incompatible");
+      }
     }
-    observed.add(observation.operation_id);
-  }
-  if (receipt.status==="completed" && observed.size!==operations.size) {
-    throw new CoreConflictError("Release reconciliation receipt omits completed operation evidence");
   }
 }
 
@@ -221,9 +277,25 @@ export function normalizeReleasePlanningState(input) {
     throw new CoreConflictError("Release planning repositories do not match the organization registry");
   }
   assertRepositoryConcurrency(value.programs);
-  const intents=value.intents.map(intent => validateCoreDocument(intent,"operation-intent.v1"));
+  const intents=value.intents.map(intent => {
+    try { return validatePersistedOperationIntent(intent); } catch (error) {
+      throw new CoreConflictError("Persisted release operation intent is semantically corrupt",{
+        cause:error,
+      });
+    }
+  });
   const receipts=value.receipts.map(receipt => validateCoreDocument(receipt,"operation-receipt.v1"));
-  return clone({...value,organization,repositories,intents,receipts},"Normalized release planning state");
+  const normalizedState={...value,organization,repositories,intents,receipts};
+  for (const program of value.programs) {
+    for (const release of program.repository_releases) {
+      if (["PUBLISHING","RELEASED"].includes(release.phase)) {
+        releaseApprovalLedgerEvidence(normalizedState,release);
+      }
+    }
+  }
+  assertPersistedPublicationEvidence(value.programs,intents,receipts,
+    organization.control_repository);
+  return clone(normalizedState,"Normalized release planning state");
 }
 
 function normalizedPlanSnapshot(input,state) {
@@ -281,7 +353,7 @@ export function releasePlanOperations(input) {
   }
   const current=currentRecords[0] ?? null;
   const proposed=planReleaseProgram({
-    programId:current?.program_id ?? nextProgramId(state.programs),
+    programId:current?.program_id ?? nextReleaseProgramId(state.programs),
     candidates:observed.candidates,
     completed:observed.completed,
     repositories:observed.repositories,
@@ -835,7 +907,10 @@ function nextReleaseCommand(program,release) {
   if (release.phase==="ACTIVE") return `toss-core epic status ${release.scope[0]}`;
   if (release.phase==="READY_FOR_APPROVAL") return `toss-core release approve ${release.repository}@${release.version}`;
   if (release.phase==="PAUSED") return `toss-core sync ${release.repository}`;
-  if (release.phase==="PUBLISHING") return `toss-core release status ${release.repository}`;
+  if (release.phase==="PUBLISHING" ||
+      (release.phase==="RELEASED" && program.interrupts!==null)) {
+    return `toss-core release approve ${release.repository}@${release.version}`;
+  }
   return null;
 }
 

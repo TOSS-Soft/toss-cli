@@ -75,6 +75,7 @@ function repositoryConfig() {
     active_release:null,
     project_item_id:"PVTI_01",
     project_fields:{status:"PVTSSF_status",gate:"PVTSSF_gate"},
+    publication:{package_name:"@toss-software/cli",workflow:"publish.yml",required_assets:[]},
     registered_at:"2026-09-01T08:00:00.000Z",
   };
 }
@@ -1706,7 +1707,7 @@ test("release program finalization atomically CAS-writes the manifest and its lo
       schema_version:"repository-release.v1",release_id:releaseId,
       program_id:"TOSS-OS-R0001",repository:configuration.repository,phase:"DRAFT",
       revision:"REV-0001",version:null,milestone:null,branch:null,release_pr_intent:null,
-      scope:[`${configuration.repository}#10`],publication_evidence:null,transitions:[],
+      scope:[`${configuration.repository}#10`],approval:null,publication_evidence:null,transitions:[],
     }],
     dependency_stages:[{stage:1,repository_release_ids:[releaseId]}],
     selected_scope:[{epic_id:`${configuration.repository}#10`,outcome:"release-store",
@@ -1782,7 +1783,7 @@ test("release program finalization records an exact unchanged manifest as a rece
       schema_version:"repository-release.v1",release_id:releaseId,
       program_id:"TOSS-OS-R0001",repository:configuration.repository,phase:"DRAFT",
       revision:"REV-0001",version:null,milestone:null,branch:null,release_pr_intent:null,
-      scope:[`${configuration.repository}#10`],publication_evidence:null,transitions:[],
+      scope:[`${configuration.repository}#10`],approval:null,publication_evidence:null,transitions:[],
     }],
     dependency_stages:[{stage:1,repository_release_ids:[releaseId]}],
     selected_scope:[{epic_id:`${configuration.repository}#10`,outcome:"release-store",
@@ -1847,9 +1848,106 @@ test("release program finalization records an exact unchanged manifest as a rece
   const advanced={...program,revision:"REV-0002",updated_at:"2026-09-03T08:01:00.000Z"};
   const next=manifestIntent({number:"0103",sourceRevision:afterUnchanged,
     expectedRevision:"REV-0001",nextProgram:advanced});
+  const byteBound=structuredClone(next.operations[0]);
+  byteBound.payload.expected_program_sha256=sha256Canonical(program);
+  await assert.doesNotReject(store.inspectReleaseProgramOperation(byteBound));
+  const wrongBytes=structuredClone(byteBound);
+  wrongBytes.payload.expected_program_sha256="f".repeat(64);
+  await assert.rejects(store.inspectReleaseProgramOperation(wrongBytes),error =>
+    error?.code==="CONTROL_LEDGER_CONFLICT" && /byte digest/i.test(error.message));
   const nextReceipt=await runner.apply(next);
   const finalState=await store.loadReleasePlanningState();
   assert.equal(nextReceipt.status,"completed");
   assert.equal(finalState.programs[0].revision,"REV-0002");
   assert.equal(finalState.receipts.some(value => value.receipt_id===nextReceipt.receipt_id),true);
+});
+
+test("release program manifest-set atomically advances the exact set and rejects incomplete or stale entries",async t => {
+  const {root,store,bootstrap,head}=await createBootstrappedStore(t);
+  const at="2026-09-03T08:00:00.000Z";
+  const waiting=programId => ({
+    schema_version:"release-program.v1",program_id:programId,phase:"WAITING_FOR_EPIC",
+    revision:"REV-0001",repository_releases:[],dependency_stages:[],selected_scope:[],
+    deferred_scope:[],rationale:[],interrupts:null,created_at:at,updated_at:at,
+  });
+  const first=waiting("TOSS-OS-R0001");
+  const github={
+    async snapshot() { throw new Error("manifest operations must not snapshot GitHub"); },
+    async inspect() { throw new Error("manifest operations must not inspect GitHub"); },
+    async apply() { throw new Error("manifest operations must not mutate GitHub"); },
+  };
+  let intentNumber=200;
+  let receiptNumber=200;
+  const runner=createOperationRunner({control:store,github,authorityRegistry:{keys:[]},
+    clock:() => at,
+    idGenerator:kind => kind==="receipt"
+      ? `RECEIPT-20260903-${String(++receiptNumber).padStart(4,"0")}`
+      : `INTENT-20260903-${String(++intentNumber).padStart(4,"0")}`,
+    policyRevision:() => "POLICY-0001"});
+  const initial=createOperationIntent({intent_id:"INTENT-20260903-0200",created_at:at,
+    command:"release.plan",policy_revision:"POLICY-0001",
+    source:{repository:bootstrap.organization.control_repository,revision:head,sha256:"a".repeat(64)},
+    authority:null,planned_receipt_id:"RECEIPT-20260903-0200",
+    operations:[{resource:"repository",action:"commit",
+      repository:bootstrap.organization.control_repository,expected_revision:null,
+      payload:{kind:"release-program-manifest",expected_program_revision:null,program:first}}]});
+  await runner.apply(initial);
+
+  const sourceRevision=await store.head();
+  const current=(await store.loadReleasePlanningState()).programs;
+  const advanced={...first,revision:"REV-0002",updated_at:"2026-09-03T08:01:00.000Z"};
+  const second=waiting("TOSS-OS-R0002");
+  const resulting=[advanced,second];
+  const operation={resource:"repository",action:"commit",
+    repository:bootstrap.organization.control_repository,
+    expected_revision:sha256Canonical(current),payload:{kind:"release-program-manifest-set",
+      expected_set_sha256:sha256Canonical(current),resulting_set_sha256:sha256Canonical(resulting),
+      entries:[
+        {program_id:first.program_id,expected_program_revision:first.revision,program:advanced},
+        {program_id:second.program_id,expected_program_revision:null,program:second},
+      ]}};
+  const planned=createOperationIntent({intent_id:"INTENT-20260903-0201",created_at:at,
+    command:"core.manifest-set",policy_revision:"POLICY-0001",
+    source:{repository:bootstrap.organization.control_repository,revision:sourceRevision,
+      sha256:"b".repeat(64)},authority:null,planned_receipt_id:"RECEIPT-20260903-0201",
+    operations:[operation]});
+
+  const missing=structuredClone(planned.operations[0]);
+  missing.payload.entries=[missing.payload.entries[1]];
+  missing.payload.resulting_set_sha256=sha256Canonical([second]);
+  await assert.rejects(store.inspectReleaseProgramSetOperation(missing),error =>
+    error?.code==="CONTROL_LEDGER_CONFLICT" && /omit/i.test(error.message));
+  const stale=structuredClone(planned.operations[0]);
+  stale.payload.entries[0].expected_program_revision="REV-9999";
+  await assert.rejects(store.inspectReleaseProgramSetOperation(stale),error =>
+    error?.code==="CONTROL_LEDGER_CONFLICT" && /expected revision/i.test(error.message));
+  const duplicate=structuredClone(planned.operations[0]);
+  duplicate.payload.entries.splice(1,0,structuredClone(duplicate.payload.entries[0]));
+  duplicate.payload.resulting_set_sha256=sha256Canonical(duplicate.payload.entries.map(value => value.program));
+  await assert.rejects(store.inspectReleaseProgramSetOperation(duplicate),/unique and canonically ordered/i);
+  const extra=structuredClone(planned.operations[0]);
+  const third=waiting("TOSS-OS-R0003");
+  extra.payload.entries.push({program_id:third.program_id,expected_program_revision:null,program:third});
+  extra.payload.resulting_set_sha256=sha256Canonical(extra.payload.entries.map(value => value.program));
+  await assert.rejects(store.inspectReleaseProgramSetOperation(extra),error =>
+    error?.code==="CONTROL_LEDGER_CONFLICT" && /extra programs/i.test(error.message));
+  const drift=structuredClone(planned.operations[0]);
+  drift.payload.entries[0].program.updated_at="2026-09-03T08:02:00.000Z";
+  drift.payload.entries[0].program.revision=first.revision;
+  drift.payload.resulting_set_sha256=sha256Canonical(drift.payload.entries.map(value => value.program));
+  await assert.rejects(store.inspectReleaseProgramSetOperation(drift),error =>
+    error?.code==="CONTROL_LEDGER_CONFLICT" && /same-revision content/i.test(error.message));
+  assert.equal(await store.head(),sourceRevision);
+
+  const before=await store.head();
+  const receipt=await runner.apply(planned);
+  const after=await store.head();
+  assert.notEqual(after,before);
+  assert.deepEqual((await store.loadReleasePlanningState()).programs,resulting);
+  assert.equal((await store.loadReleasePlanningState()).receipts.some(value =>
+    value.receipt_id===receipt.receipt_id),true);
+  assert.deepEqual((await git(root,["diff-tree","--no-commit-id","--name-only","-r",after])).stdout
+    .trim().split("\n").sort(),[
+    programPath(first.program_id),programPath(second.program_id),receiptPath(receipt),
+  ].sort());
 });

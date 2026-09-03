@@ -26,7 +26,7 @@ const TASK_4_COMMANDS=new Set([
 const TASK_5_COMMANDS=new Set(["review.record","review.status"]);
 const TASK_6_COMMANDS=new Set(["epic.prepare","epic.approve","epic.submit","epic.accept","epic.status"]);
 const RELEASE_PROGRAM_COMMANDS=new Set([
-  "release.plan","release.activate","release.status","program.status",
+  "release.plan","release.activate","release.status","release.approve","program.status",
 ]);
 const IMPLEMENTED_COMMANDS=new Set([
   "init","repo.add","repo.list",...TASK_4_COMMANDS,...TASK_5_COMMANDS,...TASK_6_COMMANDS,
@@ -57,6 +57,7 @@ const BUILTIN_HANDLERS=Object.freeze({
   "release.plan":runReleaseCommand,
   "release.activate":runReleaseCommand,
   "release.status":runReleaseCommand,
+  "release.approve":runReleaseCommand,
   "program.status":runProgramCommand,
 });
 

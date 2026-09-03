@@ -6,6 +6,7 @@ import {validateCoreDocument} from "../contracts.js";
 import {authorityReference,verifyAuthority} from "../authority.js";
 import {validateParsedCoreCommand} from "../commands/router.js";
 import {CoreBlockedError,CoreConflictError,CoreInternalError,CoreRemoteError,CoreValidationError} from "../errors.js";
+import {validateOperationIntent} from "./intent-contract.js";
 import {createOperationIntent,operationPreview} from "./plan.js";
 
 function ownFunction(value,key,label) {
@@ -64,6 +65,19 @@ function observed(value) {
 function expectedAuthorityBinding(intent,now,implementationActor) {
   const revisions=new Map();
   let authorityBinding=null;
+  let releaseApprovalRepository=null;
+  const addRevision=(target,repository,revision) => {
+    if (typeof target!=="string" || !target ||
+        !(repository===null || typeof repository==="string") ||
+        !(revision===null || typeof revision==="string")) {
+      throw new CoreBlockedError("Authority cannot bind malformed release approval evidence");
+    }
+    const binding=Object.freeze({target,repository,revision});
+    if (revisions.has(target) && canonicalJson(revisions.get(target))!==canonicalJson(binding)) {
+      throw new CoreBlockedError("Authority cannot bind conflicting expected revisions for one target");
+    }
+    revisions.set(target,binding);
+  };
   for (const operation of intent.operations) {
     if (operation.payload && Object.hasOwn(operation.payload,"authority_binding")) {
       const candidate=operation.payload.authority_binding;
@@ -72,17 +86,70 @@ function expectedAuthorityBinding(intent,now,implementationActor) {
       }
       authorityBinding=candidate;
     }
+    const releaseApprovalKind=["release-approval-precondition","release-approval-base-precondition",
+      "release-pull-request-merge",
+      "release-publication-workflow"].includes(operation.payload?.kind) ||
+      (operation.payload?.kind==="release-program-manifest" &&
+       operation.payload?.authority_binding?.publication!==undefined);
+    if (releaseApprovalKind && operation.repository!==null &&
+        operation.repository!==intent.source.repository) {
+      if (releaseApprovalRepository!==null && releaseApprovalRepository!==operation.repository) {
+        throw new CoreBlockedError("Authority cannot bind release approval across repositories");
+      }
+      releaseApprovalRepository=operation.repository;
+    }
     // A Project change is always authorized against the Project node, not the
-    // incidental repository that carries the mutation.
-    const target=operation.resource==="project"
-      ? (operation.payload?.project?.node_id ?? operation.payload?.project_id)
-      : operation.repository;
+    // incidental repository that carries the mutation. Release approval adds
+    // resource-granular targets so independent PR/workflow/control revisions
+    // cannot collapse into one repository revision.
+    const target=releaseApprovalKind
+      ? operation.payload.kind==="release-approval-precondition"
+        ? operation.payload.project_id
+        : operation.payload.kind==="release-approval-base-precondition"
+          ? `${operation.repository}#base:${operation.payload.name}`
+        : operation.payload.kind==="release-pull-request-merge"
+          ? `${operation.repository}#pull-request:${operation.payload.number}`
+          : operation.payload.kind==="release-publication-workflow"
+            ? `${operation.repository}#workflow:${operation.payload.workflow}`
+            : `program:${operation.payload.program.program_id}`
+      : operation.resource==="project"
+        ? (operation.payload?.project?.node_id ?? operation.payload?.project_id)
+        : operation.repository;
     if (typeof target!=="string" || !target) throw new CoreBlockedError("Authority cannot bind an operation without an explicit target identity");
-    const binding=Object.freeze({repository:operation.resource==="project" ? null : operation.repository,revision:operation.expected_revision});
-    if (revisions.has(target) && canonicalJson(revisions.get(target))!==canonicalJson(binding)) throw new CoreBlockedError("Authority cannot bind conflicting expected revisions for one target");
-    revisions.set(target,binding);
+    if (releaseApprovalKind) {
+      addRevision(target,operation.resource==="project" ? null : operation.repository,
+        operation.expected_revision);
+    } else {
+      const binding=Object.freeze({repository:operation.resource==="project" ? null : operation.repository,
+        revision:operation.expected_revision});
+      if (revisions.has(target) && canonicalJson(revisions.get(target))!==canonicalJson(binding)) throw new CoreBlockedError("Authority cannot bind conflicting expected revisions for one target");
+      revisions.set(target,binding);
+    }
   }
   if (authorityBinding!==null) {
+    if (authorityBinding.publication!==undefined) {
+      const repository=releaseApprovalRepository;
+      if (repository===null) {
+        throw new CoreBlockedError("Authority cannot bind release approval without its repository");
+      }
+      addRevision(repository,repository,authorityBinding.repository.revision);
+      addRevision(`${repository}#branch:${authorityBinding.pull_request.head}`,repository,
+        authorityBinding.pull_request.head_sha);
+      addRevision(`${repository}#base:${authorityBinding.pull_request.base}`,repository,
+        authorityBinding.pull_request.base_revision);
+      addRevision(`${repository}#base-head:${authorityBinding.pull_request.base}`,repository,
+        authorityBinding.pull_request.base_sha);
+      addRevision(`${repository}#review:${authorityBinding.review.result.review_id}`,repository,
+        authorityBinding.review.revision);
+      addRevision(`${repository}#formal-review:${authorityBinding.review.formal_review.review_id}`,
+        repository,authorityBinding.review.formal_review.revision);
+      for (const check of authorityBinding.checks) {
+        addRevision(`${repository}#check:${check.name}`,repository,check.revision);
+      }
+      addRevision(`${repository}#rules`,repository,authorityBinding.rules_revision);
+      addRevision(`policy:${authorityBinding.policy_revision}`,null,
+        authorityBinding.policy_revision);
+    }
     revisions.set(`binding:${sha256Canonical(authorityBinding)}`,null);
   }
   const expected_revisions=[...revisions.values()]
@@ -169,6 +236,9 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
   const inspectReleaseProgramOperation=optionalOwnFunction(control,"inspectReleaseProgramOperation","control");
   const commitReleaseProgramReceipt=optionalOwnFunction(control,"commitReleaseProgramReceipt","control");
   if ((inspectReleaseProgramOperation===null)!==(commitReleaseProgramReceipt===null)) throw new CoreValidationError("control release-program operation methods must be provided together");
+  const inspectReleaseProgramSetOperation=optionalOwnFunction(control,"inspectReleaseProgramSetOperation","control");
+  const commitReleaseProgramSetReceipt=optionalOwnFunction(control,"commitReleaseProgramSetReceipt","control");
+  if ((inspectReleaseProgramSetOperation===null)!==(commitReleaseProgramSetReceipt===null)) throw new CoreValidationError("control release-program set operation methods must be provided together");
   ownFunction(github,"snapshot","github");
   const inspect=ownFunction(github,"inspect","github");
   const applyRemote=ownFunction(github,"apply","github");
@@ -186,7 +256,7 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
   }
 
   function verifyAuthorityFor(intent,authority) {
-    const valid=validateCoreDocument(clone(intent,"intent"),"operation-intent.v1");
+    const valid=validateOperationIntent(clone(intent,"intent"));
     if (valid.authority===null) throw new CoreBlockedError("Operation intent does not declare authority");
     if (authority===null || authority===undefined) throw new CoreBlockedError("Operation intent requires authority");
     const verified=verifyAuthority(authority,expectedAuthorityBinding(valid,clock(),implementationActor),authorityRegistry);
@@ -214,7 +284,7 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
   }
 
   async function applyIntent(intent,{authority,receiptId=null}={}) {
-    const valid=validateCoreDocument(clone(intent,"intent"),"operation-intent.v1");
+    const valid=validateOperationIntent(clone(intent,"intent"));
     if (receiptId!==null && valid.planned_receipt_id!==undefined &&
         receiptId!==valid.planned_receipt_id) {
       throw new CoreConflictError("Operation receipt identity conflicts with its immutable reservation");
@@ -230,21 +300,29 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
       if (storedReceipt.status==="failed") throw new CoreRemoteError("Operation has a recorded failed receipt");
       return storedReceipt;
     }
+    if (valid.authority===null && valid.operations.some(operation =>
+      Object.hasOwn(operation.payload,"authority_binding"))) {
+      throw new CoreBlockedError("Authority-bound operations require one immutable authority record");
+    }
     if (valid.authority!==null) {
       verifyAuthorityFor(valid,authority);
     } else if (authority!==null && authority!==undefined) {
       throw new CoreBlockedError("Operation intent does not declare authority");
     }
-    const localOperations=valid.operations.filter(operation => operation.payload?.kind==="release-program-manifest");
-    if (localOperations.length>1 || (localOperations.length===1 && inspectReleaseProgramOperation===null)) {
+    const localKinds=new Set(["release-program-manifest","release-program-manifest-set"]);
+    const localOperations=valid.operations.filter(operation => localKinds.has(operation.payload?.kind));
+    if (localOperations.length>1 || (localOperations.length===1 &&
+        ((localOperations[0].payload.kind==="release-program-manifest" && inspectReleaseProgramOperation===null) ||
+         (localOperations[0].payload.kind==="release-program-manifest-set" && inspectReleaseProgramSetOperation===null)))) {
       throw new CoreValidationError("Operation intent contains an unsupported release-program manifest mutation");
     }
-    const githubOperations=valid.operations.filter(operation => operation.payload?.kind!=="release-program-manifest");
+    const githubOperations=valid.operations.filter(operation => !localKinds.has(operation.payload?.kind));
     const verifyOperations=githubOperations.filter(operation => operation.action==="verify");
     const mutationOperations=githubOperations.filter(operation => operation.action!=="verify");
     const controlBound=localOperations.length===1 || verifyOperations.some(operation =>
       ["release-plan-precondition","release-activation-precondition",
-        "release-patch-precondition","release-patch-completion-precondition"].includes(
+        "release-patch-precondition","release-patch-completion-precondition",
+        "release-approval-precondition","release-publication-precondition"].includes(
         operation.payload?.kind));
     let prior;
     try { prior=await findIntent(valid); } catch (error) {
@@ -254,7 +332,7 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
     }
     if (prior!==null) {
       let storedIntent;
-      try { storedIntent=validateCoreDocument(clone(prior,"stored intent"),"operation-intent.v1"); } catch (error) {
+      try { storedIntent=validateOperationIntent(clone(prior,"stored intent")); } catch (error) {
         throw new CoreConflictError("Operation intent ledger is corrupt",{cause:error});
       }
       if (sha256Canonical(storedIntent)!==sha256Canonical(valid)) throw new CoreConflictError("Intent identity conflicts with the ledger");
@@ -275,7 +353,9 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
     let inspected=[];
     try {
       const remoteInspected=githubOperations.length===0 ? [] : observed(await inspect(githubOperations));
-      const localInspected=localOperations.length===0 ? [] : [await inspectReleaseProgramOperation(localOperations[0])];
+      const localInspected=localOperations.length===0 ? [] : [localOperations[0].payload.kind==="release-program-manifest"
+        ? await inspectReleaseProgramOperation(localOperations[0])
+        : await inspectReleaseProgramSetOperation(localOperations[0])];
       inspected=observed([...remoteInspected,...localInspected]);
       inspectMatches(valid.operations,inspected);
     } catch (error) {
@@ -291,21 +371,69 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
     try {
       const verifiedIds=new Set(verifyOperations.map(operation => operation.operation_id));
       const verifiedObservations=inspected.filter(value => verifiedIds.has(value.operation_id));
-      const result=mutationOperations.length===0
-        ? Object.freeze({status:"completed",observed_revisions:Object.freeze([])})
-        : remoteResult(await applyRemote(mutationOperations,{idempotencyKey:sha256Canonical(valid)}),mutationOperations);
+      const approvalMerge=mutationOperations.find(operation =>
+        operation.payload?.kind==="release-pull-request-merge") ?? null;
+      const approvalWorkflow=mutationOperations.find(operation =>
+        operation.payload?.kind==="release-publication-workflow") ?? null;
+      let result;
+      if (approvalMerge!==null || approvalWorkflow!==null) {
+        if (mutationOperations.length!==2 || approvalMerge===null || approvalWorkflow===null) {
+          throw new CoreValidationError("Release approval mutations must contain one merge and one workflow operation");
+        }
+        const applyOne=async operation => remoteResult(await applyRemote([operation],{
+          idempotencyKey:sha256Canonical({intent_sha256:sha256Canonical(valid),
+            operation_id:operation.operation_id}),
+        }),[operation]);
+        const mergeResult=await applyOne(approvalMerge);
+        appliedObservations=observed([...verifiedObservations,...mergeResult.observed_revisions]);
+        const merged=mergeResult.observed_revisions[0] ?? null;
+        if (mergeResult.status!=="completed") {
+          result=mergeResult;
+        } else if (merged.revision!==approvalMerge.payload.merge_result_revision ||
+            merged.revision!==approvalMerge.payload.head_sha) {
+          throw new CoreConflictError("Release approval merge was not an exact fast-forward result");
+        } else {
+          const workflowResult=await applyOne(approvalWorkflow);
+          appliedObservations=observed([
+            ...verifiedObservations,...mergeResult.observed_revisions,
+            ...workflowResult.observed_revisions,
+          ]);
+          const workflowObservation=workflowResult.observed_revisions[0] ?? null;
+          if (workflowResult.status==="completed" &&
+              workflowObservation?.revision!==approvalWorkflow.payload.expected_revision) {
+            throw new CoreConflictError(
+              "Release publication workflow did not bind the approved merge result",
+            );
+          }
+          result=Object.freeze({status:workflowResult.status,
+            observed_revisions:Object.freeze([
+              ...mergeResult.observed_revisions,...workflowResult.observed_revisions,
+            ])});
+        }
+      } else {
+        result=mutationOperations.length===0
+          ? Object.freeze({status:"completed",observed_revisions:Object.freeze([])})
+          : remoteResult(await applyRemote(mutationOperations,
+            {idempotencyKey:sha256Canonical(valid)}),mutationOperations);
+      }
       appliedObservations=observed([...verifiedObservations,...result.observed_revisions]);
       const localObserved=localOperations.map(operation => Object.freeze({
         operation_id:operation.operation_id,
         repository:operation.repository,
-        revision:operation.payload.program.revision,
+        revision:operation.payload.kind==="release-program-manifest"
+          ? operation.payload.program.revision
+          : operation.payload.resulting_set_sha256,
       }));
       const completedObservations=result.status==="completed"
         ? observed([...appliedObservations,...localObserved])
         : appliedObservations;
       const receipt=receiptFor(valid,{receipt_id:selectedReceiptId,created_at:clock(),status:result.status,observed_revisions:completedObservations});
       if (localOperations.length===1 && result.status==="completed") {
-        await commitReleaseProgramReceipt({expectedHead:revision,operation:localOperations[0],receipt});
+        if (localOperations[0].payload.kind==="release-program-manifest") {
+          await commitReleaseProgramReceipt({expectedHead:revision,operation:localOperations[0],receipt});
+        } else {
+          await commitReleaseProgramSetReceipt({expectedHead:revision,operation:localOperations[0],receipt});
+        }
       } else {
         await commitReceipt({expectedHead:revision,receipt});
       }
@@ -328,7 +456,7 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
   }
 
   async function apply(intent,{authority}={}) {
-    const valid=validateCoreDocument(clone(intent,"intent"),"operation-intent.v1");
+    const valid=validateOperationIntent(clone(intent,"intent"));
     if (valid.planned_receipt_id!==undefined) return applyIntent(valid,{authority});
     let prior;
     try { prior=await findIntent(valid); } catch (error) {
@@ -338,7 +466,7 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
     }
     if (prior!==null) {
       let storedIntent;
-      try { storedIntent=validateCoreDocument(clone(prior,"stored legacy intent"),"operation-intent.v1"); } catch (error) {
+      try { storedIntent=validateOperationIntent(clone(prior,"stored legacy intent")); } catch (error) {
         throw new CoreConflictError("Legacy operation intent ledger is corrupt",{cause:error});
       }
       if (storedIntent.planned_receipt_id!==undefined) {
@@ -375,8 +503,8 @@ export function createOperationRunner({control,github,authorityRegistry,clock,id
       return orphanedReceipt;
     }
     const receiptId=reserveReceiptId();
-    const planned=validateCoreDocument(clone({...valid,planned_receipt_id:receiptId},
-      "planned legacy intent"),"operation-intent.v1");
+    const planned=validateOperationIntent(clone({...valid,planned_receipt_id:receiptId},
+      "planned legacy intent"));
     return applyIntent(planned,{authority,receiptId});
   }
 

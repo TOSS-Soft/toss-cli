@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import {sha256Canonical} from "../src/contracts/acp.js";
 import {validateDocument} from "../src/contracts/validator.js";
 import {CoreConflictError,CoreValidationError} from "../src/core/errors.js";
 
@@ -30,8 +31,10 @@ function publicationEvidence({
   releaseId="REL-toss-cli-2.2.0",
   version="2.2.0",
   assets=null,
+  sourceReceipt="RECEIPT-20260902-0004",
+  verifiedAt="2026-09-02T09:03:00.000Z",
 }={}) {
-  return {
+  const evidence={
     schema_version:"publication-evidence.v1",
     evidence_id:"PUB-20260902-0001",
     release_id:releaseId,
@@ -48,10 +51,10 @@ function publicationEvidence({
       prerelease:false,
       assets:assets ?? [{name:`toss-cli-${version}.tgz`,sha256:"b".repeat(64)}],
     },
-    evidence_sha256:"c".repeat(64),
-    source_receipt:"RECEIPT-20260902-0001",
-    verified_at:"2026-09-02T10:30:00.000Z",
+    source_receipt:sourceReceipt,
+    verified_at:verifiedAt,
   };
+  return {...evidence,evidence_sha256:sha256Canonical(evidence)};
 }
 
 function releasePrIntent(version="2.2.0") {
@@ -61,6 +64,41 @@ function releasePrIntent(version="2.2.0") {
     base:"main",
     expected_head_revision:COMMIT,
     recorded_at:TIMESTAMP,
+  };
+}
+
+function releaseApproval({repository="TOSS-Soft/toss-cli",releaseId="REL-toss-cli-2.2.0",
+  programId="TOSS-OS-R0007",version="2.2.0",manifestRevision="REV-0041",
+  scopeId=`${repository}#42`,approvedAt="2026-09-02T09:02:00.000Z",
+  sourceReceipt="RECEIPT-20260902-0003"}={}) {
+  const commits=[{revision:COMMIT,author:"implementation-author",committer:"release-committer"}];
+  const result={schema_version:"review-result.v1",review_id:"REVIEW-20260902-0017",
+    repository,pull_request_number:17,reviewed_revision:COMMIT,
+    reviewer:{identity:"reviewer",role:"independent-reviewer"},verdict:"APPROVED",
+    freshness:"CURRENT",findings:[],unresolved:[],verification_evidence:["test:release-state"],
+    follow_up_issues:[],reviewed_at:TIMESTAMP,recorded_at:TIMESTAMP};
+  return {
+    schema_version:"release-approval.v1",source_receipt:sourceReceipt,
+    authority:{record_id:"AUTH-20260902-0001",sha256:"c".repeat(64)},
+    program_id:programId,release_id:releaseId,manifest_revision:manifestRevision,
+    manifest_sha256:"d".repeat(64),
+    pull_request:{number:17,revision:"pr-17",head:`release/v${version}`,
+      head_sha:COMMIT,base:"main",base_sha:"0".repeat(40),base_revision:"base-main-17"},
+    review:{revision:"review-revision-17",result,
+      formal_review:{state:"APPROVED",review_id:result.review_id,
+        reviewed_revision:COMMIT,revision:"formal-review-17"},
+      implementation_identity:{base_revision:"0".repeat(40),revision:COMMIT,
+        pull_request_author:"implementation-author",commit_count:commits.length,
+        commits_sha256:sha256Canonical(commits),commits}},
+    scope:[{id:scopeId,revision:"issue-10-17",project_item_id:"PVTI_10",
+      project_revision:"project-item-10-17",status:"Done",gate:"RELEASE_APPROVAL_REQUIRED"}],
+    required_checks:["build"],
+    checks:[{name:"build",revision:"check-build-17",head_sha:COMMIT,
+      conclusion:"SUCCESS"}],
+    rules_revision:"rules-17",policy_revision:"POLICY-0001",
+    publication:{package_name:"@toss-software/cli",workflow:"publish.yml",
+      required_assets:[`toss-cli-${version}.tgz`]},
+    merge_result_revision:COMMIT,approved_at:approvedAt,
   };
 }
 
@@ -119,6 +157,7 @@ function repositoryRelease({
   version="2.2.0",
   transitions,
   evidence=null,
+  approval,
   scope,
 }={}) {
   const materialized=phase!=="DRAFT";
@@ -134,6 +173,9 @@ function repositoryRelease({
     branch:materialized ? `release/v${version}` : null,
     release_pr_intent:materialized ? releasePrIntent(version) : null,
     scope:scope ?? [`${repository}#42`],
+    approval:approval===undefined && ["PUBLISHING","RELEASED"].includes(phase)
+      ? releaseApproval({repository,releaseId,programId,version})
+      : (approval ?? null),
     publication_evidence:evidence,
     transitions:transitions ?? releaseHistory(phase),
   };
@@ -216,6 +258,15 @@ test("release contracts accept closed release, program, and publication evidence
   ]) {
     assert.equal(validateDocument(value,schemaId).valid,true,schemaId);
   }
+});
+
+test("approval source-program and current release revisions may share the same canonical text",async () => {
+  const {assertRepositoryConcurrency}=await releaseState();
+  const publishing=repositoryRelease({phase:"PUBLISHING",revision:"REV-0042",
+    approval:releaseApproval({manifestRevision:"REV-0042"})});
+  assert.equal(assertRepositoryConcurrency([
+    releaseProgram({phase:"PUBLISHING",revision:"REV-0042",releases:[publishing]}),
+  ]),true);
 });
 
 test("program contracts preserve structured selected eligibility and lossless version rationale",async () => {
@@ -382,7 +433,7 @@ test("program contracts keep independent versions and exact patch interruption l
 });
 
 test("repository release transitions follow only the six exact event pairs",async () => {
-  const {transitionRepositoryRelease}=await releaseState();
+  const {approveRepositoryRelease,transitionRepositoryRelease}=await releaseState();
   const byPhase=new Map();
   let current=repositoryRelease();
   byPhase.set(current.phase,current);
@@ -397,10 +448,16 @@ test("repository release transitions follow only the six exact event pairs",asyn
 
   for (const [event,target] of expected) {
     if (event==="VERIFY_PUBLICATION") {
-      current={...current,publication_evidence:publicationEvidence()};
+      current={...current,publication_evidence:publicationEvidence({
+        sourceReceipt:"RECEIPT-20260902-0001",verifiedAt:TIMESTAMP})};
     }
     const source=current;
-    current=transitionRepositoryRelease(source,transitionEvent(event,source.revision));
+    current=event==="APPROVE"
+      ? approveRepositoryRelease(source,transitionEvent(event,source.revision),
+        releaseApproval({releaseId:source.release_id,programId:source.program_id,
+          version:source.version,manifestRevision:source.revision,scopeId:source.scope[0],
+          approvedAt:TIMESTAMP,sourceReceipt:"RECEIPT-20260902-0001"}))
+      : transitionRepositoryRelease(source,transitionEvent(event,source.revision));
     assert.equal(current.phase,target,event);
     assert.equal(current.revision,`REV-${String(42+current.transitions.length).padStart(4,"0")}`,event);
     assert.deepEqual(current.transitions.at(-1),{
@@ -734,6 +791,8 @@ test("nested set-like release collections require canonical logical identity ord
 
   const canonicalRelease=repositoryRelease({
     phase:"RELEASED",
+    approval:{...releaseApproval(),publication:{package_name:"@toss-software/cli",
+      workflow:"publish.yml",required_assets:["a-package.tgz","z-package.tgz"]}},
     evidence:publicationEvidence({assets:[
       {name:"a-package.tgz",sha256:"c".repeat(64)},
       {name:"z-package.tgz",sha256:"d".repeat(64)},

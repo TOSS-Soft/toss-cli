@@ -1,11 +1,12 @@
 import {types} from "node:util";
 
-import {canonicalJson} from "../../contracts/acp.js";
+import {canonicalJson,sha256Canonical} from "../../contracts/acp.js";
 import {compareCanonicalText} from "../canonical-order.js";
 import {validateCoreDocument} from "../contracts.js";
 import {parseWorkItemId} from "../domain/identity.js";
 import {CoreConflictError,CoreValidationError} from "../errors.js";
 import {parseSemVer} from "./semver.js";
+import {assertReleaseApprovalSemantics} from "./approval.js";
 
 export const REPOSITORY_RELEASE_PHASES=Object.freeze([
   "DRAFT","ACTIVE","PAUSED","READY_FOR_APPROVAL","PUBLISHING","RELEASED",
@@ -35,7 +36,7 @@ const PROGRAM_KEYS=Object.freeze([
 ]);
 const REPOSITORY_RELEASE_KEYS=Object.freeze([
   "schema_version","release_id","program_id","repository","phase","revision",
-  "version","milestone","branch","release_pr_intent","scope","publication_evidence",
+  "version","milestone","branch","release_pr_intent","scope","approval","publication_evidence",
   "transitions",
 ]);
 const ACTIVE_CONCURRENCY_PHASES=Object.freeze(new Set([
@@ -261,6 +262,34 @@ function assertReleaseIdentities(release) {
       invalid("Repository release version, milestone, branch, and release PR intent must agree");
     }
   }
+
+  const approval=release.approval;
+  if (["PUBLISHING","RELEASED"].includes(release.phase)!==(approval!==null)) {
+    invalid("Repository release approval must exist exactly in Publishing or Released");
+  }
+  if (approval!==null) {
+    const review=approval.review;
+    if (approval.program_id!==release.program_id || approval.release_id!==release.release_id ||
+        approval.pull_request.head!==release.release_pr_intent.head ||
+        approval.pull_request.base!==release.release_pr_intent.base ||
+        approval.pull_request.head_sha!==approval.merge_result_revision ||
+        approval.pull_request.base_sha!==review.implementation_identity.base_revision ||
+        approval.pull_request.head_sha!==review.implementation_identity.revision ||
+        review.result.reviewed_revision!==approval.pull_request.head_sha ||
+        review.result.verdict!=="APPROVED" || review.result.freshness!=="CURRENT" ||
+        review.formal_review.state!=="APPROVED" ||
+        review.formal_review.review_id!==review.result.review_id ||
+        review.formal_review.reviewed_revision!==approval.pull_request.head_sha ||
+        approval.publication.package_name.trim()!==approval.publication.package_name ||
+        approval.publication.workflow.trim()!==approval.publication.workflow ||
+        approval.publication.required_assets.some(asset => asset.trim()!==asset)) {
+      invalid("Release approval must bind the exact program, release, manifest, PR, and merge revision");
+    }
+    assertIdentityOrderedUnique(approval.checks,check => check.name,"Release approval checks by name");
+    assertAsciiOrderedUnique(approval.publication.required_assets,
+      "Release approval required publication assets");
+    assertReleaseApprovalSemantics(release);
+  }
   assertAsciiOrderedUnique(release.scope,"Repository release scope");
   for (const scopeId of release.scope) {
     if (parseWorkItemId(scopeId).repository!==release.repository) {
@@ -270,21 +299,36 @@ function assertReleaseIdentities(release) {
 
   const evidence=release.publication_evidence;
   if (evidence!==null) {
+    const verification=release.transitions.filter(transition =>
+      transition.event==="VERIFY_PUBLICATION");
     if (evidence.release_id!==release.release_id ||
         evidence.repository!==release.repository ||
         evidence.version!==release.version ||
         evidence.tag.name!==`v${release.version}` ||
         evidence.package.version!==release.version ||
+        evidence.package.name!==approval?.publication.package_name ||
         evidence.github_release.tag_name!==`v${release.version}` ||
+        evidence.expected_revision!==approval?.merge_result_revision ||
         evidence.tag.target_revision!==evidence.expected_revision ||
-        evidence.github_release.target_revision!==evidence.expected_revision) {
+        evidence.github_release.target_revision!==evidence.expected_revision ||
+        (release.phase==="RELEASED" && (verification.length!==1 ||
+          verification[0].source_receipt!==evidence.source_receipt ||
+          verification[0].timestamp!==evidence.verified_at))) {
       invalid("Publication evidence must bind the exact repository release identity and revision");
+    }
+    const {evidence_sha256,...unsignedEvidence}=evidence;
+    if (evidence_sha256!==sha256Canonical(unsignedEvidence)) {
+      invalid("Publication evidence hash must bind the exact immutable evidence content");
     }
     assertIdentityOrderedUnique(
       evidence.github_release.assets,
       asset => asset.name,
       "Publication evidence assets by name",
     );
+    const assets=evidence.github_release.assets.map(asset => asset.name);
+    if (canonicalJson(assets)!==canonicalJson(approval.publication.required_assets)) {
+      invalid("Publication evidence assets must equal the approval-frozen required asset set");
+    }
   }
 }
 
@@ -404,6 +448,24 @@ export function transitionRepositoryRelease(releaseInput,eventInput) {
     transitions:[...release.transitions,transition],
   };
   return normalizeRepositoryRelease(candidate,"Transitioned repository release");
+}
+
+export function approveRepositoryRelease(releaseInput,eventInput,approvalInput) {
+  const release=normalizeRepositoryRelease(releaseInput);
+  const event=normalizeEvent(eventInput);
+  if (event.event!=="APPROVE" || release.phase!=="READY_FOR_APPROVAL" ||
+      event.expected_revision!==release.revision) {
+    invalid("Release approval transition must target the exact Ready for approval revision");
+  }
+  const approval=copyClosed(approvalInput,"Release approval");
+  const transition=Object.freeze({
+    event:event.event,source_phase:release.phase,target_phase:"PUBLISHING",
+    timestamp:event.timestamp,source_receipt:event.source_receipt,
+  });
+  return normalizeRepositoryRelease({
+    ...release,approval,phase:"PUBLISHING",revision:incrementRevision(release.revision),
+    transitions:[...release.transitions,transition],
+  },"Approved repository release");
 }
 
 function assertProgramSemantics(program) {

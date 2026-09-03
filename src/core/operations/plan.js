@@ -1,9 +1,11 @@
 import {types} from "node:util";
 
 import {canonicalJson,sha256Canonical} from "../../contracts/acp.js";
-import {validateCoreDocument} from "../contracts.js";
 import {CoreValidationError} from "../errors.js";
 import {compareOperations} from "../operation-order.js";
+import {validateOperationIntent} from "./intent-contract.js";
+
+export {validateOperationIntent} from "./intent-contract.js";
 
 const MAX_OPERATION_INPUT_DEPTH=64;
 
@@ -91,12 +93,12 @@ export function createOperationIntent(input) {
       : {}),
     operations:Object.freeze(operations),
   });
-  validateCoreDocument(intent,"operation-intent.v1");
+  validateOperationIntent(intent);
   return intent;
 }
 
 export function operationPreview(intent) {
-  const valid=validateCoreDocument(closedClone(intent),"operation-intent.v1");
+  const valid=validateOperationIntent(intent);
   return Object.freeze({
     schema_version:"operation-preview.v1",
     intent_id:valid.intent_id,

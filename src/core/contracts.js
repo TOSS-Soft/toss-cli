@@ -1,11 +1,12 @@
 import {types} from "node:util";
 
-import {canonicalJson} from "../contracts/acp.js";
+import {canonicalJson,sha256Canonical} from "../contracts/acp.js";
 import {validateDocument} from "../contracts/validator.js";
 
 import {CoreValidationError} from "./errors.js";
 import {compareOperations} from "./operation-order.js";
 import {parseReservedBranch} from "./domain/identity.js";
+import {releaseApprovalEnvelopeSha256} from "./release/approval-envelope.js";
 
 const MAX_CORE_CONTRACT_DEPTH=64;
 const RELEASE_PRECONDITION_KINDS=Object.freeze(new Map([
@@ -17,6 +18,12 @@ const RELEASE_PRECONDITION_KINDS=Object.freeze(new Map([
     keys:["kind","project_id","query","snapshot_sha256"]}],
   ["release-patch-completion-precondition",{resource:"project",repository:null,
     keys:["kind","project_id","query","snapshot_sha256"]}],
+  ["release-approval-precondition",{resource:"project",repository:null,
+    keys:["kind","project_id","query","snapshot_sha256","authority_binding"]}],
+  ["release-approval-base-precondition",{resource:"branch",
+    keys:["kind","program_id","release_id","name","head_sha","authority_binding"]}],
+  ["release-publication-precondition",{resource:"repository",
+    keys:["kind","query","descriptor","snapshot_sha256"]}],
   ["release-repository-precondition",{resource:"repository",
     keys:["kind","program_id","release_id","snapshot_sha256"]}],
   ["release-default-branch-precondition",{resource:"branch",
@@ -88,6 +95,7 @@ function nestedDocument(value,schemaId,label) {
   if (!result.valid) {
     throw new CoreValidationError(`Invalid core contract operation-intent.v1: ${label} is malformed`);
   }
+  assertRepositoryConfigSemantics(value);
 }
 
 function assertCanonicalIdentities(values,label) {
@@ -105,6 +113,59 @@ function assertCanonicalIdentities(values,label) {
 
 function assertAggregateQuery(payload) {
   const query=payload.query;
+  if (payload.kind==="release-approval-precondition") {
+    exactOwnKeys(query,["kind","control_revision","organization","programs","program","release",
+      "repository_configuration","project"],"release approval query");
+    if (query.kind!=="release-approval") throw new CoreValidationError("Invalid core contract operation-intent.v1: release approval query kind is malformed");
+    contractString(query.control_revision,"release approval control revision");
+    nestedDocument(query.organization,"organization-config.v1","release approval organization");
+    nestedDocument(query.program,"release-program.v1","release approval program");
+    nestedDocument(query.release,"repository-release.v1","release approval release");
+    nestedDocument(query.repository_configuration,"repository-config.v1","release approval repository");
+    if (!Array.isArray(query.programs)) throw new CoreValidationError("Invalid core contract operation-intent.v1: release approval programs are malformed");
+    for (const program of query.programs) nestedDocument(program,"release-program.v1","release approval persisted program");
+    assertCanonicalIdentities(query.programs.map(value => value.program_id),"release approval program ids");
+    exactOwnKeys(query.project,["node_id","number"],"release approval Project");
+    const persisted=query.programs.find(value => value.program_id===query.program.program_id);
+    const selected=query.program.repository_releases.find(value => value.release_id===query.release.release_id);
+    if (canonicalJson(persisted)!==canonicalJson(query.program) ||
+        canonicalJson(selected)!==canonicalJson(query.release) ||
+        query.release.repository!==query.repository_configuration.repository ||
+        payload.project_id!==query.project.node_id ||
+        canonicalJson(query.project)!==canonicalJson(query.organization.project)) {
+      throw new CoreValidationError("Invalid core contract operation-intent.v1: release approval query scope is inconsistent");
+    }
+    return;
+  }
+  if (payload.kind==="release-publication-precondition") {
+    exactOwnKeys(query,["kind","control_revision","control_repository","organization",
+      "programs","program","release","repository_configuration","project",
+      "approval_evidence"],"release publication query");
+    if (query.kind!=="release-publication") throw new CoreValidationError("Invalid core contract operation-intent.v1: release publication query kind is malformed");
+    contractString(query.control_revision,"release publication control revision");
+    contractString(query.control_repository,"release publication control repository");
+    nestedDocument(query.organization,"organization-config.v1","release publication organization");
+    nestedDocument(query.program,"release-program.v1","release publication program");
+    nestedDocument(query.release,"repository-release.v1","release publication release");
+    nestedDocument(query.repository_configuration,"repository-config.v1","release publication repository");
+    if (!Array.isArray(query.programs)) throw new CoreValidationError("Invalid core contract operation-intent.v1: release publication programs are malformed");
+    for (const program of query.programs) nestedDocument(program,"release-program.v1","release publication persisted program");
+    assertCanonicalIdentities(query.programs.map(value => value.program_id),"release publication program ids");
+    exactOwnKeys(query.project,["node_id","number"],"release publication Project");
+    exactOwnKeys(query.approval_evidence,["intent","receipt"],"release publication approval evidence");
+    nestedDocument(query.approval_evidence.intent,"operation-intent.v1","release publication approval intent");
+    nestedDocument(query.approval_evidence.receipt,"operation-receipt.v1","release publication approval receipt");
+    const persisted=query.programs.find(value => value.program_id===query.program.program_id);
+    const selected=query.program.repository_releases.find(value => value.release_id===query.release.release_id);
+    if (canonicalJson(persisted)!==canonicalJson(query.program) ||
+        canonicalJson(selected)!==canonicalJson(query.release) ||
+        query.release.repository!==query.repository_configuration.repository ||
+        query.control_repository!==query.organization.control_repository ||
+        canonicalJson(query.project)!==canonicalJson(query.organization.project)) {
+      throw new CoreValidationError("Invalid core contract operation-intent.v1: release publication query scope is inconsistent");
+    }
+    return;
+  }
   if (payload.kind==="release-plan-precondition") {
     exactOwnKeys(query,["kind","control_revision","organization","repositories","programs"],"release plan query");
     if (query.kind!=="release-plan") throw new CoreValidationError("Invalid core contract operation-intent.v1: release plan query kind is malformed");
@@ -213,6 +274,19 @@ function assertAggregateQuery(payload) {
     exactOwnKeys(query.project,["node_id","number"],"release patch completion Project");
     exactOwnKeys(query.phase_evidence,["reconciliation","review_gate"],
       "release patch completion phase evidence");
+    if (Object.hasOwn(payload,"descriptor")) {
+      exactOwnKeys(payload.descriptor,["observation","receipt_id","timestamp"],
+        "release patch completion descriptor");
+      exactOwnKeys(payload.descriptor.observation,["kind","control_revision","project","patch",
+        "feature","repository","assigned_work","checks"],
+      "release patch completion descriptor observation");
+      contractString(payload.descriptor.receipt_id,
+        "release patch completion descriptor receipt",{
+          pattern:/^RECEIPT-[0-9]{8}-[0-9]{4,}$/u,
+        });
+      contractString(payload.descriptor.timestamp,
+        "release patch completion descriptor timestamp");
+    }
     for (const [phase,evidence] of Object.entries(query.phase_evidence)) {
       if (evidence===null) continue;
       exactOwnKeys(evidence,["intent","receipt"],`release patch completion ${phase} evidence`);
@@ -272,7 +346,10 @@ function assertReleasePreconditionPayload(operation) {
   if (operation.action!=="verify") {
     throw new CoreValidationError("Invalid core contract operation-intent.v1: release precondition kinds require verify action");
   }
-  exactOwnKeys(operation.payload,definition.keys,`${kind} payload`);
+  const keys=kind==="release-patch-completion-precondition" &&
+      Object.hasOwn(operation.payload,"descriptor")
+    ? [...definition.keys,"descriptor"] : definition.keys;
+  exactOwnKeys(operation.payload,keys,`${kind} payload`);
   if (operation.resource!==definition.resource ||
       (Object.hasOwn(definition,"repository") && operation.repository!==definition.repository) ||
       (!Object.hasOwn(definition,"repository") && typeof operation.repository!=="string") ||
@@ -295,26 +372,224 @@ function assertReleasePreconditionPayload(operation) {
     throw new CoreValidationError(`Invalid core contract operation-intent.v1: ${kind}.draft is malformed`);
   }
   if (["release-plan-precondition","release-activation-precondition",
-    "release-patch-precondition","release-patch-completion-precondition"].includes(kind)) {
+    "release-patch-precondition","release-patch-completion-precondition",
+    "release-approval-precondition","release-publication-precondition"].includes(kind)) {
     assertAggregateQuery(payload);
   }
+}
+
+function assertReleaseManifestPayload(operation,source) {
+  const payload=operation.payload;
+  if (payload?.kind==="release-program-manifest") {
+    const keys=["kind","expected_program_revision","program",
+      ...(Object.hasOwn(payload,"expected_program_sha256")
+        ? ["expected_program_sha256"] : []),
+      ...(Object.hasOwn(payload,"authority_binding") ? ["authority_binding"] : [])];
+    exactOwnKeys(payload,keys,"release-program-manifest payload");
+    nestedDocument(payload.program,"release-program.v1","release program manifest");
+    if (operation.resource!=="repository" || operation.action!=="commit" ||
+        operation.repository!==source.repository ||
+        operation.expected_revision!==payload.expected_program_revision ||
+        !(payload.expected_program_revision===null ||
+          /^REV-[0-9]{4,}$/u.test(payload.expected_program_revision))) {
+      throw new CoreValidationError("Invalid core contract operation-intent.v1: release program manifest binding is malformed");
+    }
+    if (Object.hasOwn(payload,"expected_program_sha256") &&
+        !/^[a-f0-9]{64}$/u.test(payload.expected_program_sha256)) {
+      throw new CoreValidationError(
+        "Invalid core contract operation-intent.v1: release program manifest byte CAS is malformed",
+      );
+    }
+    return;
+  }
+  if (payload?.kind!=="release-program-manifest-set") return;
+  exactOwnKeys(payload,["kind","expected_set_sha256","resulting_set_sha256","entries"],
+    "release-program-manifest-set payload");
+  if (operation.resource!=="repository" || operation.action!=="commit" ||
+      operation.repository!==source.repository ||
+      operation.expected_revision!==payload.expected_set_sha256 ||
+      !/^[a-f0-9]{64}$/u.test(payload.expected_set_sha256) ||
+      !/^[a-f0-9]{64}$/u.test(payload.resulting_set_sha256) ||
+      !Array.isArray(payload.entries) || payload.entries.length===0) {
+    throw new CoreValidationError("Invalid core contract operation-intent.v1: release program manifest-set binding is malformed");
+  }
+  const programs=[];
+  let additions=0;
+  let previous=null;
+  for (const entry of payload.entries) {
+    exactOwnKeys(entry,["program_id","expected_program_revision","program"],
+      "release-program-manifest-set entry");
+    nestedDocument(entry.program,"release-program.v1","release program manifest-set entry");
+    if (entry.program_id!==entry.program.program_id ||
+        (previous!==null && previous>=entry.program_id) ||
+        !(entry.expected_program_revision===null ||
+          /^REV-[0-9]{4,}$/u.test(entry.expected_program_revision)) ||
+        (entry.expected_program_revision===null && entry.program.revision!=="REV-0001")) {
+      throw new CoreValidationError("Invalid core contract operation-intent.v1: release program manifest-set entry binding is malformed");
+    }
+    previous=entry.program_id;
+    if (entry.expected_program_revision===null) additions+=1;
+    programs.push(entry.program);
+  }
+  if (additions!==1 || payload.resulting_set_sha256!==sha256Canonical(programs)) {
+    throw new CoreValidationError("Invalid core contract operation-intent.v1: release program manifest-set resulting digest is inconsistent");
+  }
+}
+
+function assertApprovalAuthorityBinding(binding) {
+  exactOwnKeys(binding,["program_id","release_id","manifest_revision","manifest_sha256",
+    "pull_request","review","checks","rules_revision","version","policy_revision",
+    "publication","scope","repository","project","workflow","operation_intent_sha256"],
+  "release approval authority binding");
+  exactOwnKeys(binding.pull_request,["number","revision","head","head_sha","base","base_sha",
+    "base_revision"],"release approval authority pull request");
+  exactOwnKeys(binding.review,["revision","result","formal_review","implementation_identity"],
+    "release approval authority review");
+  exactOwnKeys(binding.repository,["node_id","revision"],"release approval authority repository");
+  exactOwnKeys(binding.project,["node_id","revision"],"release approval authority Project");
+  exactOwnKeys(binding.workflow,["name","revision"],"release approval authority workflow");
+  contractString(binding.operation_intent_sha256,
+    "release approval authority operation intent digest",{pattern:/^[a-f0-9]{64}$/u});
+}
+
+function assertReleaseApprovalOperation(operation) {
+  const kind=operation.payload?.kind;
+  if (kind==="release-approval-base-precondition") {
+    const binding=operation.payload.authority_binding;
+    if (operation.expected_revision!==binding?.pull_request?.base_revision ||
+        operation.payload.name!==binding.pull_request.base ||
+        operation.payload.head_sha!==binding.pull_request.base_sha ||
+        operation.payload.program_id!==binding.program_id ||
+        operation.payload.release_id!==binding.release_id) {
+      throw new CoreValidationError("Invalid core contract operation-intent.v1: release approval base binding is malformed");
+    }
+  } else if (kind==="release-pull-request-merge") {
+    exactOwnKeys(operation.payload,["kind","program_id","release_id","number","head_branch",
+      "head_sha","base_branch","base_sha","base_revision","merge_mode",
+      "merge_result_revision","authority_binding"],`${kind} payload`);
+    if (operation.resource!=="pull_request" || operation.action!=="merge" ||
+        typeof operation.repository!=="string" ||
+        operation.expected_revision!==operation.payload.authority_binding?.pull_request?.revision ||
+        operation.payload.merge_mode!=="FAST_FORWARD_ONLY" ||
+        operation.payload.merge_result_revision!==operation.payload.head_sha ||
+        operation.payload.base_sha!==operation.payload.authority_binding.pull_request.base_sha ||
+        operation.payload.base_revision!==operation.payload.authority_binding.pull_request.base_revision) {
+      throw new CoreValidationError("Invalid core contract operation-intent.v1: release pull request merge binding is malformed");
+    }
+  } else if (kind==="release-publication-workflow") {
+    exactOwnKeys(operation.payload,["kind","program_id","release_id","workflow","version","tag",
+      "expected_revision","authority_binding"],`${kind} payload`);
+    if (operation.resource!=="workflow" || operation.action!=="create" ||
+        typeof operation.repository!=="string" ||
+        operation.expected_revision!==operation.payload.authority_binding?.workflow?.revision ||
+        operation.payload.workflow!==operation.payload.authority_binding.workflow.name ||
+        operation.payload.expected_revision!==operation.payload.authority_binding.pull_request.head_sha ||
+        operation.payload.tag!==`v${operation.payload.version}`) {
+      throw new CoreValidationError("Invalid core contract operation-intent.v1: release publication workflow binding is malformed");
+    }
+  } else {
+    return;
+  }
+  assertApprovalAuthorityBinding(operation.payload.authority_binding);
 }
 
 function assertOperationIntentSemantics(value) {
   if (value.schema_version!=="operation-intent.v1") return;
   for (const operation of value.operations) {
     assertReleasePreconditionPayload(operation);
+    assertReleaseManifestPayload(operation,value.source);
+    assertReleaseApprovalOperation(operation);
     if (["release-plan-precondition","release-activation-precondition",
-      "release-patch-precondition","release-patch-completion-precondition"].includes(
+      "release-patch-precondition","release-patch-completion-precondition",
+      "release-approval-precondition","release-publication-precondition"].includes(
       operation.payload?.kind)) {
       if (operation.payload.query.control_revision!==value.source.revision ||
-          (["release-plan-precondition","release-patch-precondition"].includes(
+          (["release-plan-precondition","release-patch-precondition","release-approval-precondition"].includes(
             operation.payload.kind) &&
             operation.payload.query.organization.control_repository!==value.source.repository) ||
-          (operation.payload.kind==="release-patch-completion-precondition" &&
+          (["release-patch-completion-precondition","release-publication-precondition"].includes(operation.payload.kind) &&
             operation.payload.query.control_repository!==value.source.repository)) {
         throw new CoreValidationError("Invalid core contract operation-intent.v1: aggregate query does not bind the immutable intent source");
       }
+    }
+  }
+  const approvalKinds=["release-approval-precondition","release-approval-base-precondition",
+    "release-pull-request-merge",
+    "release-publication-workflow","release-program-manifest"];
+  if (value.operations.some(operation => operation.payload?.kind==="release-approval-precondition")) {
+    if (value.authority===null || value.operations.length!==approvalKinds.length ||
+        approvalKinds.some(kind => value.operations.filter(operation =>
+          operation.payload?.kind===kind).length!==1)) {
+      throw new CoreValidationError("Invalid core contract operation-intent.v1: release approval must be one exact authority-backed transaction");
+    }
+    const bindings=value.operations.map(operation => operation.payload?.authority_binding);
+    if (bindings.some(binding => binding===undefined) || bindings.some(binding =>
+      canonicalJson(binding)!==canonicalJson(bindings[0]))) {
+      throw new CoreValidationError("Invalid core contract operation-intent.v1: release approval operations must share one exact authority binding");
+    }
+    assertApprovalAuthorityBinding(bindings[0]);
+    const binding=bindings[0];
+    const aggregate=value.operations.find(operation =>
+      operation.payload?.kind==="release-approval-precondition");
+    const base=value.operations.find(operation =>
+      operation.payload?.kind==="release-approval-base-precondition");
+    const merge=value.operations.find(operation =>
+      operation.payload?.kind==="release-pull-request-merge");
+    const workflow=value.operations.find(operation =>
+      operation.payload?.kind==="release-publication-workflow");
+    const manifest=value.operations.find(operation =>
+      operation.payload?.kind==="release-program-manifest");
+    const approved=manifest?.payload.program.repository_releases.find(release =>
+      release.program_id===binding.program_id &&
+      release.release_id===binding.release_id) ?? null;
+    const query=aggregate.payload.query;
+    const sourceRelease=query.release;
+    const approval=approved?.approval ?? null;
+    const scopeIds=binding.scope.map(item => item?.id);
+    if (approval===null || canonicalJson(approval.authority)!==canonicalJson(value.authority) ||
+        value.command!=="release.approve" || value.policy_revision!==binding.policy_revision ||
+        value.planned_receipt_id!==approval.source_receipt ||
+        query.program.program_id!==binding.program_id ||
+        sourceRelease.program_id!==binding.program_id || sourceRelease.release_id!==binding.release_id ||
+        sourceRelease.repository!==merge.repository || sourceRelease.repository!==workflow.repository ||
+        sourceRelease.repository!==base.repository || sourceRelease.version!==binding.version ||
+        query.program.revision!==binding.manifest_revision ||
+        sha256Canonical(query.program)!==binding.manifest_sha256 ||
+        query.repository_configuration.repository_node_id!==binding.repository.node_id ||
+        canonicalJson(query.repository_configuration.publication)!==canonicalJson(binding.publication) ||
+        canonicalJson(query.project)!==canonicalJson({node_id:binding.project.node_id,
+          number:query.project.number}) || aggregate.expected_revision!==binding.project.revision ||
+        canonicalJson(scopeIds)!==canonicalJson(sourceRelease.scope) ||
+        manifest.expected_revision!==binding.manifest_revision ||
+        manifest.payload.expected_program_revision!==binding.manifest_revision ||
+        manifest.payload.program.program_id!==binding.program_id ||
+        manifest.payload.program.phase!=="PUBLISHING" || approved.phase!=="PUBLISHING" ||
+        merge.payload.program_id!==binding.program_id || merge.payload.release_id!==binding.release_id ||
+        merge.repository!==sourceRelease.repository ||
+        workflow.payload.program_id!==binding.program_id ||
+        workflow.payload.release_id!==binding.release_id || workflow.repository!==sourceRelease.repository ||
+        workflow.payload.version!==binding.version || workflow.payload.tag!==`v${binding.version}` ||
+        base.payload.program_id!==binding.program_id || base.payload.release_id!==binding.release_id ||
+        base.repository!==sourceRelease.repository ||
+        canonicalJson(approval.pull_request)!==canonicalJson(binding.pull_request) ||
+        canonicalJson(approval.review)!==canonicalJson(binding.review) ||
+        canonicalJson(approval.scope)!==canonicalJson(binding.scope) ||
+        canonicalJson(approval.checks)!==canonicalJson(binding.checks) ||
+        canonicalJson(approval.required_checks)!==
+          canonicalJson(binding.checks.map(check => check.name)) ||
+        approval.rules_revision!==binding.rules_revision ||
+        approval.policy_revision!==binding.policy_revision ||
+        canonicalJson(approval.publication)!==canonicalJson(binding.publication) ||
+        approval.manifest_revision!==binding.manifest_revision ||
+        approval.manifest_sha256!==binding.manifest_sha256 ||
+        approval.merge_result_revision!==binding.pull_request.head_sha) {
+      throw new CoreValidationError("Invalid core contract operation-intent.v1: release approval transaction identities are inconsistent");
+    }
+    if (binding.operation_intent_sha256!==releaseApprovalEnvelopeSha256({
+      command:value.command,policy_revision:value.policy_revision,source:value.source,
+      operations:value.operations,
+    })) {
+      throw new CoreValidationError("Invalid core contract operation-intent.v1: release approval operation envelope digest is inconsistent");
     }
   }
 }
@@ -386,6 +661,18 @@ function assertWorkContractSemantics(value) {
   }
 }
 
+function assertRepositoryConfigSemantics(value) {
+  if (!value || value.schema_version!=="repository-config.v1") return;
+  const publication=value.publication;
+  if (!publication || publication.package_name.trim()!==publication.package_name ||
+      publication.workflow.trim()!==publication.workflow ||
+      publication.required_assets.some(asset => asset.trim()!==asset)) {
+    throw new CoreValidationError("Invalid core contract repository-config.v1: publication identities must be canonical nonblank strings");
+  }
+  assertCanonicalIdentities(publication.required_assets,
+    "repository publication required asset identities");
+}
+
 function assertClosedContract(value,seen=new Set(),depth=0) {
   if (depth>MAX_CORE_CONTRACT_DEPTH) {
     throw new CoreValidationError("Invalid core contract: value exceeds the maximum closed-data depth");
@@ -450,6 +737,7 @@ export function validateCoreDocument(value,schemaId) {
   if (!result.valid) {
     throw new CoreValidationError(validationMessage(schemaId,result.errors));
   }
+  assertRepositoryConfigSemantics(value);
   assertOperationIntentSemantics(value);
   assertUniqueOperationIds(value);
   assertCanonicalOperationOrder(value);

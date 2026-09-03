@@ -46,10 +46,13 @@ function sortedRevisions(values,label) {
   let previous;
   const repositories=new Set();
   for (const value of values) {
-    exact(value,["repository","revision"],label);
+    const targeted=Object.hasOwn(value,"target");
+    exact(value,targeted ? ["target","repository","revision"] : ["repository","revision"],label);
     if (!(value.repository===null || typeof value.repository==="string") || !(value.revision===null || typeof value.revision==="string")) blocked(`${label} is malformed`);
-    if (repositories.has(value.repository)) blocked(`${label} must not repeat a repository`);
-    repositories.add(value.repository);
+    if (targeted && (typeof value.target!=="string" || !/\S/u.test(value.target))) blocked(`${label} target is malformed`);
+    const identity=targeted ? `target:${value.target}` : `repository:${String(value.repository)}`;
+    if (repositories.has(identity)) blocked(`${label} must not repeat a target`);
+    repositories.add(identity);
     const encoded=canonicalJson(value);
     if (previous!==undefined && compareCanonicalText(previous,encoded)>=0) blocked(`${label} must be sorted, unique, and unambiguous`);
     previous=encoded;

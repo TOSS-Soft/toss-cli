@@ -13,6 +13,9 @@ import {createOperationIntent} from "../src/core/operations/plan.js";
 import {sha256Canonical} from "../src/contracts/acp.js";
 
 const SHA="a".repeat(64);
+const PUBLICATION=Object.freeze({package_name:"@toss-software/test",workflow:"publish.yml",required_assets:[]});
+const repositoryInput=() => ({default_branch:"main",project_owner:"TOSS-Soft",project_number:7,
+  publication:PUBLICATION});
 const command=argv => parseCoreCommand(argv);
 const source=(repository,revision="remote-1") => ({repository,revision,sha256:SHA});
 
@@ -35,7 +38,7 @@ function unbornControl() {
 function authorityFixture() {
   return {schema_version:"authority-record.v1",document_type:"authority-record",record_id:"AUTH-20260901-0001",actor:"approver",command:"init",targets:["TOSS-Soft/toss-os-control"],expected_revisions:[{repository:"TOSS-Soft/toss-os-control",revision:null}],policy_revision:"POLICY-0001",issued_at:"2026-09-01T07:00:00.000Z",expires_at:"2026-09-01T09:00:00.000Z",signature:{algorithm:"ed25519",key_id:"key-1",value:`${"A".repeat(86)}==`}};
 }
-function services({control=memoryControl(),github,readInput=async () => ({default_branch:"main",project_owner:"TOSS-Soft",project_number:7})}={}) {
+function services({control=memoryControl(),github,readInput=async () => repositoryInput()}={}) {
   const calls=[];
   const operations=Object.freeze({async execute(input) { calls.push(input); if (!input.command.options.apply || input.command.options.dryRun) return {schema_version:"operation-preview.v1",intent_id:"INTENT-20260901-0001",intent_sha256:SHA,command:input.command.name,operations:input.operations}; return {receipt_id:"RECEIPT-20260901-0001",status:"completed"}; },async verifyAuthorityFor() { return null; }});
   return Object.freeze({control,github,calls,operations,readInput,readAuthority:async () => null,clock:() => "2026-09-01T08:00:00.000Z",idGenerator:kind => kind==="intent" ? "INTENT-20260901-0001" : "RECEIPT-20260901-0001"});
@@ -64,13 +67,13 @@ function durableRegistry({onConfiguration,onReceipt}={}) {
 
 test("input reader accepts only closed local JSON or YAML documents",async t => {
   const cwd=await mkdtemp(join(tmpdir(),"toss-core-input-")); t.after(() => rm(cwd,{recursive:true,force:true}));
-  await writeFile(join(cwd,"repo.yaml"),"default_branch: main\nproject_owner: TOSS-Soft\nproject_number: 7\n");
+  await writeFile(join(cwd,"repo.yaml"),"default_branch: main\nproject_owner: TOSS-Soft\nproject_number: 7\npublication:\n  package_name: '@toss-software/test'\n  workflow: publish.yml\n  required_assets: []\n");
   await writeFile(join(cwd,"duplicate.yaml"),"default_branch: main\ndefault_branch: trunk\n"); await writeFile(join(cwd,"alias.yaml"),"base: &base {default_branch: main}\nvalue: *base\n"); await writeFile(join(cwd,"tag.yaml"),"value: !unsafe hello\n"); await writeFile(join(cwd,"invalid.json"),Buffer.from([0xff,0xfe])); await writeFile(join(cwd,"large.json"),`{"value":"${"x".repeat(1024)}"}`); await symlink(join(cwd,"repo.yaml"),join(cwd,"link.yaml"));
   await mkdir(join(cwd,"actual")); await writeFile(join(cwd,"actual","nested.yaml"),"value: ok\n"); await symlink(join(cwd,"actual"),join(cwd,"linked-parent"));
-  const reader=createCoreInputReader({cwd,maxBytes:128});
-  assert.deepEqual(await reader.readInput("repo.yaml"),{default_branch:"main",project_owner:"TOSS-Soft",project_number:7});
+  const reader=createCoreInputReader({cwd,maxBytes:256});
+  assert.deepEqual(await reader.readInput("repo.yaml"),repositoryInput());
   await assert.rejects(reader.readInput("duplicate.yaml"),/duplicate|unique/i); await assert.rejects(reader.readInput("alias.yaml"),/alias|closed|canonical/i); await assert.rejects(reader.readInput("tag.yaml"),/tag|closed|canonical/i); await assert.rejects(reader.readInput("invalid.json"),/UTF-8|closed/i); await assert.rejects(reader.readInput("large.json"),/maximum|large/i); await assert.rejects(reader.readInput("link.yaml"),/symbolic|symlink|follow/i); await assert.rejects(reader.readInput("linked-parent/nested.yaml"),/symbolic|symlink|follow/i); await assert.rejects(reader.readInput("../repo.yaml"),/safe relative/i); await assert.rejects(reader.readInput("actual/../repo.yaml"),/safe relative/i); await assert.rejects(reader.readInput("./repo.yaml"),/safe relative/i); await assert.rejects(reader.readInput("\\repo.yaml"),/safe relative/i);
-  const rootLink=join(cwd,"root-link"); await symlink(cwd,rootLink); const symlinkRootReader=createCoreInputReader({cwd:rootLink,maxBytes:128}); await assert.rejects(symlinkRootReader.readInput("repo.yaml"),/symbolic|symlink|directory/i);
+  const rootLink=join(cwd,"root-link"); await symlink(cwd,rootLink); const symlinkRootReader=createCoreInputReader({cwd:rootLink,maxBytes:256}); await assert.rejects(symlinkRootReader.readInput("repo.yaml"),/symbolic|symlink|directory/i);
 });
 test("init previews the complete bootstrap without remote or control writes",async () => {
   const github=githubFor(); const service=services({github,control:unbornControl()}); const result=await runInitCommand(command(["init"]),service);
@@ -89,7 +92,7 @@ test("repo add previews, registers arbitrary repositories, remains idempotent, a
 });
 test("repo add completes a persisted registration locally after restart without remote replay, preserves concurrent registrations, and maps configuration failures",async () => {
   const repository="TOSS-Soft/future-repository"; const other="TOSS-Soft/other"; const registrations=new Map([[repository,registrationSnapshot(repository)]]); const github=githubFor({registrations});
-  let injected=true; const durable=durableRegistry({onConfiguration(state) { if (injected) { injected=false; return new Error("disk failure"); } return null; }}); const firstServices={control:durable.control(),github,operations:durable.operations(github,() => "2026-09-01T08:00:00.000Z"),readInput:async () => ({default_branch:"main",project_owner:"TOSS-Soft",project_number:7}),readAuthority:async () => authorityFixture(),clock:() => "2026-09-01T09:00:00.000Z"};
+  let injected=true; const durable=durableRegistry({onConfiguration(state) { if (injected) { injected=false; return new Error("disk failure"); } return null; }}); const firstServices={control:durable.control(),github,operations:durable.operations(github,() => "2026-09-01T08:00:00.000Z"),readInput:async () => repositoryInput(),readAuthority:async () => authorityFixture(),clock:() => "2026-09-01T09:00:00.000Z"};
   await assert.rejects(runRepositoryCommand(command(["repo","add",repository,"--from","repo.yaml","--apply","--non-interactive","--authority","authority.json"]),firstServices),error => error?.exitCode===70);
   assert.equal(durable.state.intents.length,1); assert.equal(durable.state.receipts.length,1); const original=durable.state.intents[0].operations[0].payload.repository_config; const remoteCalls=github.calls.filter(call => call.method==="inspect" || call.method==="apply").length;
   const recoveryPreview=await runRepositoryCommand(command(["repo","add",repository,"--from","repo.yaml"]),firstServices); const dryRecovery=await runRepositoryCommand(command(["repo","add",repository,"--from","repo.yaml","--dry-run"]),firstServices); assert.equal(recoveryPreview.status,"recovery-preview"); assert.equal(dryRecovery.status,"recovery-preview"); assert.equal(Object.isFrozen(recoveryPreview),true); assert.equal(recoveryPreview.receipt.receipt_id,"RECEIPT-20260901-0099"); assert.deepEqual(recoveryPreview.configuration,original); assert.equal(github.calls.filter(call => call.method==="inspect" || call.method==="apply").length,remoteCalls);
@@ -103,13 +106,13 @@ test("repo add completes a persisted registration locally after restart without 
   assert.equal(confirms,1); assert.deepEqual(acceptedRecovery,confirmedRecovery); assert.equal(completed.status,"registered"); assert.equal(completed.receipt.receipt_id,"RECEIPT-20260901-0099"); assert.deepEqual(durable.state.repositories.get(repository),original); assert.equal(github.calls.filter(call => call.method==="inspect" || call.method==="apply").length,remoteCalls);
   for (const argv of [["repo","add",repository,"--from","repo.yaml"],["repo","add",repository,"--from","repo.yaml","--dry-run"],["repo","add",repository,"--from","repo.yaml","--apply","--non-interactive"]]) assert.equal((await runRepositoryCommand(command(argv),restarted)).status,"already-registered");
   const changedHistorical=githubFor({registrations:new Map([[repository,registrationSnapshot(repository,{node:"R_changed"})]])}); await assert.rejects(runRepositoryCommand(command(["repo","add",repository,"--from","repo.yaml"]),{...restarted,github:changedHistorical}),error => error?.exitCode===6);
-  const concurrent=durableRegistry({onReceipt(state) { const value={schema_version:"repository-config.v1",repository:other,repository_node_id:"R_other",default_branch:"main",active_release:null,project_item_id:"PVTI_other",project_fields:{status:"S",gate:"G"},registered_at:"2026-09-01T08:00:00.000Z"}; state.repositories.set(other,value); state.organization={...state.organization,repositories:[other]}; state.revision="head-2"; }}); const concurrentGithub=githubFor({registrations}); const concurrentServices={...firstServices,control:concurrent.control(),github:concurrentGithub,operations:concurrent.operations(concurrentGithub,() => "2026-09-01T08:00:00.000Z")}; await runRepositoryCommand(command(["repo","add",repository,"--from","repo.yaml","--apply","--non-interactive","--authority","authority.json"]),concurrentServices); assert.deepEqual(concurrent.state.organization.repositories,[repository,other]);
+  const concurrent=durableRegistry({onReceipt(state) { const value={schema_version:"repository-config.v1",repository:other,repository_node_id:"R_other",default_branch:"main",active_release:null,project_item_id:"PVTI_other",project_fields:{status:"S",gate:"G"},publication:PUBLICATION,registered_at:"2026-09-01T08:00:00.000Z"}; state.repositories.set(other,value); state.organization={...state.organization,repositories:[other]}; state.revision="head-2"; }}); const concurrentGithub=githubFor({registrations}); const concurrentServices={...firstServices,control:concurrent.control(),github:concurrentGithub,operations:concurrent.operations(concurrentGithub,() => "2026-09-01T08:00:00.000Z")}; await runRepositoryCommand(command(["repo","add",repository,"--from","repo.yaml","--apply","--non-interactive","--authority","authority.json"]),concurrentServices); assert.deepEqual(concurrent.state.organization.repositories,[repository,other]);
   const conflict=durableRegistry({onConfiguration() { const error=new Error("cas"); error.code="CONTROL_LEDGER_CONFLICT"; return error; }}); const conflictServices={...firstServices,control:conflict.control(),operations:conflict.operations(github,() => "2026-09-01T08:00:00.000Z")}; await assert.rejects(runRepositoryCommand(command(["repo","add",repository,"--from","repo.yaml","--apply","--non-interactive","--authority","authority.json"]),conflictServices),error => error?.exitCode===6);
 });
 test("repo recovery confirmation cannot mutate the configuration later passed to CAS",async () => {
   const repository="TOSS-Soft/future-repository"; const github=githubFor({registrations:new Map([[repository,registrationSnapshot(repository)]])});
   let failOnce=true; const durable=durableRegistry({onConfiguration() { if (failOnce) { failOnce=false; return new Error("injected local failure"); } return null; }});
-  const service={control:durable.control(),github,operations:durable.operations(github,() => "2026-09-01T08:00:00.000Z"),readInput:async () => ({default_branch:"main",project_owner:"TOSS-Soft",project_number:7}),readAuthority:async () => authorityFixture(),clock:() => "2026-09-01T09:00:00.000Z"};
+  const service={control:durable.control(),github,operations:durable.operations(github,() => "2026-09-01T08:00:00.000Z"),readInput:async () => repositoryInput(),readAuthority:async () => authorityFixture(),clock:() => "2026-09-01T09:00:00.000Z"};
   await assert.rejects(runRepositoryCommand(command(["repo","add",repository,"--from","repo.yaml","--apply","--non-interactive","--authority","authority.json"]),service),error => error?.exitCode===70);
   let rejectedMutations=0;
   const result=await runRepositoryCommand(command(["repo","add",repository,"--from","repo.yaml","--apply","--authority","authority.json"]),{...service,confirm:async preview => {
@@ -129,7 +132,7 @@ test("repo recovery confirmation cannot mutate the configuration later passed to
   assert.deepEqual(durable.state.organization.repositories,[repository]);
 });
 test("repo list is deterministic and read-only while later command families remain exit 69",async () => {
-  const github=githubFor(); const control=memoryControl(); await control.commitConfiguration({expectedHead:"head-0",files:{"config/organization.yaml":{...(await control.loadOrganization()),repositories:["TOSS-Soft/a","TOSS-Soft/z"]},"config/repositories/toss-soft%2Fa.yaml":{schema_version:"repository-config.v1",repository:"TOSS-Soft/a",repository_node_id:"R_a",default_branch:"main",active_release:null,project_item_id:"PVTI_a",project_fields:{status:"S",gate:"G"},registered_at:"2026-09-01T08:00:00.000Z"},"config/repositories/toss-soft%2Fz.yaml":{schema_version:"repository-config.v1",repository:"TOSS-Soft/z",repository_node_id:"R_z",default_branch:"main",active_release:null,project_item_id:"PVTI_z",project_fields:{status:"S",gate:"G"},registered_at:"2026-09-01T08:00:00.000Z"}}});
+  const github=githubFor(); const control=memoryControl(); await control.commitConfiguration({expectedHead:"head-0",files:{"config/organization.yaml":{...(await control.loadOrganization()),repositories:["TOSS-Soft/a","TOSS-Soft/z"]},"config/repositories/toss-soft%2Fa.yaml":{schema_version:"repository-config.v1",repository:"TOSS-Soft/a",repository_node_id:"R_a",default_branch:"main",active_release:null,project_item_id:"PVTI_a",project_fields:{status:"S",gate:"G"},publication:PUBLICATION,registered_at:"2026-09-01T08:00:00.000Z"},"config/repositories/toss-soft%2Fz.yaml":{schema_version:"repository-config.v1",repository:"TOSS-Soft/z",repository_node_id:"R_z",default_branch:"main",active_release:null,project_item_id:"PVTI_z",project_fields:{status:"S",gate:"G"},publication:PUBLICATION,registered_at:"2026-09-01T08:00:00.000Z"}}});
   const result=await runRepositoryCommand(command(["repo","list"]),services({control,github})); assert.deepEqual(result.repositories.map(value => value.repository),["TOSS-Soft/a","TOSS-Soft/z"]); assert.deepEqual(result.github_revisions,[{repository:"TOSS-Soft/a",revision:"github-current"},{repository:"TOSS-Soft/z",revision:"github-current"}]); assert.equal(control.writes.length,1); const {dispatchCoreCommand}=await import("../src/core/commands/router.js"); assert.equal((await dispatchCoreCommand(command(["feature","status","FEATURE-1"]),{})).exitCode,69);
 });
 test("runtime assembles only explicit own-data services and rejects malicious ports",() => {
@@ -175,5 +178,5 @@ test("core router dispatches only foundation handlers without importing later fa
   const dispatched=await dispatchCoreCommand(command(["init"]),{services:services({control:unbornControl(),github:githubFor()})});
   assert.equal(dispatched.exitCode,0);
   assert.equal(dispatched.result.data.command,"init");
-  assert.equal((await dispatchCoreCommand(command(["release","approve","REL-future"]),{services:{}})).exitCode,69);
+  assert.equal((await dispatchCoreCommand(command(["release","approve","REL-future"]),{services:{}})).exitCode,5);
 });

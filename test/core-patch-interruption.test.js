@@ -3,16 +3,23 @@ import {createHash} from "node:crypto";
 import test from "node:test";
 
 import {canonicalJson,sha256Canonical} from "../src/contracts/acp.js";
+import {authorityReference} from "../src/core/authority.js";
 import {dispatchCoreCommand,parseCoreCommand} from "../src/core/commands/router.js";
 import {runPatchInterruptionStep} from "../src/core/commands/release.js";
 import {CoreConflictError,CoreValidationError} from "../src/core/errors.js";
-import {createOperationIntent} from "../src/core/operations/plan.js";
+import {createOperationIntent,validateOperationIntent} from "../src/core/operations/plan.js";
+import {validatePersistedOperationIntent} from "../src/core/operations/intent-contract.js";
 import {createOperationRunner} from "../src/core/operations/runner.js";
 import {updateManagedReviewBlock} from "../src/core/review/body.js";
+import {
+  patchCompletionSource,projectPatchCompletionTransaction,
+} from "../src/core/release/patch-completion-projector.js";
 import {
   completePatchInterruption,patchVersionFor,planPatchInterruption,
 } from "../src/core/release/patch.js";
 import {programStatusResult,releaseStatusResult} from "../src/core/release/operations.js";
+import {approvalOperations,publicationOperations,publicationSource,
+  releasePublicationQuery} from "../src/core/release/verification.js";
 import {transitionRepositoryRelease} from "../src/core/release/state.js";
 
 const CONTROL_REPOSITORY="TOSS-Soft/toss-os-control";
@@ -50,7 +57,8 @@ function featureProgram({repository=REPOSITORY,programId="TOSS-OS-R0001",
     schema_version:"repository-release.v1",release_id:releaseId(programId,repository),
     program_id:programId,repository,phase:"ACTIVE",revision:"REV-0002",
     version:"2.2.0",milestone:"v2.2.0",branch:"release/v2.2.0",
-    release_pr_intent:releasePrIntent("2.2.0",programId,repository),scope:[feature],publication_evidence:null,
+    release_pr_intent:releasePrIntent("2.2.0",programId,repository),scope:[feature],approval:null,
+    publication_evidence:null,
     transitions:[{event:"ACTIVATE",source_phase:"DRAFT",target_phase:"ACTIVE",timestamp:NOW,
       source_receipt:"RECEIPT-20260903-0001"}],
   };
@@ -76,6 +84,7 @@ function repositoryConfiguration() {
   return {schema_version:"repository-config.v1",repository:REPOSITORY,
     repository_node_id:"R_toss_cli",default_branch:"main",active_release:null,
     project_item_id:"PVTI_toss_cli",project_fields:{status:"Status",gate:"Gate"},
+    publication:{package_name:"@toss-software/cli",workflow:"publish.yml",required_assets:[]},
     registered_at:"2026-09-01T08:00:00.000Z"};
 }
 
@@ -108,13 +117,45 @@ function issueStartSnapshot(work=bugWork(),base=null,affected="2.1.2",patch="2.1
 }
 
 function publicationEvidence() {
-  return {schema_version:"publication-evidence.v1",evidence_id:"PUB-20260903-0001",
+  const evidence={schema_version:"publication-evidence.v1",evidence_id:"PUB-20260903-0002",
     release_id:"REL-published-2.1.2",repository:REPOSITORY,version:"2.1.2",
     expected_revision:MAIN_SHA,tag:{name:"v2.1.2",target_revision:MAIN_SHA},
     package:{name:"@toss-software/cli",version:"2.1.2",integrity:"sha512-dGVzdA=="},
     github_release:{release_id:"R_2_1_2",tag_name:"v2.1.2",target_revision:MAIN_SHA,
       draft:false,prerelease:false,assets:[{name:"toss-cli-2.1.2.tgz",sha256:"c".repeat(64)}]},
-    evidence_sha256:"d".repeat(64),source_receipt:"RECEIPT-20260903-0002",verified_at:NOW};
+    source_receipt:"RECEIPT-20260903-0002",verified_at:NOW};
+  return {...evidence,evidence_sha256:sha256Canonical(evidence)};
+}
+
+function patchApproval(release,manifestRevision) {
+  const commits=[{revision:PATCH_SHA,author:"implementation-author",
+    committer:"release-committer"}];
+  const result={schema_version:"review-result.v1",review_id:"REVIEW-20260903-0055",
+    repository:release.repository,pull_request_number:55,reviewed_revision:PATCH_SHA,
+    reviewer:{identity:"release-reviewer",role:"independent-reviewer"},verdict:"APPROVED",
+    freshness:"CURRENT",findings:[],unresolved:[],
+    verification_evidence:["test:patch-release"],follow_up_issues:[],
+    reviewed_at:NOW,recorded_at:NOW};
+  return {schema_version:"release-approval.v1",source_receipt:"RECEIPT-20260903-0201",
+    authority:{record_id:"AUTH-20260903-0001",sha256:"d".repeat(64)},
+    program_id:release.program_id,release_id:release.release_id,
+    manifest_revision:manifestRevision,manifest_sha256:"e".repeat(64),
+    pull_request:{number:55,revision:"release-pr-55",head:release.branch,
+      head_sha:PATCH_SHA,base:"main",base_sha:MAIN_SHA,base_revision:"base-main-55"},
+    review:{revision:"release-review-revision-55",result,
+      formal_review:{state:"APPROVED",review_id:result.review_id,
+        reviewed_revision:PATCH_SHA,revision:"formal-release-review-55"},
+      implementation_identity:{base_revision:MAIN_SHA,revision:PATCH_SHA,
+        pull_request_author:"implementation-author",commit_count:commits.length,
+        commits_sha256:sha256Canonical(commits),commits}},
+    scope:[{id:release.scope[0],revision:"issue-55-1",project_item_id:"PVTI_55",
+      project_revision:"project-item-55",status:"Done",gate:"RELEASE_APPROVAL_REQUIRED"}],
+    required_checks:["build"],
+    checks:[{name:"build",revision:"release-check-build-55",head_sha:PATCH_SHA,
+      conclusion:"SUCCESS"}],
+    rules_revision:"rules-55",policy_revision:"POLICY-0001",
+    publication:{package_name:"@toss-software/cli",workflow:"publish.yml",
+      required_assets:["toss-cli-2.1.3.tgz"]},merge_result_revision:PATCH_SHA,approved_at:NOW};
 }
 
 function patchSnapshotBody(state,program,work=bugWork(),affected="2.1.2") {
@@ -156,7 +197,8 @@ function activePatchProgram(paused,scope=BUG,{programId="TOSS-OS-R0002",
     program_id:programId,repository,phase:"ACTIVE",revision:"REV-0002",
     version:"2.1.3",milestone:"v2.1.3",branch:"release/v2.1.3",
     release_pr_intent:{intent_id:intentId,head:"release/v2.1.3",base:"main",
-      expected_head_revision:MAIN_SHA,recorded_at:NOW},scope:[scope],publication_evidence:null,
+      expected_head_revision:MAIN_SHA,recorded_at:NOW},scope:[scope],approval:null,
+    publication_evidence:null,
     transitions:[{event:"ACTIVATE",source_phase:"DRAFT",target_phase:"ACTIVE",
       timestamp:NOW,source_receipt:"RECEIPT-20260903-0101"}]};
   return {schema_version:"release-program.v1",program_id:programId,phase:"ACTIVE",
@@ -259,22 +301,92 @@ function assignedBugWork(patch) {
 }
 
 function releasedPatchProgram(active) {
-  let release=active.repository_releases[0];
-  for (const [event,receipt] of [["SCOPE_DONE","0200"],["APPROVE","0201"]]) {
-    release=transitionRepositoryRelease(release,{event,expected_revision:release.revision,
-      timestamp:NOW,source_receipt:`RECEIPT-20260903-${receipt}`,activation:null});
-  }
-  const publication={...publicationEvidence(),release_id:release.release_id,version:"2.1.3",
-    expected_revision:PATCH_SHA,tag:{name:"v2.1.3",target_revision:PATCH_SHA},
-    package:{...publicationEvidence().package,version:"2.1.3"},
-    github_release:{...publicationEvidence().github_release,tag_name:"v2.1.3",
-      target_revision:PATCH_SHA}};
-  release={...release,publication_evidence:publication};
-  release=transitionRepositoryRelease(release,{event:"VERIFY_PUBLICATION",
-    expected_revision:release.revision,timestamp:NOW,
-    source_receipt:"RECEIPT-20260903-0202",activation:null});
-  return {publication,program:{...active,phase:"RELEASED",revision:"REV-0004",
-    repository_releases:[release],updated_at:NOW}};
+  let release=transitionRepositoryRelease(active.repository_releases[0],{
+    event:"SCOPE_DONE",expected_revision:active.repository_releases[0].revision,
+    timestamp:NOW,source_receipt:"RECEIPT-20260903-0200",activation:null});
+  const ready={...active,phase:"ACTIVE",revision:"REV-0002",
+    repository_releases:[release],updated_at:NOW};
+  const pausedId=active.interrupts.program_id;
+  const pausedReleaseId=active.interrupts.repository_release_id;
+  const pausedRelease={...featureProgram().repository_releases[0],release_id:pausedReleaseId,
+    revision:active.interrupts.paused_release_revision,phase:"PAUSED",
+    transitions:[...featureProgram().repository_releases[0].transitions,
+      {event:"PAUSE_FOR_PATCH",source_phase:"ACTIVE",target_phase:"PAUSED",timestamp:NOW,
+        source_receipt:"RECEIPT-20260903-0100"}]};
+  const paused={...featureProgram(),program_id:pausedId,phase:"PAUSED",revision:"REV-0003",
+    repository_releases:[pausedRelease],updated_at:NOW};
+  const suffix=Number(active.program_id.match(/([0-9]+)$/u)[1]);
+  const approvalReceipt=`RECEIPT-20260903-${20000+suffix*10+1}`;
+  const publicationReceipt=`RECEIPT-20260903-${20000+suffix*10+2}`;
+  const authority={schema_version:"authority-record.v1",document_type:"authority-record",
+    record_id:`AUTH-20260903-${20000+suffix*10+1}`,actor:"release-manager",
+    command:"release.approve",targets:[REPOSITORY],
+    expected_revisions:[{repository:REPOSITORY,revision:"repository-release-55"}],
+    policy_revision:"POLICY-0001",issued_at:"2026-09-03T09:00:00.000Z",
+    expires_at:"2026-09-03T11:00:00.000Z",
+    signature:{algorithm:"ed25519",key_id:"release-key",value:`${"A".repeat(86)}==`}};
+  const approvalState={revision:`control-approval-${suffix}`,organization:organization(),
+    repositories:[repositoryConfiguration()],programs:[paused,ready],intents:[],receipts:[]};
+  const review=patchApproval(release,ready.revision).review;
+  const githubApproval={kind:"release-approval",control_revision:approvalState.revision,
+    project:{id:"PVT_TOSS_OS_2",revision:"project-release-55"},
+    repository:{repository:REPOSITORY,revision:"repository-release-55",
+      rules_revision:"rules-55",required_checks:["build"],workflow_revision:"workflow-55"},
+    pull_request:{number:55,revision:"release-pr-55",head:release.branch,head_sha:PATCH_SHA,
+      base:"main",base_sha:MAIN_SHA,base_revision:"base-main-55",state:"OPEN",draft:false},
+    scope:[{id:BUG,revision:"issue-55-release",project_item_id:"PVTI_bug_55",
+      project_revision:"project-bug-release",status:"Done",gate:"RELEASE_APPROVAL_REQUIRED"}],
+    review,checks:[{name:"build",revision:"release-check-build-55",head_sha:PATCH_SHA,
+      conclusion:"SUCCESS"}]};
+  const approvalSnapshot={...githubApproval,source:{repository:CONTROL_REPOSITORY,
+    revision:approvalState.revision,
+    sha256:sha256Canonical({control:approvalState,github:githubApproval})}};
+  const approved=approvalOperations({planningState:approvalState,programId:ready.program_id,
+    releaseId:release.release_id,snapshot:approvalSnapshot,receiptId:approvalReceipt,
+    authority,clock:() => NOW});
+  const approvalIntent=createOperationIntent({intent_id:`INTENT-20260903-${20000+suffix*10+1}`,
+    created_at:NOW,command:"release.approve",policy_revision:"POLICY-0001",
+    source:approved.source,authority:authorityReference(authority),
+    planned_receipt_id:approvalReceipt,operations:approved.operations});
+  const approvalTransaction={schema_version:"operation-receipt.v1",
+    document_type:"operation-receipt",receipt_id:approvalReceipt,intent_id:approvalIntent.intent_id,
+    intent_sha256:sha256Canonical(approvalIntent),created_at:NOW,status:"completed",
+    observed_revisions:approvalIntent.operations.map(operation => ({
+      operation_id:operation.operation_id,repository:operation.repository,
+      revision:operation.payload.kind==="release-program-manifest" ? approved.program.revision
+        : operation.payload.kind==="release-pull-request-merge" ? PATCH_SHA
+          : operation.payload.kind==="release-publication-workflow" ? PATCH_SHA
+            : operation.expected_revision}))};
+  const publicationState={...approvalState,revision:`control-publication-${suffix}`,
+    programs:[paused,approved.program],intents:[approvalIntent],receipts:[approvalTransaction]};
+  const githubPublication={kind:"release-publication",
+    control_revision:publicationState.revision,repository_revision:"repository-published-55",
+    publication:{tag:{name:"v2.1.3",target_revision:PATCH_SHA},
+      package:{name:"@toss-software/cli",version:"2.1.3",integrity:"sha512-dGVzdA=="},
+      github_release:{release_id:"R_2_1_3",tag_name:"v2.1.3",target_revision:PATCH_SHA,
+        draft:false,prerelease:false,assets:[]}},
+    planning:{candidates:[],completed:[BUG],repositories:[{
+      repository:REPOSITORY,latest_published_version:"2.1.3"}]}};
+  const publicationQuery=releasePublicationQuery(publicationState,ready.program_id,
+    release.release_id);
+  const publicationSnapshot={...githubPublication,
+    source:publicationSource(publicationQuery,githubPublication)};
+  const published=publicationOperations({planningState:publicationState,
+    programId:ready.program_id,releaseId:release.release_id,snapshot:publicationSnapshot,
+    receiptId:publicationReceipt,clock:() => NOW});
+  const publicationIntent=createOperationIntent({
+    intent_id:`INTENT-20260903-${20000+suffix*10+2}`,created_at:NOW,
+    command:"release.approve",policy_revision:"POLICY-0001",source:published.source,
+    authority:null,planned_receipt_id:publicationReceipt,operations:published.operations});
+  const publicationTransaction={schema_version:"operation-receipt.v1",
+    document_type:"operation-receipt",receipt_id:publicationReceipt,
+    intent_id:publicationIntent.intent_id,intent_sha256:sha256Canonical(publicationIntent),
+    created_at:NOW,status:"completed",observed_revisions:publicationIntent.operations.map(
+      operation => ({operation_id:operation.operation_id,repository:operation.repository,
+        revision:operation.payload.kind==="release-program-manifest-set"
+          ? operation.payload.resulting_set_sha256 : operation.expected_revision}))};
+  return {publication:published.evidence,program:published.program,nextProgram:published.nextProgram,
+    intents:[approvalIntent,publicationIntent],receipts:[approvalTransaction,publicationTransaction]};
 }
 
 function completionReviewResult(freshness="CURRENT") {
@@ -333,15 +445,18 @@ function completionSnapshot({patch,paused,publication,ancestor=false,drifted=fal
 
 function completionFixture() {
   const paused=pausedFeatureProgram();
-  const {program:patch,publication}=releasedPatchProgram(activePatchProgram(paused));
-  return {paused,patch,publication};
+  const released=releasedPatchProgram(activePatchProgram(paused));
+  return {paused,patch:released.program,publication:released.publication,
+    next:released.nextProgram,intents:released.intents,receipts:released.receipts};
 }
 
 function rehashCompletionSnapshot(snapshot) {
-  snapshot.source.sha256=sha256Canonical({control:{revision:snapshot.query.control_revision,
-    organization:snapshot.query.organization,repositories:snapshot.query.repositories,
-    programs:snapshot.query.programs,ledger_sha256:snapshot.query.ledger_sha256},
-  github:snapshot.observation});
+  const sourceQuery=snapshot.observation.repository.reconciliation
+    .current_default_is_ancestor_of_feature_release
+    ? snapshot.query : {...snapshot.query,
+      phase_evidence:{reconciliation:null,review_gate:null}};
+  snapshot.source.sha256=sha256Canonical({control:sourceQuery,
+    github:snapshot.observation});
   return snapshot;
 }
 
@@ -559,10 +674,10 @@ function ruledCompletionSnapshot({patch,paused,publication,currentMain=LATER_MAI
       work_item_ids:assigned.map(item => item.work.item.id),items:assigned},
     checks:{head_sha:checksState==="NOT_STARTED" ? null : featureHead,
       state:checksState,required:["ci"]}};
+  const sourceQuery=reconciled ? query : {...query,
+    phase_evidence:{reconciliation:null,review_gate:null}};
   return {source:{repository:CONTROL_REPOSITORY,revision:"control-completion",
-    sha256:sha256Canonical({control:{revision:query.control_revision,
-      organization:query.organization,repositories:query.repositories,programs:query.programs,
-      ledger_sha256:query.ledger_sha256},github:observation})},query,observation,
+    sha256:sha256Canonical({control:sourceQuery,github:observation})},query,observation,
   receipt_id:"RECEIPT-20260903-0399",timestamp:REREVIEWED_AT};
 }
 
@@ -826,6 +941,14 @@ test("exported patch planners reject hostile request wrappers without invoking t
       assert.throws(() => operation(input),error => error?.exitCode===5);
     }
   }
+  for (const input of [proxy,accessor]) {
+    assert.throws(() => projectPatchCompletionTransaction(input,{}),
+      error => error?.exitCode===5);
+  }
+  let deep={};
+  for (let index=0;index<70;index+=1) deep={value:deep};
+  assert.throws(() => projectPatchCompletionTransaction(deep,{}),
+    error => error?.exitCode===5);
   assert.equal(traps,0);
 });
 
@@ -849,9 +972,11 @@ test("exported patch command helper rejects hostile bug snapshots without invoki
 
 test("public status queries give a stateless adapter the complete pinned manifest set",async () => {
   const paused=pausedFeatureProgram();
-  const released=releasedPatchProgram(activePatchProgram(paused)).program;
+  const published=releasedPatchProgram(activePatchProgram(paused));
+  const released=published.program;
   const state={revision:"control-status-public",organization:organization(),
-    repositories:[repositoryConfiguration()],programs:[paused,released],intents:[],receipts:[]};
+    repositories:[repositoryConfiguration()],programs:[paused,released,published.nextProgram],
+    intents:published.intents,receipts:published.receipts};
   const queries=[];
   const services={
     control:{async loadReleasePlanningState() { return structuredClone(state); }},
@@ -875,7 +1000,7 @@ test("public status queries give a stateless adapter the complete pinned manifes
   assert.deepEqual(program.result.data.programs.map(value => value.id),[paused.program_id]);
   assert.equal(program.result.data.programs[0].tracks[0].patch_link,released.program_id);
 
-  const expectedIds=[paused.program_id,released.program_id];
+  const expectedIds=[paused.program_id,released.program_id,published.nextProgram.program_id];
   assert.equal(queries.length,2);
   for (const query of queries) {
     assert.deepEqual(query.programs.map(value => value.program_id),expectedIds);
@@ -923,8 +1048,9 @@ test("program status rejects multiple manifest-derived links for one paused feat
   const patch=activePatchProgram(paused);
   const base={revision:"control-status-2",organization:organization(),
     repositories:[repositoryConfiguration()],programs:[paused,patch],intents:[],receipts:[]};
-  const second=releasedPatchProgram(activePatchProgram(paused,BUG,{programId:"TOSS-OS-R0003"})).program;
-  const ambiguous={...base,revision:"control-status-3",programs:[paused,patch,second]};
+  const published=releasedPatchProgram(activePatchProgram(paused,BUG,{programId:"TOSS-OS-R0003"}));
+  const ambiguous={...base,revision:"control-status-3",programs:[paused,patch,published.program],
+    intents:published.intents,receipts:published.receipts};
   assert.throws(() => programStatusResult({planningState:ambiguous,programId:paused.program_id,
     snapshot:linkedStatusSnapshot(ambiguous,"program-status",paused,patch.program_id)}),
   error => error instanceof CoreConflictError && /ambiguous/iu.test(error.message));
@@ -955,9 +1081,11 @@ test("a resumed patch link must retain the exact historical pause result revisio
   });
   const resumed={...paused,phase:"ACTIVE",revision:"REV-0004",
     repository_releases:[resumedRelease],updated_at:REREVIEWED_AT};
-  const released=releasedPatchProgram(activePatchProgram(paused)).program;
+  const published=releasedPatchProgram(activePatchProgram(paused));
+  const released=published.program;
   const valid={revision:"control-status-6",organization:organization(),
-    repositories:[repositoryConfiguration()],programs:[resumed,released],intents:[],receipts:[]};
+    repositories:[repositoryConfiguration()],programs:[resumed,released],
+    intents:published.intents,receipts:published.receipts};
   const status=programStatusResult({planningState:valid,programId:released.program_id,
     snapshot:linkedStatusSnapshot(valid,"program-status",released,resumed.program_id)});
   assert.equal(status.programs[0].tracks[0].patch_link,resumed.program_id);
@@ -1609,6 +1737,109 @@ test("every patch completion phase binds control source and persists paused-prog
     publication,snapshot:foreign}),CoreConflictError);
 });
 
+test("R64 patch projector exactly binds reconciliation review-check and resume transactions",async () => {
+  const {paused,patch,publication}=completionFixture();
+  const cases=[
+    {name:"reconciliation",snapshot:completionSnapshot({patch,paused,publication}),
+      mutate(operations) {
+        const operation=operations.find(value =>
+          value.payload.kind==="release-patch-reconcile");
+        operation.payload.source_sha=operation.payload.source_sha==="9".repeat(40)
+          ? "8".repeat(40) : "9".repeat(40);
+      }},
+    {name:"review-stale",snapshot:completionSnapshot({patch,paused,publication,ancestor:true,
+      featureHead:MERGED_SHA}),mutate(operations) {
+      const operation=operations.find(value =>
+        value.payload.kind==="release-patch-review-stale" &&
+        value.resource==="pull_request");
+      operation.payload.body=`${operation.payload.body}\nsubstituted`;
+    }},
+    {name:"review-check",snapshot:completionSnapshot({patch,paused,publication,ancestor:true,
+      featureHead:MERGED_SHA}),mutate(operations) {
+      const operation=operations.find(value => value.payload.kind==="release-check-request");
+      operation.payload.head_sha=operation.payload.head_sha==="9".repeat(40)
+        ? "8".repeat(40) : "9".repeat(40);
+    }},
+    {name:"resume",snapshot:completionSnapshot({patch,paused,publication,ancestor:true,
+      featureHead:MERGED_SHA,reviewFreshness:"STALE",checksState:"PENDING"}),
+    mutate(operations) {
+      const program=operations.find(operation =>
+        operation.payload.kind==="release-program-manifest").payload.program;
+      program.updated_at=program.updated_at==="2026-09-03T10:59:59.000Z"
+        ? "2026-09-03T10:59:58.000Z" : "2026-09-03T10:59:59.000Z";
+    }},
+  ];
+  for (const [index,{name,snapshot,mutate}] of cases.entries()) {
+    const descriptor={observation:snapshot.observation,receipt_id:snapshot.receipt_id,
+      timestamp:snapshot.timestamp};
+    const decision=projectPatchCompletionTransaction(snapshot.query,descriptor);
+    assert.equal(canonicalJson(decision.source),
+      canonicalJson(patchCompletionSource(decision.query,snapshot.observation)),name);
+    const input={intent_id:`INTENT-20260903-${String(900+index).padStart(4,"0")}`,
+      created_at:snapshot.timestamp,command:"release.approve",policy_revision:"POLICY-0001",
+      source:decision.source,authority:null,planned_receipt_id:snapshot.receipt_id,
+      operations:decision.operations};
+    const intent=createOperationIntent(input);
+    const aggregate=intent.operations.find(operation =>
+      operation.payload.kind==="release-patch-completion-precondition");
+    assert.equal(canonicalJson(aggregate.payload.descriptor),canonicalJson(descriptor),name);
+
+    const substituted=structuredClone(decision.operations);
+    mutate(substituted);
+    assert.throws(() => createOperationIntent({...input,operations:substituted}),
+      CoreValidationError,name);
+    assert.throws(() => createOperationIntent({...input,source:{
+      ...decision.source,sha256:"f".repeat(64),
+    }}),CoreValidationError,`${name} source`);
+    const reordered=structuredClone(intent);
+    [reordered.operations[0],reordered.operations[1]]=
+      [reordered.operations[1],reordered.operations[0]];
+    assert.throws(() => validateOperationIntent(reordered),CoreValidationError,
+      `${name} operation order`);
+
+    let calls=0;
+    const called=async () => { calls+=1; return null; };
+    const runner=createOperationRunner({control:{head:called,findIntent:called,
+      findReceipt:called,commitIntent:called,commitReceipt:called,
+      inspectReleaseProgramOperation:called,commitReleaseProgramReceipt:called},
+    github:{snapshot:called,inspect:called,apply:called},authorityRegistry:{keys:[]},
+    clock:() => snapshot.timestamp,idGenerator:() => "RECEIPT-20260903-9999",
+    policyRevision:() => "POLICY-0001"});
+    const raw=structuredClone(intent);
+    mutate(raw.operations);
+    await assert.rejects(runner.apply(raw),CoreValidationError,name);
+    const rawSource=structuredClone(intent);
+    rawSource.source.sha256="e".repeat(64);
+    await assert.rejects(runner.apply(rawSource),CoreValidationError,`${name} source runner`);
+    assert.equal(calls,0,`${name} must reject before every port`);
+  }
+  const simultaneous=completionSnapshot({patch,paused,publication,ancestor:true,
+    featureHead:MERGED_SHA,reviewFreshness:"STALE",checksState:"PENDING"});
+  simultaneous.query.phase_evidence.review_gate.receipt.created_at=
+    simultaneous.query.phase_evidence.reconciliation.receipt.created_at;
+  rehashCompletionSnapshot(simultaneous);
+  assert.throws(() => projectPatchCompletionTransaction(simultaneous.query,{
+    observation:simultaneous.observation,receipt_id:simultaneous.receipt_id,
+    timestamp:simultaneous.timestamp,
+  }),CoreConflictError,"review gate must strictly postdate reconciliation");
+  const legacy=cases[0].snapshot;
+  const legacyOperations=completePatchInterruption({patchProgram:patch,pausedProgram:paused,
+    publication,snapshot:legacy});
+  const legacyIntent={schema_version:"operation-intent.v1",document_type:"operation-intent",
+    intent_id:"INTENT-20260903-0999",
+    created_at:legacy.timestamp,command:"release.approve",policy_revision:"POLICY-0001",
+    source:legacy.source,authority:null,planned_receipt_id:legacy.receipt_id,
+    operations:legacyOperations.map((operation,index) => ({operation_id:`OP-${String(index+1)
+      .padStart(4,"0")}`,...operation}))};
+  assert.doesNotThrow(() => validatePersistedOperationIntent(legacyIntent));
+  assert.throws(() => validateOperationIntent(legacyIntent),CoreValidationError);
+  assert.throws(() => createOperationIntent({intent_id:legacyIntent.intent_id,
+    created_at:legacyIntent.created_at,command:legacyIntent.command,
+    policy_revision:legacyIntent.policy_revision,source:legacyIntent.source,
+    authority:legacyIntent.authority,planned_receipt_id:legacyIntent.planned_receipt_id,
+    operations:legacyOperations}),CoreValidationError);
+});
+
 test("patch completion reconciles and reruns review gates before it can resume",async () => {
   const activeFeature=featureProgram();
   const pausedRelease=transitionRepositoryRelease(activeFeature.repository_releases[0],{
@@ -2045,10 +2276,10 @@ test("completed review-gate evidence rejects extra operations and inexact receip
     assert.throws(() => completePatchInterruption({patchProgram:patch,pausedProgram:paused,
       publication,snapshot}),error => error?.exitCode===5 || error instanceof CoreConflictError,label);
   };
-  assertRejected("manifest CAS",rewriteCompletedPhaseEvidence(reviewGate,operations => {
+  assert.throws(() => rewriteCompletedPhaseEvidence(reviewGate,operations => {
     operations.find(operation => operation.payload.kind==="release-program-manifest")
       .expected_revision="REV-9999";
-  }));
+  }),error => error?.exitCode===5,"manifest CAS");
   assertRejected("extra stale operation",rewriteCompletedPhaseEvidence(reviewGate,operations => {
     operations.push({resource:"issue",action:"update",repository:REPOSITORY,
       expected_revision:"issue-extra",payload:{kind:"release-patch-review-stale"}});
@@ -2056,6 +2287,323 @@ test("completed review-gate evidence rejects extra operations and inexact receip
   const duplicated=structuredClone(reviewGate);
   duplicated.receipt.observed_revisions.push(duplicated.receipt.observed_revisions[0]);
   assertRejected("duplicate receipt observation",duplicated);
+});
+
+test("public release approve advances one Released patch completion phase with null authority",async () => {
+  const {paused,patch,publication,next,intents,receipts}=completionFixture();
+  const state={revision:"control-completion",organization:organization(),
+    repositories:[repositoryConfiguration()],programs:[paused,patch,next],intents,receipts};
+  const ruled=ruledCompletionSnapshot({patch,paused,publication,reconciled:false});
+  let request=null;
+  let snapshots=0;
+  const result=await dispatchCoreCommand(parseCoreCommand(["release","approve",
+    `${REPOSITORY}@2.1.3`]),{services:{
+    control:{async loadReleasePlanningState() { return state; }},
+    github:{async snapshot(query) {
+      snapshots+=1;
+      assert.equal(query.kind,"patch-completion");
+      assert.equal(canonicalJson(query.programs),canonicalJson(state.programs));
+      assert.equal(canonicalJson(query.phase_evidence),
+        canonicalJson({reconciliation:null,review_gate:null}));
+      return ruled.observation;
+    }},
+    operations:{reserveReceiptId() { return "RECEIPT-20260903-0399"; },
+      async execute(value) { request=value; return {status:"preview"}; }},
+    clock:() => REREVIEWED_AT,
+  }});
+  assert.equal(result.exitCode,0,JSON.stringify(result));
+  assert.equal(snapshots,1);
+  assert.equal(request.authority,null);
+  assert.equal(request.receipt_id,"RECEIPT-20260903-0399");
+  assert.deepEqual(request.operations.map(operation => operation.payload.kind),[
+    "release-patch-completion-precondition","release-default-branch-precondition",
+    "release-branch-precondition","release-patch-reconcile","release-program-manifest",
+  ]);
+});
+
+test("public release approve restarts patch reconciliation review gate and resume one receipt at a time",async () => {
+  const {paused,patch,publication,next,intents,receipts}=completionFixture();
+  const baseState={revision:"control-completion-1",organization:organization(),
+    repositories:[repositoryConfiguration()],programs:[paused,patch,next],intents,receipts};
+  const evidenceForRequest=(request,{intentId,receiptId,createdAt}) => {
+    const intent=createOperationIntent({intent_id:intentId,created_at:createdAt,
+      command:"release.approve",policy_revision:"POLICY-0001",source:request.source,
+      authority:null,planned_receipt_id:receiptId,
+      operations:request.operations.map(({operation_id:_,...operation}) => operation)});
+    return {intent,receipt:{schema_version:"operation-receipt.v1",
+      document_type:"operation-receipt",receipt_id:receiptId,intent_id:intent.intent_id,
+      intent_sha256:sha256Canonical(intent),created_at:createdAt,status:"completed",
+      observed_revisions:intent.operations.map(operation => ({operation_id:operation.operation_id,
+        repository:operation.repository,revision:operation.payload.kind==="release-program-manifest"
+          ? operation.payload.program.revision : operation.expected_revision}))}};
+  };
+  const invoke=async ({state,receiptId,at,observation}) => {
+    let request=null;
+    let snapshots=0;
+    let reservations=0;
+    const result=await dispatchCoreCommand(parseCoreCommand(["release","approve",
+      `${REPOSITORY}@2.1.3`]),{services:{
+      control:{async loadReleasePlanningState() { return state; }},
+      github:{async snapshot(query) { snapshots+=1; return observation(query); }},
+      operations:{reserveReceiptId() { reservations+=1; return receiptId; },
+        async execute(value) { request=value; return {status:"preview"}; }},clock:() => at,
+    }});
+    assert.equal(result.exitCode,0,JSON.stringify(result));
+    return {request,result,snapshots,reservations};
+  };
+  const rejectBeforeSnapshot=async (state,{expectedReservations=1,expectedExitCode=6}={}) => {
+    let snapshots=0;
+    let reservations=0;
+    const result=await dispatchCoreCommand(parseCoreCommand(["release","approve",
+      `${REPOSITORY}@2.1.3`]),{services:{
+      control:{async loadReleasePlanningState() { return state; }},
+      github:{async snapshot() { snapshots+=1; throw new Error("must reject causality first"); }},
+      operations:{reserveReceiptId() { reservations+=1;
+        return "RECEIPT-20260903-0780"; },async execute() {
+        throw new Error("must not execute"); }},clock:() => "2026-09-03T11:20:00.000Z",
+    }});
+    assert.equal(result.exitCode,expectedExitCode,JSON.stringify(result));
+    assert.equal(snapshots,0);
+    assert.equal(reservations,expectedReservations);
+  };
+  const legacyGateFor=({gate,reference,intentId,receiptId,createdAt}) => {
+    const result=structuredClone(gate);
+    result.intent.intent_id=intentId;
+    result.intent.planned_receipt_id=receiptId;
+    result.intent.created_at=createdAt;
+    const aggregate=result.intent.operations.find(operation =>
+      operation.payload.kind==="release-patch-completion-precondition");
+    delete aggregate.payload.descriptor;
+    aggregate.payload.query.phase_evidence={reconciliation:reference,review_gate:null};
+    result.receipt={...result.receipt,receipt_id:receiptId,intent_id:intentId,
+      created_at:createdAt,intent_sha256:sha256Canonical(result.intent)};
+    return result;
+  };
+  const observed=(query,options) => {
+    const ruled=ruledCompletionSnapshot({patch,paused,publication,
+      phaseEvidence:query.phase_evidence,...options});
+    return {...ruled.observation,control_revision:query.control_revision};
+  };
+
+  const first=await invoke({state:baseState,receiptId:"RECEIPT-20260903-0795",
+    at:RECONCILED_AT,observation:query => observed(query,{reconciled:false})});
+  assert.equal(first.request.operations.some(operation =>
+    operation.payload.kind==="release-patch-reconcile"),true);
+  const reconciliation=evidenceForRequest(first.request,{intentId:"INTENT-20260903-0795",
+    receiptId:"RECEIPT-20260903-0795",createdAt:RECONCILED_AT});
+  const afterReconciliation={...baseState,revision:"control-completion-2",
+    intents:[...baseState.intents,reconciliation.intent],
+    receipts:[...baseState.receipts,reconciliation.receipt]};
+
+  const second=await invoke({state:afterReconciliation,receiptId:"RECEIPT-20260903-0794",
+    at:REVIEW_GATE_AT,observation:query => observed(query,{reconciled:true,
+      checksState:"NOT_STARTED"})});
+  assert.equal(second.request.operations.some(operation =>
+    operation.payload.kind==="release-patch-reconcile"),false);
+  assert.equal(second.request.operations.some(operation =>
+    operation.payload.kind==="release-patch-review-stale"),true);
+  assert.equal(second.request.operations.some(operation =>
+    operation.payload.kind==="release-check-request"),true);
+  const reviewGate=evidenceForRequest(second.request,{intentId:"INTENT-20260903-0791",
+    receiptId:"RECEIPT-20260903-0794",createdAt:REVIEW_GATE_AT});
+  const afterReviewGate={...baseState,revision:"control-completion-3",
+    intents:[...baseState.intents,reconciliation.intent,reviewGate.intent],
+    receipts:[...baseState.receipts,reconciliation.receipt,reviewGate.receipt]};
+  const feature=paused.repository_releases[0];
+  const third=await invoke({state:afterReviewGate,receiptId:"RECEIPT-20260903-0793",
+    at:REREVIEWED_AT,observation:query => observed(query,{reconciled:false,
+      currentMain:SECOND_MERGED_SHA})});
+  assert.equal(third.request.operations.some(operation =>
+    operation.payload.kind==="release-patch-reconcile"),true);
+  const resetQuery=third.request.operations.find(operation =>
+    operation.payload.kind==="release-patch-completion-precondition").payload.query;
+  assert.equal(canonicalJson(resetQuery.phase_evidence),
+    canonicalJson({reconciliation:null,review_gate:null}));
+  const secondReconciliation=evidenceForRequest(third.request,{
+    intentId:"INTENT-20260903-0794",receiptId:"RECEIPT-20260903-0793",
+    createdAt:REREVIEWED_AT});
+  const afterSecondReconciliation={...baseState,revision:"control-completion-4",
+    intents:[...baseState.intents,reconciliation.intent,reviewGate.intent,
+      secondReconciliation.intent],
+    receipts:[...baseState.receipts,reconciliation.receipt,reviewGate.receipt,
+      secondReconciliation.receipt]};
+
+  const equalRoots=structuredClone(afterSecondReconciliation);
+  equalRoots.receipts.find(receipt =>
+    receipt.intent_id===secondReconciliation.intent.intent_id).created_at=RECONCILED_AT;
+  await rejectBeforeSnapshot(equalRoots);
+
+  const overlappingChains=structuredClone(afterSecondReconciliation);
+  overlappingChains.receipts.find(receipt =>
+    receipt.intent_id===reviewGate.intent.intent_id).created_at=
+      "2026-09-03T10:40:00.000Z";
+  await rejectBeforeSnapshot(overlappingChains);
+
+  const invalidReceiptTime=structuredClone(afterReconciliation);
+  invalidReceiptTime.receipts.find(receipt =>
+    receipt.intent_id===reconciliation.intent.intent_id).created_at=
+      "2026-02-31T10:10:00.000Z";
+  await rejectBeforeSnapshot(invalidReceiptTime,{expectedReservations:0,expectedExitCode:5});
+
+  const simultaneousGate=structuredClone(afterReviewGate);
+  simultaneousGate.receipts.find(receipt =>
+    receipt.intent_id===reviewGate.intent.intent_id).created_at=RECONCILED_AT;
+  await rejectBeforeSnapshot(simultaneousGate);
+
+  const danglingGate=legacyGateFor({gate:reviewGate,reference:secondReconciliation,
+    intentId:"INTENT-20260903-0781",receiptId:"RECEIPT-20260903-0781",
+    createdAt:"2026-09-03T10:50:00.000Z"});
+  await rejectBeforeSnapshot({...afterReconciliation,revision:"control-completion-dangling",
+    intents:[...afterReconciliation.intents,danglingGate.intent],
+    receipts:[...afterReconciliation.receipts,danglingGate.receipt]});
+
+  const crossLinkedGate=legacyGateFor({gate:reviewGate,reference:secondReconciliation,
+    intentId:"INTENT-20260903-0782",receiptId:"RECEIPT-20260903-0782",
+    createdAt:"2026-09-03T10:50:00.000Z"});
+  await rejectBeforeSnapshot({...afterSecondReconciliation,
+    revision:"control-completion-cross-linked",
+    intents:[...afterSecondReconciliation.intents,crossLinkedGate.intent],
+    receipts:[...afterSecondReconciliation.receipts,crossLinkedGate.receipt]});
+
+  const duplicateGate=legacyGateFor({gate:reviewGate,reference:reconciliation,
+    intentId:"INTENT-20260903-0783",receiptId:"RECEIPT-20260903-0783",
+    createdAt:"2026-09-03T10:30:00.000Z"});
+  await rejectBeforeSnapshot({...afterReviewGate,revision:"control-completion-duplicate-gate",
+    intents:[...afterReviewGate.intents,duplicateGate.intent],
+    receipts:[...afterReviewGate.receipts,duplicateGate.receipt]});
+  const postReconciliationItems=[
+    assignedWorkItem(feature,{number:10,head:EPIC_HEAD,kind:"epic",
+      reviewId:"REVIEW-20260903-0800",recordedAt:"2026-09-03T10:40:00.000Z"}),
+    assignedWorkItem(feature,{number:11,head:CHILD_HEAD,
+      reviewId:"REVIEW-20260903-0801",recordedAt:"2026-09-03T10:40:00.000Z"}),
+    assignedWorkItem(feature,{number:12,head:"5".repeat(40),hasPullRequest:false}),
+  ];
+
+  const fourth=await invoke({state:afterSecondReconciliation,
+    receiptId:"RECEIPT-20260903-0792",at:"2026-09-03T10:50:00.000Z",
+    observation:query => {
+      assert.equal(query.phase_evidence.reconciliation.intent.intent_id,
+        secondReconciliation.intent.intent_id);
+      assert.equal(query.phase_evidence.review_gate,null);
+      return observed(query,{reconciled:true,currentMain:SECOND_MERGED_SHA,
+        items:postReconciliationItems,checksState:"NOT_STARTED"});
+    }});
+  assert.equal(fourth.request.operations.some(operation =>
+    operation.payload.kind==="release-patch-reconcile"),false);
+  const secondReviewGate=evidenceForRequest(fourth.request,{
+    intentId:"INTENT-20260903-0792",receiptId:"RECEIPT-20260903-0792",
+    createdAt:"2026-09-03T10:50:00.000Z"});
+  const afterSecondReviewGate={...baseState,revision:"control-completion-5",
+    intents:[...baseState.intents,reconciliation.intent,reviewGate.intent,
+      secondReconciliation.intent,secondReviewGate.intent],
+    receipts:[...baseState.receipts,reconciliation.receipt,reviewGate.receipt,
+      secondReconciliation.receipt,secondReviewGate.receipt]};
+  const resumedItems=[
+    assignedWorkItem(feature,{number:10,head:EPIC_HEAD,kind:"epic",
+      reviewId:"REVIEW-20260903-0900",recordedAt:"2026-09-03T11:00:00.000Z"}),
+    assignedWorkItem(feature,{number:11,head:CHILD_HEAD,
+      reviewId:"REVIEW-20260903-0901",recordedAt:"2026-09-03T11:00:00.000Z"}),
+    assignedWorkItem(feature,{number:12,head:"5".repeat(40),hasPullRequest:false}),
+  ];
+  const fifth=await invoke({state:afterSecondReviewGate,
+    receiptId:"RECEIPT-20260903-0791",at:"2026-09-03T11:10:00.000Z",
+    observation:query => observed(query,{reconciled:true,currentMain:SECOND_MERGED_SHA,
+      items:resumedItems,checksState:"PENDING"})});
+  assert.deepEqual(fifth.request.operations.map(operation => operation.payload.kind),[
+    "release-patch-completion-precondition","release-default-branch-precondition",
+    "release-branch-precondition","release-program-manifest",
+  ]);
+  const resumed=fifth.request.operations.find(operation =>
+    operation.payload.kind==="release-program-manifest").payload.program;
+  assert.equal(resumed.phase,"ACTIVE");
+  const resume=evidenceForRequest(fifth.request,{intentId:"INTENT-20260903-0793",
+    receiptId:"RECEIPT-20260903-0791",createdAt:"2026-09-03T11:10:00.000Z"});
+  const terminalState={...baseState,revision:"control-completion-6",
+    programs:[resumed,patch,next],intents:[...baseState.intents,reconciliation.intent,
+      reviewGate.intent,secondReconciliation.intent,secondReviewGate.intent,resume.intent],
+    receipts:[...baseState.receipts,reconciliation.receipt,reviewGate.receipt,
+      secondReconciliation.receipt,secondReviewGate.receipt,resume.receipt]};
+  const terminal=await invoke({state:terminalState,receiptId:"RECEIPT-20260903-0790",
+    at:"2026-09-03T11:20:00.000Z",
+    observation:() => { throw new Error("terminal replay must not snapshot"); }});
+  assert.equal(terminal.result.result.data.status,"already-released");
+  assert.equal(terminal.snapshots,0);
+  assert.equal(terminal.reservations,0);
+  assert.equal(terminal.request,null);
+
+  const evolvedNext={...next,updated_at:"2026-09-03T11:15:00.000Z"};
+  const evolvedTerminal={...terminalState,revision:"control-completion-7",
+    programs:[resumed,patch,evolvedNext]};
+  const evolvedReplay=await invoke({state:evolvedTerminal,
+    receiptId:"RECEIPT-20260903-0786",at:"2026-09-03T11:20:00.000Z",
+    observation:() => { throw new Error("terminal replay must ignore unrelated evolution"); }});
+  assert.equal(evolvedReplay.result.result.data.status,"already-released");
+  assert.equal(evolvedReplay.snapshots,0);
+  assert.equal(evolvedReplay.reservations,0);
+  assert.equal(evolvedReplay.request,null);
+
+  const simultaneousTerminal=structuredClone(terminalState);
+  const simultaneousResume=simultaneousTerminal.intents.find(intent =>
+    intent.intent_id===resume.intent.intent_id);
+  const simultaneousAggregate=simultaneousResume.operations.find(operation =>
+    operation.payload.kind==="release-patch-completion-precondition");
+  simultaneousAggregate.payload.query.phase_evidence.review_gate.receipt.created_at=
+    simultaneousAggregate.payload.query.phase_evidence.reconciliation.receipt.created_at;
+  simultaneousResume.source=patchCompletionSource(simultaneousAggregate.payload.query,
+    simultaneousAggregate.payload.descriptor.observation);
+  simultaneousTerminal.receipts.find(receipt =>
+    receipt.intent_id===resume.intent.intent_id).intent_sha256=sha256Canonical(simultaneousResume);
+  let simultaneousSnapshots=0;
+  let simultaneousReservations=0;
+  const simultaneousRejected=await dispatchCoreCommand(parseCoreCommand(["release","approve",
+    `${REPOSITORY}@2.1.3`]),{services:{
+    control:{async loadReleasePlanningState() { return simultaneousTerminal; }},
+    github:{async snapshot() { simultaneousSnapshots+=1; return {}; }},
+    operations:{reserveReceiptId() { simultaneousReservations+=1;
+      return "RECEIPT-20260903-0788"; },async execute() {
+      throw new Error("must not execute"); }},clock:() => "2026-09-03T11:20:00.000Z",
+  }});
+  assert.equal(simultaneousRejected.exitCode,6,JSON.stringify(simultaneousRejected));
+  assert.equal(simultaneousSnapshots,0);
+  assert.equal(simultaneousReservations,0);
+
+  const duplicateTerminal={...terminalState,
+    intents:[...terminalState.intents,duplicateGate.intent],
+    receipts:[...terminalState.receipts,duplicateGate.receipt]};
+  let duplicateTerminalSnapshots=0;
+  let duplicateTerminalReservations=0;
+  const duplicateTerminalRejected=await dispatchCoreCommand(parseCoreCommand([
+    "release","approve",`${REPOSITORY}@2.1.3`,
+  ]),{services:{control:{async loadReleasePlanningState() { return duplicateTerminal; }},
+    github:{async snapshot() { duplicateTerminalSnapshots+=1; return {}; }},
+    operations:{reserveReceiptId() { duplicateTerminalReservations+=1;
+      return "RECEIPT-20260903-0787"; },async execute() {
+      throw new Error("must not execute"); }},clock:() => "2026-09-03T11:20:00.000Z"}});
+  assert.equal(duplicateTerminalRejected.exitCode,6,JSON.stringify(duplicateTerminalRejected));
+  assert.equal(duplicateTerminalSnapshots,0);
+  assert.equal(duplicateTerminalReservations,0);
+
+  const forgedTerminal=structuredClone(terminalState);
+  const forgedResume=forgedTerminal.intents.at(-1);
+  const forgedAggregate=forgedResume.operations.find(operation =>
+    operation.payload.kind==="release-patch-completion-precondition");
+  forgedAggregate.payload.query.patch_program.updated_at="2026-09-03T11:09:59.000Z";
+  forgedAggregate.payload.query.programs.find(program =>
+    program.program_id===patch.program_id).updated_at="2026-09-03T11:09:59.000Z";
+  forgedTerminal.receipts.at(-1).intent_sha256=sha256Canonical(forgedResume);
+  let forgedSnapshots=0;
+  let forgedReservations=0;
+  const rejected=await dispatchCoreCommand(parseCoreCommand(["release","approve",
+    `${REPOSITORY}@2.1.3`]),{services:{
+    control:{async loadReleasePlanningState() { return forgedTerminal; }},
+    github:{async snapshot() { forgedSnapshots+=1; return {}; }},
+    operations:{reserveReceiptId() { forgedReservations+=1;
+      return "RECEIPT-20260903-0789"; },async execute() { throw new Error("must not execute"); }},
+    clock:() => "2026-09-03T11:20:00.000Z",
+  }});
+  assert.equal(rejected.exitCode,6);
+  assert.equal(forgedSnapshots,0);
+  assert.equal(forgedReservations,0);
 });
 
 test("post-reconciliation CURRENT exemption requires strict time and a new review identity",() => {

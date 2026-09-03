@@ -96,6 +96,7 @@ test("verify actions and release precondition kinds are bidirectionally closed",
     schema_version:"repository-config.v1",repository:"TOSS-Soft/toss-cli",
     repository_node_id:"R_cli",default_branch:"main",active_release:null,
     project_item_id:"PVTI_cli",project_fields:{status:"Status",gate:"Gate"},
+    publication:{package_name:"@toss-software/cli",workflow:"publish.yml",required_assets:[]},
     registered_at:"2026-09-01T08:00:00.000Z",
   }],programs:[]};
   const validPlan={resource:"project",action:"verify",repository:null,

@@ -261,6 +261,8 @@ test("runCoreCli bootstrap persists control state before the real executable rea
     default_branch:"main",
     project_owner:"TOSS-Soft",
     project_number:7,
+    publication:{package_name:"@toss-software/example",workflow:"publish.yml",
+      required_assets:[]},
   }),"utf8");
   const registered=await runProgrammatic([
     "repo","add",registeredRepository,"--control","control","--from","repository.json",
@@ -293,7 +295,10 @@ test("interactive init and repo add confirm their exact previews before any writ
   const repoAuthority=signer.record({record_id:"AUTH-20260901-0002",command:"repo.add",targets:[repository],expected_revisions:[{repository,revision:"repo-1"}]});
   await writeFile(join(root,"init-authority.json"),JSON.stringify(initAuthority),"utf8");
   await writeFile(join(root,"repo-authority.json"),JSON.stringify(repoAuthority),"utf8");
-  await writeFile(join(root,"repository.json"),JSON.stringify({default_branch:"main",project_owner:"TOSS-Soft",project_number:7}),"utf8");
+  await writeFile(join(root,"repository.json"),JSON.stringify({default_branch:"main",
+    project_owner:"TOSS-Soft",project_number:7,
+    publication:{package_name:"@toss-software/example",workflow:"publish.yml",
+      required_assets:[]}}),"utf8");
   const events=[]; const prompts=[];
   const provider=runtimeProvider({github:fakeGitHub(events),authorityRegistry:signer.registry,prompt:async request => { prompts.push(request); assert.equal(request.kind,"confirm-apply"); assert.equal(request.preview.schema_version,"operation-preview.v1"); assert.equal(request.preview.command,request.command.name); return true; }});
   const initialized=await runProgrammatic(["init","--control","control","--apply","--authority","init-authority.json","--json"],{cwd:root,runtimeProvider:provider});
@@ -347,7 +352,7 @@ test("interactive decline receives the exact preview and performs no init or rep
   const initAuthority=signer.record({record_id:"AUTH-20260901-0001",command:"init",targets:["PVT_org","TOSS-Soft/toss-os-control"],expected_revisions:[{repository:"TOSS-Soft/toss-os-control",revision:null},{repository:null,revision:"project-1"}]});
   const repository="TOSS-Soft/toss-example";
   const repoAuthority=signer.record({record_id:"AUTH-20260901-0002",command:"repo.add",targets:[repository],expected_revisions:[{repository,revision:"repo-1"}]});
-  await writeFile(join(root,"init-authority.json"),JSON.stringify(initAuthority),"utf8"); await writeFile(join(root,"repo-authority.json"),JSON.stringify(repoAuthority),"utf8"); await writeFile(join(root,"repository.json"),JSON.stringify({default_branch:"main",project_owner:"TOSS-Soft",project_number:7}),"utf8");
+  await writeFile(join(root,"init-authority.json"),JSON.stringify(initAuthority),"utf8"); await writeFile(join(root,"repo-authority.json"),JSON.stringify(repoAuthority),"utf8"); await writeFile(join(root,"repository.json"),JSON.stringify({default_branch:"main",project_owner:"TOSS-Soft",project_number:7,publication:{package_name:"@toss-software/example",workflow:"publish.yml",required_assets:[]}}),"utf8");
   const events=[]; const declined=[];
   const declineProvider=runtimeProvider({github:fakeGitHub(events),authorityRegistry:signer.registry,prompt:async request => { declined.push(request.preview); return false; }});
   const initDeclined=await runProgrammatic(["init","--control","control","--apply","--authority","init-authority.json","--json"],{cwd:root,runtimeProvider:declineProvider});

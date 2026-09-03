@@ -71,6 +71,7 @@
       "test/core-cli-boundary.test.js",
       "test/core-epic-lifecycle.test.js",
       "test/core-patch-interruption.test.js",
+      "test/core-release-completion.test.js",
       "test/design-cli-runtime.test.js",
       "test/gate-cli-round1.test.js",
       "test/performance-cli.test.js",

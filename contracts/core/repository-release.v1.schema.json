@@ -5,7 +5,7 @@
   "description": "A closed revision-bound release track for one independently versioned repository.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "release_id", "program_id", "repository", "phase", "revision", "version", "milestone", "branch", "release_pr_intent", "scope", "publication_evidence", "transitions"],
+  "required": ["schema_version", "release_id", "program_id", "repository", "phase", "revision", "version", "milestone", "branch", "release_pr_intent", "scope", "approval", "publication_evidence", "transitions"],
   "properties": {
     "schema_version": {"const": "repository-release.v1"},
     "release_id": {"$ref": "#/$defs/release_id"},
@@ -23,6 +23,12 @@
       "uniqueItems": true,
       "items": {"$ref": "#/$defs/work_item_id"}
     },
+    "approval": {
+      "oneOf": [
+        {"type": "null"},
+        {"$ref": "#/$defs/approval"}
+      ]
+    },
     "publication_evidence": {
       "oneOf": [
         {"type": "null"},
@@ -35,6 +41,11 @@
     }
   },
   "allOf": [
+    {
+      "if": {"properties": {"phase": {"enum": ["PUBLISHING", "RELEASED"]}}},
+      "then": {"properties": {"approval": {"$ref": "#/$defs/approval"}}},
+      "else": {"properties": {"approval": {"type": "null"}}}
+    },
     {
       "if": {"properties": {"phase": {"const": "DRAFT"}}},
       "then": {
@@ -87,6 +98,133 @@
         "recorded_at": {"type": "string", "format": "rfc3339-date-time"}
       }
     },
+    "authority_reference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record_id", "sha256"],
+      "properties": {
+        "record_id": {"type": "string", "pattern": "^AUTH-[0-9]{8}-[0-9]{4,}$"},
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      }
+    },
+    "approval_pr": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["number", "revision", "head", "head_sha", "base", "base_sha", "base_revision"],
+      "properties": {
+        "number": {"type": "integer", "minimum": 1},
+        "revision": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"},
+        "head": {"$ref": "#/$defs/release_branch"},
+        "head_sha": {"$ref": "#/$defs/commit_revision"},
+        "base": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"},
+        "base_sha": {"$ref": "#/$defs/commit_revision"},
+        "base_revision": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"}
+      }
+    },
+    "approval_review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["revision", "result", "formal_review", "implementation_identity"],
+      "properties": {
+        "revision": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"},
+        "result": {"$ref": "https://toss.software/schemas/core/review-result.v1.schema.json"},
+        "formal_review": {"$ref": "#/$defs/formal_review"},
+        "implementation_identity": {"$ref": "#/$defs/implementation_identity"}
+      }
+    },
+    "formal_review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state", "review_id", "reviewed_revision", "revision"],
+      "properties": {
+        "state": {"const": "APPROVED"},
+        "review_id": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"},
+        "reviewed_revision": {"$ref": "#/$defs/commit_revision"},
+        "revision": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"}
+      }
+    },
+    "implementation_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["base_revision", "revision", "pull_request_author", "commit_count", "commits_sha256", "commits"],
+      "properties": {
+        "base_revision": {"$ref": "#/$defs/commit_revision"},
+        "revision": {"$ref": "#/$defs/commit_revision"},
+        "pull_request_author": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"},
+        "commit_count": {"type": "integer", "minimum": 1},
+        "commits_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "commits": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/implementation_commit"}}
+      }
+    },
+    "implementation_commit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["revision", "author", "committer"],
+      "properties": {
+        "revision": {"$ref": "#/$defs/commit_revision"},
+        "author": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"},
+        "committer": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"}
+      }
+    },
+    "approval_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "revision", "head_sha", "conclusion"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"},
+        "revision": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"},
+        "head_sha": {"$ref": "#/$defs/commit_revision"},
+        "conclusion": {"const": "SUCCESS"}
+      }
+    },
+    "approval_scope_item": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "revision", "project_item_id", "project_revision", "status", "gate"],
+      "properties": {
+        "id": {"$ref": "#/$defs/work_item_id"},
+        "revision": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"},
+        "project_item_id": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"},
+        "project_revision": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"},
+        "status": {"const": "Done"},
+        "gate": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"}
+      }
+    },
+    "publication_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["package_name", "workflow", "required_assets"],
+      "properties": {
+        "package_name": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"},
+        "workflow": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"},
+        "required_assets": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"}}
+      }
+    },
+    "approval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "source_receipt", "authority", "program_id", "release_id", "manifest_revision", "manifest_sha256", "pull_request", "scope", "review", "required_checks", "checks", "rules_revision", "policy_revision", "publication", "merge_result_revision", "approved_at"],
+      "properties": {
+        "schema_version": {"const": "release-approval.v1"},
+        "source_receipt": {"$ref": "#/$defs/receipt_id"},
+        "authority": {"$ref": "#/$defs/authority_reference"},
+        "program_id": {"$ref": "#/$defs/program_id"},
+        "release_id": {"$ref": "#/$defs/release_id"},
+        "manifest_revision": {"$ref": "#/$defs/revision"},
+        "manifest_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "pull_request": {"$ref": "#/$defs/approval_pr"},
+        "scope": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/approval_scope_item"}},
+        "review": {"$ref": "#/$defs/approval_review"},
+        "required_checks": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"}},
+        "checks": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/approval_check"}},
+        "rules_revision": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"},
+        "policy_revision": {"type": "string", "pattern": "^POLICY-[0-9]{4,}$"},
+        "publication": {"$ref": "#/$defs/publication_policy"},
+        "merge_result_revision": {"$ref": "#/$defs/commit_revision"},
+        "approved_at": {"type": "string", "format": "rfc3339-date-time"}
+      }
+    },
+    "commit_revision": {"type": "string", "pattern": "^[a-f0-9]{40}$"},
     "transition": {
       "type": "object",
       "additionalProperties": false,

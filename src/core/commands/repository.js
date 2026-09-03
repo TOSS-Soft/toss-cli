@@ -1,3 +1,5 @@
+import {canonicalJson} from "../../contracts/acp.js";
+import {compareCanonicalText} from "../canonical-order.js";
 import {repositoryPath} from "../control/store.js";
 import {operationPreview} from "../operations/plan.js";
 import {CoreBlockedError,CoreConflictError,CoreInternalError,CoreValidationError} from "../errors.js";
@@ -10,8 +12,16 @@ function canonicalRepository(value) {
 
 function repositoryInput(value) {
   const input=closedData(value,"repository input");
-  exact(input,["default_branch","project_owner","project_number"],"repository input");
-  if (typeof input.default_branch!=="string" || !/\S/u.test(input.default_branch) || typeof input.project_owner!=="string" || !/\S/u.test(input.project_owner) || !Number.isInteger(input.project_number) || input.project_number<1) throw new CoreValidationError("Repository input is malformed");
+  exact(input,["default_branch","project_owner","project_number","publication"],"repository input");
+  exact(input.publication,["package_name","workflow","required_assets"],"repository publication policy");
+  if (typeof input.default_branch!=="string" || !/\S/u.test(input.default_branch) || typeof input.project_owner!=="string" || !/\S/u.test(input.project_owner) || !Number.isInteger(input.project_number) || input.project_number<1 ||
+      typeof input.publication.package_name!=="string" || !/\S/u.test(input.publication.package_name) ||
+      typeof input.publication.workflow!=="string" || !/\S/u.test(input.publication.workflow) ||
+      input.publication.package_name.trim()!==input.publication.package_name ||
+      input.publication.workflow.trim()!==input.publication.workflow ||
+      !Array.isArray(input.publication.required_assets) || input.publication.required_assets.some((asset,index) =>
+        typeof asset!=="string" || !/\S/u.test(asset) || asset.trim()!==asset ||
+        (index>0 && compareCanonicalText(input.publication.required_assets[index-1],asset)>=0))) throw new CoreValidationError("Repository input is malformed");
   return input;
 }
 
@@ -32,11 +42,11 @@ function registration(value,repository) {
 }
 
 function desiredConfig(repository,input,snapshot,clock) {
-  return Object.freeze({schema_version:"repository-config.v1",repository,repository_node_id:snapshot.repository.node_id,default_branch:input.default_branch,active_release:null,project_item_id:snapshot.repository.project_item_id,project_fields:Object.freeze({status:snapshot.project.fields.status,gate:snapshot.project.fields.gate}),registered_at:clock()});
+  return Object.freeze({schema_version:"repository-config.v1",repository,repository_node_id:snapshot.repository.node_id,default_branch:input.default_branch,active_release:null,project_item_id:snapshot.repository.project_item_id,project_fields:Object.freeze({status:snapshot.project.fields.status,gate:snapshot.project.fields.gate}),publication:input.publication,registered_at:clock()});
 }
 
 function sameRegistration(existing,desired) {
-  return existing.repository===desired.repository && existing.repository_node_id===desired.repository_node_id && existing.default_branch===desired.default_branch && existing.active_release===desired.active_release && existing.project_item_id===desired.project_item_id && existing.project_fields.status===desired.project_fields.status && existing.project_fields.gate===desired.project_fields.gate;
+  return existing.repository===desired.repository && existing.repository_node_id===desired.repository_node_id && existing.default_branch===desired.default_branch && existing.active_release===desired.active_release && existing.project_item_id===desired.project_item_id && existing.project_fields.status===desired.project_fields.status && existing.project_fields.gate===desired.project_fields.gate && canonicalJson(existing.publication)===canonicalJson(desired.publication);
 }
 
 async function add(command,services) {
