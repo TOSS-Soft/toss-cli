@@ -186,7 +186,8 @@ function assertAggregateQuery(payload) {
   if (payload.kind==="release-patch-completion-precondition") {
     exactOwnKeys(query,["kind","control_revision","control_repository","organization",
       "repositories","programs","ledger_sha256","patch_program","paused_program",
-      "publication","repository_configuration","project"],"release patch completion query");
+      "publication","repository_configuration","project","phase_evidence"],
+    "release patch completion query");
     if (query.kind!=="patch-completion") {
       throw new CoreValidationError("Invalid core contract operation-intent.v1: release patch completion query kind is malformed");
     }
@@ -210,6 +211,16 @@ function assertAggregateQuery(payload) {
     assertCanonicalIdentities(query.programs.map(value => value.program_id),
       "release patch completion program ids");
     exactOwnKeys(query.project,["node_id","number"],"release patch completion Project");
+    exactOwnKeys(query.phase_evidence,["reconciliation","review_gate"],
+      "release patch completion phase evidence");
+    for (const [phase,evidence] of Object.entries(query.phase_evidence)) {
+      if (evidence===null) continue;
+      exactOwnKeys(evidence,["intent","receipt"],`release patch completion ${phase} evidence`);
+      nestedDocument(evidence.intent,"operation-intent.v1",
+        `release patch completion ${phase} intent`);
+      nestedDocument(evidence.receipt,"operation-receipt.v1",
+        `release patch completion ${phase} receipt`);
+    }
     if (query.patch_program.interrupts?.program_id!==query.paused_program.program_id ||
         query.publication.repository!==query.repository_configuration.repository ||
         query.control_repository!==query.organization.control_repository ||

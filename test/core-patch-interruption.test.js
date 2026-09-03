@@ -4,6 +4,7 @@ import test from "node:test";
 
 import {canonicalJson,sha256Canonical} from "../src/contracts/acp.js";
 import {dispatchCoreCommand,parseCoreCommand} from "../src/core/commands/router.js";
+import {runPatchInterruptionStep} from "../src/core/commands/release.js";
 import {CoreConflictError,CoreValidationError} from "../src/core/errors.js";
 import {createOperationIntent} from "../src/core/operations/plan.js";
 import {createOperationRunner} from "../src/core/operations/runner.js";
@@ -11,6 +12,7 @@ import {updateManagedReviewBlock} from "../src/core/review/body.js";
 import {
   completePatchInterruption,patchVersionFor,planPatchInterruption,
 } from "../src/core/release/patch.js";
+import {programStatusResult,releaseStatusResult} from "../src/core/release/operations.js";
 import {transitionRepositoryRelease} from "../src/core/release/state.js";
 
 const CONTROL_REPOSITORY="TOSS-Soft/toss-os-control";
@@ -22,6 +24,14 @@ const NOW="2026-09-03T10:00:00.000Z";
 const MAIN_SHA="a".repeat(40);
 const PATCH_SHA="f".repeat(40);
 const MERGED_SHA="9".repeat(40);
+const EPIC_HEAD="1".repeat(40);
+const CHILD_HEAD="2".repeat(40);
+const FEATURE_RELEASE_HEAD="3".repeat(40);
+const LATER_MAIN_SHA="4".repeat(40);
+const SECOND_MERGED_SHA="8".repeat(40);
+const RECONCILED_AT="2026-09-03T10:10:00.000Z";
+const REVIEW_GATE_AT="2026-09-03T10:20:00.000Z";
+const REREVIEWED_AT="2026-09-03T10:30:00.000Z";
 
 function releaseId(programId,repository=REPOSITORY) {
   return `REL-${programId}-${createHash("sha256").update(repository,"utf8").digest("hex")}`;
@@ -161,6 +171,31 @@ function activePatchProgram(paused,scope=BUG,{programId="TOSS-OS-R0002",
       paused_release_revision:paused.repository_releases[0].revision},created_at:NOW,updated_at:NOW};
 }
 
+function linkedStatusSnapshot(state,kind,program,patchLink) {
+  const release=program.repository_releases[0];
+  const body={kind,control_revision:state.revision,
+    program_revisions:[{program_id:program.program_id,revision:program.revision}],
+    project:{id:"PVT_TOSS_OS_2",revision:"project-status-1"},
+    repositories:[{program_id:program.program_id,repository:release.repository,
+      repository_revision:"repository-status-1",release_id:release.release_id,
+      release_revision:release.revision,
+      milestone:{title:release.milestone,state:"OPEN",revision:"milestone-status-1"},
+      branch:{name:release.branch,base_branch:"main",head_sha:MAIN_SHA,
+        revision:"branch-status-1"},release_pull_request:null,
+      scope:program.selected_scope.filter(value => release.scope.includes(value.epic_id)),
+      gates:[],checks:[],patch_link:patchLink}]};
+  return {...body,source:{repository:CONTROL_REPOSITORY,revision:state.revision,
+    sha256:sha256Canonical({control:state,github:body})}};
+}
+
+async function startIssueWithSnapshot(snapshot) {
+  return dispatchCoreCommand(parseCoreCommand(["issue","start",BUG]),{services:{
+    github:{async snapshot() { return snapshot; }},
+    operations:{async execute() { throw new Error("must not execute"); }},
+    clock:() => NOW,
+  }});
+}
+
 function completedIntent(program,previewOperations,{receiptId="RECEIPT-20260903-0100",
   intentId="INTENT-20260903-0100",sourceRevision="control-1"}={}) {
   const operations=previewOperations.map(({operation_id:_operationId,...operation}) => operation);
@@ -242,37 +277,26 @@ function completionReviewWork(featureHead,reviewResult) {
 
 function completionSnapshot({patch,paused,publication,ancestor=false,drifted=false,
   featureHead=MAIN_SHA,reviewFreshness="CURRENT",checksState="NOT_STARTED"}) {
-  const release=patch.repository_releases[0];
   const feature=paused.repository_releases[0];
-  const programs=[paused,patch].sort((left,right) => left.program_id<right.program_id ? -1 : 1);
-  const query={kind:"patch-completion",control_revision:"control-completion",
-    control_repository:CONTROL_REPOSITORY,organization:organization(),
-    repositories:[repositoryConfiguration()],programs,ledger_sha256:"6".repeat(64),
-    patch_program:patch,paused_program:paused,publication,
-    repository_configuration:repositoryConfiguration(),project:organization().project};
-  const reviewResult=completionReviewResult(reviewFreshness);
-  const reviewWork=completionReviewWork(featureHead,reviewResult);
-  const observation={kind:"patch-completion",control_revision:"control-completion",
-    project:{id:"PVT_TOSS_OS_2",revision:"project-completion"},
-    patch:{program_id:patch.program_id,program_revision:patch.revision,
-      release_id:release.release_id,release_revision:release.revision},
-    feature:{program_id:paused.program_id,program_revision:paused.revision,
-      release_id:feature.release_id,release_revision:feature.revision},
-    repository:{repository:REPOSITORY,revision:"repository-completion",
-      default_branch:{name:"main",revision:"main-completion",head_sha:PATCH_SHA},
-      feature_branch:{name:feature.branch,revision:"feature-completion",head_sha:featureHead},
-      reconciliation:{patch_commit:PATCH_SHA,patch_commit_is_ancestor:ancestor,drifted}},
-    reviews:[{work_item_id:FEATURE,pull_request_number:10,
-      pull_request_revision:"pr-10-completion",head_sha:featureHead,
-      body:updateManagedReviewBlock("Human context.",reviewResult),
-      review_result:reviewResult,work:reviewWork}],
-    checks:{head_sha:checksState==="NOT_STARTED" ? null : featureHead,
-      state:checksState,required:["ci"]}};
-  return {source:{repository:CONTROL_REPOSITORY,revision:"control-completion",
-    sha256:sha256Canonical({control:{revision:query.control_revision,
-      organization:query.organization,repositories:query.repositories,programs:query.programs,
-      ledger_sha256:query.ledger_sha256},github:observation})},query,observation,
-  receipt_id:"RECEIPT-20260903-0300",timestamp:NOW};
+  const current=assignedWorkItem(feature,{number:10,head:featureHead,kind:"epic",
+    reviewId:"REVIEW-20260903-0300",recordedAt:NOW});
+  const items=[reviewFreshness==="STALE"
+    ? assignedWorkItem(feature,{number:10,head:featureHead,kind:"epic",
+      reviewId:"REVIEW-20260903-0300",recordedAt:NOW,freshness:"STALE"})
+    : current];
+  const reconciliation=ancestor ? completionPhaseEvidence({kind:"reconciliation",paused,patch,
+    publication,featureHead,currentMain:PATCH_SHA,createdAt:RECONCILED_AT,
+    intentId:"INTENT-20260903-0301",receiptId:"RECEIPT-20260903-0301"}) : null;
+  const reviewGate=reviewFreshness==="STALE" ? completionPhaseEvidence({kind:"review_gate",
+    paused,patch,publication,featureHead,currentMain:PATCH_SHA,items:[current],
+    phaseEvidence:{reconciliation,review_gate:null},
+    createdAt:REVIEW_GATE_AT,intentId:"INTENT-20260903-0302",
+    receiptId:"RECEIPT-20260903-0302"}) : null;
+  const snapshot=ruledCompletionSnapshot({patch,paused,publication,currentMain:PATCH_SHA,
+    featureHead,reconciled:ancestor,items,
+    phaseEvidence:{reconciliation,review_gate:reviewGate},checksState});
+  snapshot.observation.repository.reconciliation.drifted=drifted;
+  return rehashCompletionSnapshot(snapshot);
 }
 
 function completionFixture() {
@@ -290,14 +314,16 @@ function rehashCompletionSnapshot(snapshot) {
 }
 
 function makeCompletionChildReview(snapshot,{parentId=FEATURE}={}) {
-  const review=snapshot.observation.reviews[0];
+  const review=structuredClone(snapshot.observation.assigned_work.items[0]);
   const childId=`${REPOSITORY}#11`;
   const parentBranch=`epic/${parentId.slice(parentId.lastIndexOf("#")+1)}-feature`;
-  review.work_item_id=childId;
-  review.pull_request_number=11;
-  review.review_result={...review.review_result,pull_request_number:11,
+  review.pull_request.number=11;
+  review.review={...review.review,pull_request_number:11,
     review_id:"REVIEW-20260903-0311"};
-  review.body=updateManagedReviewBlock("Human context.",review.review_result);
+  review.pull_request.head_branch="issue/11-governed-child";
+  review.pull_request.base_branch=parentBranch;
+  review.pull_request.body=updateManagedReviewBlock("Human context.",review.review);
+  review.pull_request.formal_review.review_id=review.review.review_id;
   review.work={...review.work,
     item:{...review.work.item,id:childId,issue_number:11,kind:"issue",parent_id:parentId,
       acceptance_criteria:["The governed child remains reviewable after patch reconciliation."],
@@ -308,7 +334,229 @@ function makeCompletionChildReview(snapshot,{parentId=FEATURE}={}) {
     project:{...review.work.project,item_id:"PVTI_issue_11",revision:"project-issue-11",
       fields:{...review.work.project.fields,parent:parentId,branch:"issue/11-governed-child",
         base_branch:parentBranch}}};
+  snapshot.observation.assigned_work.items.push(review);
+  snapshot.observation.assigned_work.work_item_ids.push(childId);
   return review;
+}
+
+function governedReviewResult({number,head,reviewId,recordedAt=NOW,freshness="CURRENT"}) {
+  return {schema_version:"review-result.v1",review_id:reviewId,
+    repository:REPOSITORY,pull_request_number:number,reviewed_revision:head,
+    reviewer:{identity:"independent-reviewer",role:"independent-reviewer"},
+    verdict:"APPROVED",freshness,findings:[],unresolved:[],
+    verification_evidence:["node --test test/core-patch-interruption.test.js"],
+    follow_up_issues:[],reviewed_at:recordedAt,recorded_at:recordedAt};
+}
+
+function assignedFeatureWork(feature,{number,head,kind="issue",parentId=FEATURE,
+  reviewResult=null,hasPullRequest=true}={}) {
+  const id=`${REPOSITORY}#${number}`;
+  const epic=kind==="epic";
+  const branch=epic ? "epic/10-feature" : `issue/${number}-governed-child`;
+  const baseBranch=epic ? feature.branch : "epic/10-feature";
+  const status=hasPullRequest ? "In review" : "In progress";
+  const gate=reviewResult?.freshness==="STALE" ? "REVIEW_REQUIRED" : "NONE";
+  return {schema_version:"work-state-snapshot.v1",item:{schema_version:"work-item.v1",
+    id,repository:REPOSITORY,issue_number:number,kind,parent_id:epic ? null : parentId,
+    ...(epic ? {} : {acceptance_criteria:["The governed child remains complete after reconciliation."]}),
+    branch,base_branch:baseBranch,milestone:feature.milestone,status,gate},
+  issue_state:"OPEN",drifted:false,epic_required:false,
+  prepared:epic ? true : null,scope_approved:epic ? true : null,
+  parent:epic ? null : {id:parentId,branch:"epic/10-feature",revision:"issue-10-1"},
+  release:{assigned:true,active:true,id:`${REPOSITORY}@${feature.branch}`,
+    repository:REPOSITORY,branch:feature.branch,milestone:feature.milestone,
+    revision:feature.revision},blocking_dependencies:[],children_complete:epic ? true : null,
+  physical_branch:{exists:true,head_sha:head},
+  pull_request:hasPullRequest ? {state:"READY",head_sha:head,merged_sha:null} : null,
+  review:reviewResult?.freshness==="CURRENT"
+    ? {verdict:reviewResult.verdict,reviewed_revision:reviewResult.reviewed_revision} : null,
+  checks:hasPullRequest ? {state:"PASSED",revision:head} : null,
+  authority:{epic_acceptance_required:epic,release_approval_required:false},
+  project:{project_id:"PVT_TOSS_OS_2",item_id:`PVTI_${number}`,
+    revision:`project-${number}-completion`,fields:{Status:status,Gate:gate,
+      repository:REPOSITORY,parent:epic ? null : parentId,milestone:feature.milestone,
+      branch,base_branch:baseBranch,last_reconciled_at:NOW}}};
+}
+
+function assignedWorkItem(feature,{number,head,kind="issue",parentId=FEATURE,
+  reviewId=`REVIEW-20260903-${String(number).padStart(4,"0")}`,recordedAt=NOW,
+  freshness="CURRENT",hasPullRequest=true}={}) {
+  const review=hasPullRequest ? governedReviewResult({number,head,reviewId,recordedAt,freshness}) : null;
+  const work=assignedFeatureWork(feature,{number,head,kind,parentId,reviewResult:review,hasPullRequest});
+  return {work,pull_request:hasPullRequest ? {repository:REPOSITORY,number,
+    revision:`pr-${number}-completion`,head_branch:work.item.branch,
+    base_branch:work.item.base_branch,head_sha:head,
+    body:updateManagedReviewBlock("Human context.",review),
+    formal_review:{state:"APPROVED",review_id:review.review_id,
+      reviewed_revision:review.reviewed_revision}} : null,review};
+}
+
+function completionPhaseEvidence({kind,paused,patch,publication,featureHead,currentMain,
+  items=[],createdAt,intentId,receiptId,
+  phaseEvidence={reconciliation:null,review_gate:null}}) {
+  const feature=paused.repository_releases[0];
+  const programs=[paused,patch].sort((left,right) => left.program_id<right.program_id ? -1 : 1);
+  const query={kind:"patch-completion",control_revision:"control-completion",
+    control_repository:CONTROL_REPOSITORY,organization:organization(),
+    repositories:[repositoryConfiguration()],programs,ledger_sha256:"6".repeat(64),
+    patch_program:patch,paused_program:paused,publication,
+    repository_configuration:repositoryConfiguration(),project:organization().project,
+    phase_evidence:phaseEvidence};
+  const operations=[
+    {resource:"project",action:"verify",repository:null,expected_revision:"project-completion",
+      payload:{kind:"release-patch-completion-precondition",project_id:"PVT_TOSS_OS_2",
+        query,snapshot_sha256:"8".repeat(64)}},
+    {resource:"branch",action:"verify",repository:REPOSITORY,expected_revision:"main-completion",
+      payload:{kind:"release-default-branch-precondition",name:"main",head_sha:currentMain}},
+    {resource:"branch",action:"verify",repository:REPOSITORY,expected_revision:"feature-completion",
+      payload:{kind:"release-branch-precondition",name:feature.branch,base_branch:"main",
+        head_sha:featureHead}},
+  ];
+  if (kind==="reconciliation") {
+    operations.push({resource:"branch",action:"merge",repository:REPOSITORY,
+      expected_revision:"feature-completion",payload:{kind:"release-patch-reconcile",
+        patch_program_id:patch.program_id,patch_release_id:patch.repository_releases[0].release_id,
+        feature_program_id:paused.program_id,feature_release_id:feature.release_id,
+        source_branch:"main",source_sha:currentMain,target_branch:feature.branch,
+        target_sha:featureHead}});
+  } else {
+    for (const item of items.filter(value => value.review!==null)) {
+      const stale={...item.review,freshness:"STALE"};
+      operations.push({resource:"pull_request",action:"update",repository:REPOSITORY,
+        expected_revision:item.pull_request.revision,payload:{kind:"release-patch-review-stale",
+          patch_program_id:patch.program_id,feature_program_id:paused.program_id,
+          work_item_id:item.work.item.id,pull_request_number:item.pull_request.number,
+          head_sha:item.pull_request.head_sha,reviewed_revision:item.review.reviewed_revision,
+          current_revision:item.pull_request.head_sha,freshness:"STALE",
+          review_result:stale,body:updateManagedReviewBlock(item.pull_request.body,stale),
+          work_review:null}});
+      operations.push({resource:"project",action:"update",repository:REPOSITORY,
+        expected_revision:item.work.project.revision,payload:{kind:"release-patch-review-stale",
+          patch_program_id:patch.program_id,feature_program_id:paused.program_id,
+          project_id:item.work.project.project_id,item_id:item.work.project.item_id,
+          work_item_id:item.work.item.id,pull_request_number:item.pull_request.number,
+          pull_request_revision:item.pull_request.revision,
+          reviewed_revision:item.review.reviewed_revision,
+          current_revision:item.pull_request.head_sha,freshness:"STALE",
+          fields:{Status:"In review",Gate:"REVIEW_REQUIRED"}}});
+    }
+    operations.push({resource:"workflow",action:"create",repository:REPOSITORY,
+      expected_revision:"repository-completion",payload:{kind:"release-check-request",
+        patch_program_id:patch.program_id,feature_program_id:paused.program_id,
+        branch:feature.branch,head_sha:featureHead,required:["ci"]}});
+  }
+  operations.push({resource:"repository",action:"commit",repository:CONTROL_REPOSITORY,
+    expected_revision:paused.revision,payload:{kind:"release-program-manifest",
+      expected_program_revision:paused.revision,program:paused}});
+  const intent=createOperationIntent({intent_id:intentId,created_at:createdAt,
+    command:"release.patch-complete",policy_revision:"POLICY-0001",
+    source:{repository:CONTROL_REPOSITORY,revision:"control-completion",sha256:"7".repeat(64)},
+    authority:null,planned_receipt_id:receiptId,operations});
+  return {intent,receipt:{schema_version:"operation-receipt.v1",document_type:"operation-receipt",
+    receipt_id:receiptId,intent_id:intent.intent_id,intent_sha256:sha256Canonical(intent),
+    created_at:createdAt,status:"completed",observed_revisions:intent.operations.map(operation => ({
+      operation_id:operation.operation_id,repository:operation.repository,
+      revision:operation.payload.kind==="release-program-manifest"
+        ? paused.revision : operation.expected_revision}))}};
+}
+
+function rewriteCompletedPhaseEvidence(evidence,rewrite) {
+  const operations=evidence.intent.operations.map(({operation_id:_operationId,...operation}) =>
+    structuredClone(operation));
+  rewrite(operations);
+  const intent=createOperationIntent({intent_id:evidence.intent.intent_id,
+    created_at:evidence.intent.created_at,command:evidence.intent.command,
+    policy_revision:evidence.intent.policy_revision,source:evidence.intent.source,
+    authority:evidence.intent.authority,planned_receipt_id:evidence.intent.planned_receipt_id,
+    operations});
+  return {intent,receipt:{...evidence.receipt,intent_sha256:sha256Canonical(intent),
+    observed_revisions:intent.operations.map(operation => ({
+      operation_id:operation.operation_id,repository:operation.repository,
+      revision:operation.payload.kind==="release-program-manifest"
+        ? operation.payload.program.revision : operation.expected_revision}))}};
+}
+
+function completedPatchOperations(operations,{paused,createdAt,intentId,receiptId}) {
+  const intent=createOperationIntent({intent_id:intentId,created_at:createdAt,
+    command:"release.patch-complete",policy_revision:"POLICY-0001",
+    source:{repository:CONTROL_REPOSITORY,revision:"control-completion",sha256:"7".repeat(64)},
+    authority:null,planned_receipt_id:receiptId,operations});
+  return {intent,receipt:{schema_version:"operation-receipt.v1",
+    document_type:"operation-receipt",receipt_id:receiptId,intent_id:intent.intent_id,
+    intent_sha256:sha256Canonical(intent),created_at:createdAt,status:"completed",
+    observed_revisions:intent.operations.map(operation => ({
+      operation_id:operation.operation_id,repository:operation.repository,
+      revision:operation.payload.kind==="release-program-manifest"
+        ? paused.revision : operation.expected_revision}))}};
+}
+
+function ruledCompletionSnapshot({patch,paused,publication,currentMain=LATER_MAIN_SHA,
+  featureHead=FEATURE_RELEASE_HEAD,reconciled=false,items=null,phaseEvidence=null,
+  checksState="PENDING"}={}) {
+  const patchRelease=patch.repository_releases[0];
+  const feature=paused.repository_releases[0];
+  const assigned=items ?? [
+    assignedWorkItem(feature,{number:10,head:EPIC_HEAD,kind:"epic",
+      reviewId:"REVIEW-20260903-0310"}),
+    assignedWorkItem(feature,{number:11,head:CHILD_HEAD,
+      reviewId:"REVIEW-20260903-0311"}),
+    assignedWorkItem(feature,{number:12,head:"5".repeat(40),hasPullRequest:false}),
+  ];
+  const programs=[paused,patch].sort((left,right) => left.program_id<right.program_id ? -1 : 1);
+  const query={kind:"patch-completion",control_revision:"control-completion",
+    control_repository:CONTROL_REPOSITORY,organization:organization(),
+    repositories:[repositoryConfiguration()],programs,ledger_sha256:"6".repeat(64),
+    patch_program:patch,paused_program:paused,publication,
+    repository_configuration:repositoryConfiguration(),project:organization().project,
+    phase_evidence:phaseEvidence ?? {reconciliation:null,review_gate:null}};
+  const observation={kind:"patch-completion",control_revision:"control-completion",
+    project:{id:"PVT_TOSS_OS_2",revision:"project-completion"},
+    patch:{program_id:patch.program_id,program_revision:patch.revision,
+      release_id:patchRelease.release_id,release_revision:patchRelease.revision},
+    feature:{program_id:paused.program_id,program_revision:paused.revision,
+      release_id:feature.release_id,release_revision:feature.revision},
+    repository:{repository:REPOSITORY,revision:"repository-completion",
+      default_branch:{name:"main",revision:"main-completion",head_sha:currentMain},
+      feature_branch:{name:feature.branch,revision:"feature-completion",head_sha:featureHead},
+      reconciliation:{publication_commit:publication.expected_revision,
+        publication_is_ancestor_of_current_default:true,
+        current_default_is_ancestor_of_feature_release:reconciled,drifted:false}},
+    assigned_work:{release_id:feature.release_id,release_revision:feature.revision,
+      project_id:"PVT_TOSS_OS_2",project_revision:"project-completion",
+      work_item_ids:assigned.map(item => item.work.item.id),items:assigned},
+    checks:{head_sha:checksState==="NOT_STARTED" ? null : featureHead,
+      state:checksState,required:["ci"]}};
+  return {source:{repository:CONTROL_REPOSITORY,revision:"control-completion",
+    sha256:sha256Canonical({control:{revision:query.control_revision,
+      organization:query.organization,repositories:query.repositories,programs:query.programs,
+      ledger_sha256:query.ledger_sha256},github:observation})},query,observation,
+  receipt_id:"RECEIPT-20260903-0399",timestamp:REREVIEWED_AT};
+}
+
+function completedReviewedReconciliationRound() {
+  const {paused,patch,publication}=completionFixture();
+  const feature=paused.repository_releases[0];
+  const historical=assignedWorkItem(feature,{number:10,head:EPIC_HEAD,kind:"epic",
+    reviewId:"REVIEW-20260903-0600",recordedAt:NOW});
+  const initial=ruledCompletionSnapshot({patch,paused,publication,currentMain:PATCH_SHA,
+    featureHead:FEATURE_RELEASE_HEAD,reconciled:false,items:[historical],
+    phaseEvidence:{reconciliation:null,review_gate:null},checksState:"NOT_STARTED"});
+  const reconciliationOperations=completePatchInterruption({patchProgram:patch,
+    pausedProgram:paused,publication,snapshot:initial});
+  const reconciliation=completedPatchOperations(reconciliationOperations,{paused,
+    createdAt:RECONCILED_AT,intentId:"INTENT-20260903-0601",
+    receiptId:"RECEIPT-20260903-0601"});
+  const gated=ruledCompletionSnapshot({patch,paused,publication,currentMain:PATCH_SHA,
+    featureHead:MERGED_SHA,reconciled:true,items:[historical],
+    phaseEvidence:{reconciliation,review_gate:null},checksState:"NOT_STARTED"});
+  const reviewGateOperations=completePatchInterruption({patchProgram:patch,
+    pausedProgram:paused,publication,snapshot:gated});
+  const reviewGate=completedPatchOperations(reviewGateOperations,{paused,
+    createdAt:REVIEW_GATE_AT,intentId:"INTENT-20260903-0602",
+    receiptId:"RECEIPT-20260903-0602"});
+  const current=assignedWorkItem(feature,{number:10,head:EPIC_HEAD,kind:"epic",
+    reviewId:"REVIEW-20260903-0603",recordedAt:"2026-09-03T10:25:00.000Z"});
+  return {paused,patch,publication,reconciliation,reviewGate,reviewGateOperations,current};
 }
 
 async function pausedPreviewState() {
@@ -496,6 +744,181 @@ test("patch version increments verified latest published history",() => {
   assert.deepEqual(patchVersionFor("2.1.2"),{
     version:"2.1.3",change_class:"patch",based_on:"2.1.2",
   });
+});
+
+test("public issue start rejects a proxy GitHub snapshot without invoking traps",async () => {
+  let traps=0;
+  const snapshot=new Proxy(issueStartSnapshot(),{
+    get(_target,key) {
+      if (key==="then") return undefined;
+      traps+=1;
+      throw new Error("must not read a hostile snapshot");
+    },
+    ownKeys() { traps+=1; throw new Error("must not enumerate a hostile snapshot"); },
+  });
+
+  const result=await startIssueWithSnapshot(snapshot);
+
+  assert.equal(result.exitCode,5,JSON.stringify(result.result.error));
+  assert.equal(traps,0);
+});
+
+test("public issue start rejects a snapshot accessor without invoking it",async () => {
+  let traps=0;
+  const accessor=issueStartSnapshot();
+  Object.defineProperty(accessor,"work",{enumerable:true,get() {
+    traps+=1;
+    throw new Error("must not invoke a hostile snapshot accessor");
+  }});
+
+  const result=await startIssueWithSnapshot(accessor);
+
+  assert.equal(result.exitCode,5,JSON.stringify(result.result.error));
+  assert.equal(traps,0);
+});
+
+test("exported patch planners reject hostile request wrappers without invoking traps",() => {
+  let traps=0;
+  const proxy=new Proxy({}, {
+    get() { traps+=1; throw new Error("must not read a hostile request"); },
+    ownKeys() { traps+=1; throw new Error("must not enumerate a hostile request"); },
+  });
+  const accessor={};
+  Object.defineProperty(accessor,"bug",{enumerable:true,get() {
+    traps+=1;
+    throw new Error("must not invoke a hostile request accessor");
+  }});
+  for (const operation of [planPatchInterruption,completePatchInterruption]) {
+    for (const input of [proxy,accessor]) {
+      assert.throws(() => operation(input),error => error?.exitCode===5);
+    }
+  }
+  assert.equal(traps,0);
+});
+
+test("exported patch command helper rejects hostile bug snapshots without invoking traps",async () => {
+  let traps=0;
+  const proxy=new Proxy({}, {
+    get() { traps+=1; throw new Error("must not read a hostile patch command snapshot"); },
+    ownKeys() { traps+=1; throw new Error("must not enumerate a hostile patch command snapshot"); },
+  });
+  const accessor={};
+  Object.defineProperty(accessor,"work",{enumerable:true,get() {
+    traps+=1;
+    throw new Error("must not invoke a hostile patch command accessor");
+  }});
+  for (const snapshot of [proxy,accessor]) {
+    await assert.rejects(() => runPatchInterruptionStep({},null,snapshot),
+      error => error?.exitCode===5);
+  }
+  assert.equal(traps,0);
+});
+
+test("release status derives the patch target and rejects a null adapter override",() => {
+  const paused=pausedFeatureProgram();
+  const patch=activePatchProgram(paused);
+  const state={revision:"control-status-1",organization:organization(),
+    repositories:[repositoryConfiguration()],programs:[paused,patch],intents:[],receipts:[]};
+
+  const canonical=releaseStatusResult({planningState:state,repository:REPOSITORY,
+    snapshot:linkedStatusSnapshot(state,"release-status",patch,paused.program_id)});
+  assert.equal(canonical.patch_link,paused.program_id);
+  assert.throws(() => releaseStatusResult({planningState:state,repository:REPOSITORY,
+    snapshot:linkedStatusSnapshot(state,"release-status",patch,null)}),CoreConflictError);
+});
+
+test("release status rejects an arbitrary adapter patch-link override",() => {
+  const paused=pausedFeatureProgram();
+  const patch=activePatchProgram(paused);
+  const state={revision:"control-status-1",organization:organization(),
+    repositories:[repositoryConfiguration()],programs:[paused,patch],intents:[],receipts:[]};
+  assert.throws(() => releaseStatusResult({planningState:state,repository:REPOSITORY,
+    snapshot:linkedStatusSnapshot(state,"release-status",patch,"TOSS-OS-R9999")}),
+  CoreConflictError);
+});
+
+test("program status derives a paused feature link and rejects a null override",() => {
+  const paused=pausedFeatureProgram();
+  const patch=activePatchProgram(paused);
+  const base={revision:"control-status-2",organization:organization(),
+    repositories:[repositoryConfiguration()],programs:[paused,patch],intents:[],receipts:[]};
+  const canonical=programStatusResult({planningState:base,programId:paused.program_id,
+    snapshot:linkedStatusSnapshot(base,"program-status",paused,patch.program_id)});
+  assert.equal(canonical.programs[0].tracks[0].patch_link,patch.program_id);
+  assert.throws(() => programStatusResult({planningState:base,programId:paused.program_id,
+    snapshot:linkedStatusSnapshot(base,"program-status",paused,null)}),CoreConflictError);
+});
+
+test("program status rejects multiple manifest-derived links for one paused feature",() => {
+  const paused=pausedFeatureProgram();
+  const patch=activePatchProgram(paused);
+  const base={revision:"control-status-2",organization:organization(),
+    repositories:[repositoryConfiguration()],programs:[paused,patch],intents:[],receipts:[]};
+  const second=releasedPatchProgram(activePatchProgram(paused,BUG,{programId:"TOSS-OS-R0003"})).program;
+  const ambiguous={...base,revision:"control-status-3",programs:[paused,patch,second]};
+  assert.throws(() => programStatusResult({planningState:ambiguous,programId:paused.program_id,
+    snapshot:linkedStatusSnapshot(ambiguous,"program-status",paused,patch.program_id)}),
+  error => error instanceof CoreConflictError && /ambiguous/iu.test(error.message));
+});
+
+test("a patch status link requires its exact interrupted program release and repository",() => {
+  const paused=pausedFeatureProgram();
+  const released=releasedPatchProgram(activePatchProgram(paused)).program;
+  for (const state of [
+    {revision:"control-status-4",organization:organization(),
+      repositories:[repositoryConfiguration()],programs:[released],intents:[],receipts:[]},
+    {revision:"control-status-5",organization:organization(),
+      repositories:[repositoryConfiguration()],programs:[paused,{...released,interrupts:{
+        ...released.interrupts,repository_release_id:"REL-TOSS-OS-R0001-missing",
+      }}],intents:[],receipts:[]},
+  ]) {
+    assert.throws(() => releaseStatusResult({planningState:state,repository:REPOSITORY,
+      snapshot:linkedStatusSnapshot(state,"release-status",state.programs.at(-1),paused.program_id)}),
+    CoreConflictError);
+  }
+});
+
+test("a resumed patch link must retain the exact historical pause result revision",() => {
+  const paused=pausedFeatureProgram();
+  const resumedRelease=transitionRepositoryRelease(paused.repository_releases[0],{
+    event:"RESUME_AFTER_PATCH",expected_revision:paused.repository_releases[0].revision,
+    timestamp:REREVIEWED_AT,source_receipt:"RECEIPT-20260903-0990",activation:null,
+  });
+  const resumed={...paused,phase:"ACTIVE",revision:"REV-0004",
+    repository_releases:[resumedRelease],updated_at:REREVIEWED_AT};
+  const released=releasedPatchProgram(activePatchProgram(paused)).program;
+  const valid={revision:"control-status-6",organization:organization(),
+    repositories:[repositoryConfiguration()],programs:[resumed,released],intents:[],receipts:[]};
+  const status=programStatusResult({planningState:valid,programId:released.program_id,
+    snapshot:linkedStatusSnapshot(valid,"program-status",released,resumed.program_id)});
+  assert.equal(status.programs[0].tracks[0].patch_link,resumed.program_id);
+
+  const forgedPatch={...released,interrupts:{...released.interrupts,
+    paused_release_revision:"REV-9999"}};
+  const forged={...valid,revision:"control-status-7",programs:[resumed,forgedPatch]};
+  assert.throws(() => programStatusResult({planningState:forged,programId:forgedPatch.program_id,
+    snapshot:linkedStatusSnapshot(forged,"program-status",forgedPatch,resumed.program_id)}),
+  CoreConflictError);
+});
+
+test("a historical patch link rejects a release revision detached from its transition ordinal",() => {
+  const paused=pausedFeatureProgram();
+  const resumedRelease=transitionRepositoryRelease(paused.repository_releases[0],{
+    event:"RESUME_AFTER_PATCH",expected_revision:paused.repository_releases[0].revision,
+    timestamp:REREVIEWED_AT,source_receipt:"RECEIPT-20260903-0991",activation:null,
+  });
+  const forgedTarget={...paused,phase:"ACTIVE",revision:"REV-0004",
+    repository_releases:[{...resumedRelease,revision:"REV-10000"}],updated_at:REREVIEWED_AT};
+  const released=releasedPatchProgram(activePatchProgram(paused)).program;
+  const forgedPatch={...released,interrupts:{...released.interrupts,
+    paused_release_revision:"REV-9999"}};
+  const state={revision:"control-status-8",organization:organization(),
+    repositories:[repositoryConfiguration()],programs:[forgedTarget,forgedPatch],
+    intents:[],receipts:[]};
+
+  assert.throws(() => programStatusResult({planningState:state,programId:forgedPatch.program_id,
+    snapshot:linkedStatusSnapshot(state,"program-status",forgedPatch,forgedTarget.program_id)}),
+  CoreConflictError);
 });
 
 test("public issue start first previews only the durable feature pause",async () => {
@@ -799,19 +1222,26 @@ test("patch completion rejects foreign and duplicate review ownership before pla
   const {paused,patch,publication}=completionFixture();
   const cases=[
     ["repository",snapshot => {
-      const review=snapshot.observation.reviews[0];
-      review.work_item_id="Other/repo#10";
-      review.review_result.repository="Other/repo";
-      review.body=updateManagedReviewBlock("Human context.",review.review_result);
+      const review=snapshot.observation.assigned_work.items[0];
+      snapshot.observation.assigned_work.work_item_ids[0]="Other/repo#10";
+      review.review.repository="Other/repo";
+      review.pull_request.repository="Other/repo";
+      review.pull_request.body=updateManagedReviewBlock("Human context.",review.review);
       review.work.item.id="Other/repo#10";
       review.work.item.repository="Other/repo";
       review.work.release.repository="Other/repo";
       review.work.release.id=`Other/repo@${review.work.release.branch}`;
       review.work.project.fields.repository="Other/repo";
     }],
-    ["Project",snapshot => { snapshot.observation.reviews[0].work.project.project_id="PVT_FOREIGN"; }],
-    ["duplicate",snapshot => { snapshot.observation.reviews.push(
-      structuredClone(snapshot.observation.reviews[0])); }],
+    ["Project",snapshot => {
+      snapshot.observation.assigned_work.items[0].work.project.project_id="PVT_FOREIGN";
+    }],
+    ["duplicate",snapshot => {
+      snapshot.observation.assigned_work.items.push(
+        structuredClone(snapshot.observation.assigned_work.items[0]));
+      snapshot.observation.assigned_work.work_item_ids.push(
+        snapshot.observation.assigned_work.work_item_ids[0]);
+    }],
   ];
   for (const [label,mutate] of cases) {
     const snapshot=completionSnapshot({patch,paused,publication,ancestor:true,
@@ -829,8 +1259,8 @@ test("patch completion invalidates only exact epic scope or a child governed by 
 
   const outsideEpic=completionSnapshot({patch,paused,publication,ancestor:true,
     featureHead:MERGED_SHA});
-  const outsideEpicReview=outsideEpic.observation.reviews[0];
-  outsideEpicReview.work_item_id=`${REPOSITORY}#11`;
+  const outsideEpicReview=outsideEpic.observation.assigned_work.items[0];
+  outsideEpic.observation.assigned_work.work_item_ids[0]=`${REPOSITORY}#11`;
   outsideEpicReview.work.item={...outsideEpicReview.work.item,id:`${REPOSITORY}#11`,issue_number:11,
     branch:"epic/11-unrelated"};
   outsideEpicReview.work.project={...outsideEpicReview.work.project,item_id:"PVTI_epic_11",
@@ -840,7 +1270,7 @@ test("patch completion invalidates only exact epic scope or a child governed by 
 
   const wrongAssignment=completionSnapshot({patch,paused,publication,ancestor:true,
     featureHead:MERGED_SHA});
-  wrongAssignment.observation.reviews[0].work.release.revision="REV-9999";
+  wrongAssignment.observation.assigned_work.items[0].work.release.revision="REV-9999";
   assert.throws(() => completePatchInterruption(request(wrongAssignment)),CoreConflictError,
     "direct epic assignment does not equal paused release");
 
@@ -858,7 +1288,7 @@ test("patch completion invalidates only exact epic scope or a child governed by 
 
   const bug=completionSnapshot({patch,paused,publication,ancestor:true,
     featureHead:MERGED_SHA});
-  const bugWork=bug.observation.reviews[0].work;
+  const bugWork=bug.observation.assigned_work.items[0].work;
   bugWork.item={...bugWork.item,kind:"bug",branch:"bug/10-feature"};
   bugWork.prepared=null;
   bugWork.scope_approved=null;
@@ -873,7 +1303,7 @@ test("patch completion cannot resume an inactive direct epic assignment",() => {
   const {paused,patch,publication}=completionFixture();
   const snapshot=completionSnapshot({patch,paused,publication,ancestor:true,
     checksState:"PENDING"});
-  snapshot.observation.reviews[0].work.release.active=false;
+  snapshot.observation.assigned_work.items[0].work.release.active=false;
   rehashCompletionSnapshot(snapshot);
 
   assert.throws(() => completePatchInterruption({patchProgram:patch,pausedProgram:paused,
@@ -950,7 +1380,7 @@ test("patch planning binds Work and Project rows to the exact repository",async 
   const {paused:completionPaused,patch,publication}=completionFixture();
   const completion=completionSnapshot({patch,paused:completionPaused,publication,ancestor:true,
     featureHead:MERGED_SHA});
-  completion.observation.reviews[0].work.project.fields.repository=OTHER_REPOSITORY;
+  completion.observation.assigned_work.items[0].work.project.fields.repository=OTHER_REPOSITORY;
   rehashCompletionSnapshot(completion);
   assert.throws(() => completePatchInterruption({patchProgram:patch,
     pausedProgram:completionPaused,publication,snapshot:completion}),CoreConflictError);
@@ -1029,18 +1459,20 @@ test("patch completion invalidates the canonical managed PR review and Project i
   assert.equal(pull.expected_revision,"pr-10-completion");
   assert.equal(pull.payload.freshness,"STALE");
   assert.equal(pull.payload.review_result.freshness,"STALE");
+  assert.equal(pull.payload.work_review,null);
   assert.equal(pull.payload.body.includes("Human context."),true);
   assert.equal(pull.payload.body.includes("- Freshness: STALE"),true);
   assert.ok(project,"the exact Project item must be projected in the same plan");
-  assert.equal(project.expected_revision,"project-feature-10");
+  assert.equal(project.expected_revision,"project-10-completion");
 
   let controlRevision=snapshot.source.revision;
   let storedIntent=null;
   let storedReceipt=null;
   let storedProgram=paused;
-  let storedBody=snapshot.observation.reviews[0].body;
-  let storedResult=snapshot.observation.reviews[0].review_result;
-  let storedFields=snapshot.observation.reviews[0].work.project.fields;
+  let storedBody=snapshot.observation.assigned_work.items[0].pull_request.body;
+  let storedResult=snapshot.observation.assigned_work.items[0].review;
+  let storedWorkReview=snapshot.observation.assigned_work.items[0].work.review;
+  let storedFields=snapshot.observation.assigned_work.items[0].work.project.fields;
   const control={async head() { return controlRevision; },async findIntent() { return storedIntent; },
     async findReceipt() { return storedReceipt; },async commitIntent({expectedHead,intent}) {
       assert.equal(expectedHead,controlRevision); storedIntent=intent; controlRevision="control-after-intent";
@@ -1059,6 +1491,7 @@ test("patch completion invalidates the canonical managed PR review and Project i
       for (const operation of values) {
         if (operation.resource==="pull_request") {
           storedBody=operation.payload.body; storedResult=operation.payload.review_result;
+          storedWorkReview=operation.payload.work_review;
         } else if (operation.resource==="project") storedFields=operation.payload.fields;
       }
       return {status:"completed",observed_revisions:values.map(operation => ({
@@ -1075,6 +1508,7 @@ test("patch completion invalidates the canonical managed PR review and Project i
   assert.equal(receipt.status,"completed");
   assert.equal(storedReceipt.receipt_id,snapshot.receipt_id);
   assert.equal(storedResult.freshness,"STALE");
+  assert.equal(storedWorkReview,null);
   assert.equal(storedBody.includes("- Freshness: STALE"),true);
   assert.equal(storedFields.Status,"In review");
   assert.equal(storedFields.Gate,"REVIEW_REQUIRED");
@@ -1171,4 +1605,393 @@ test("patch completion reconciles and reruns review gates before it can resume",
   assert.equal(manifest.payload.program.phase,"ACTIVE");
   assert.equal(manifest.payload.program.repository_releases[0].phase,"ACTIVE");
   assert.equal(manifest.payload.program.repository_releases[0].branch,"release/v2.2.0");
+});
+
+test("completed reconciliation stales every older reviewed PR in the exact assigned-work inventory",() => {
+  const {paused,patch,publication}=completionFixture();
+  const snapshot=ruledCompletionSnapshot({patch,paused,publication,reconciled:true});
+  const reconciliation=completionPhaseEvidence({kind:"reconciliation",paused,patch,publication,
+    featureHead:FEATURE_RELEASE_HEAD,currentMain:LATER_MAIN_SHA,
+    createdAt:RECONCILED_AT,intentId:"INTENT-20260903-0401",
+    receiptId:"RECEIPT-20260903-0401"});
+  snapshot.query.phase_evidence.reconciliation=reconciliation;
+  rehashCompletionSnapshot(snapshot);
+
+  const operations=completePatchInterruption({patchProgram:patch,pausedProgram:paused,
+    publication,snapshot});
+  const pullUpdates=operations.filter(operation =>
+    operation.resource==="pull_request" && operation.payload.kind==="release-patch-review-stale");
+  const projectUpdates=operations.filter(operation =>
+    operation.resource==="project" && operation.payload.kind==="release-patch-review-stale");
+  assert.deepEqual(pullUpdates.map(operation => operation.payload.work_item_id),[
+    `${REPOSITORY}#10`,`${REPOSITORY}#11`,
+  ]);
+  assert.deepEqual(pullUpdates.map(operation => operation.payload.head_sha),[EPIC_HEAD,CHILD_HEAD],
+    "epic and child PR heads are independent from the feature release branch head");
+  assert.equal(pullUpdates.every(operation =>
+    operation.payload.review_result.freshness==="STALE"),true);
+  assert.equal(canonicalJson(projectUpdates.map(operation => operation.payload.fields)),canonicalJson([
+    {Status:"In review",Gate:"REVIEW_REQUIRED"},
+    {Status:"In review",Gate:"REVIEW_REQUIRED"},
+  ]));
+  assert.equal(operations.some(operation => operation.payload.work_item_id===`${REPOSITORY}#12`),false,
+    "an assigned item without a pull request remains represented but needs no review mutation");
+});
+
+test("completed reconciliation evidence requires its exact preconditions and merge envelope",() => {
+  const {paused,patch,publication}=completionFixture();
+  const reconciliation=completionPhaseEvidence({kind:"reconciliation",paused,patch,publication,
+    featureHead:FEATURE_RELEASE_HEAD,currentMain:LATER_MAIN_SHA,
+    createdAt:RECONCILED_AT,intentId:"INTENT-20260903-0531",
+    receiptId:"RECEIPT-20260903-0531"});
+  const missingPreconditions=rewriteCompletedPhaseEvidence(reconciliation,operations => {
+    for (const kind of ["release-patch-completion-precondition",
+      "release-default-branch-precondition","release-branch-precondition"]) {
+      operations.splice(operations.findIndex(operation => operation.payload.kind===kind),1);
+    }
+    operations.push({resource:"issue",action:"update",repository:REPOSITORY,
+      expected_revision:"issue-extra",payload:{kind:"unrelated-mutation"}});
+  });
+  const mismatchedSource=rewriteCompletedPhaseEvidence(reconciliation,operations => {
+    operations.find(operation => operation.payload.kind==="release-patch-reconcile")
+      .payload.source_sha=PATCH_SHA;
+  });
+  const mismatchedTargetCas=rewriteCompletedPhaseEvidence(reconciliation,operations => {
+    operations.find(operation => operation.payload.kind==="release-patch-reconcile")
+      .expected_revision="feature-foreign";
+  });
+  for (const [label,evidence] of [["missing preconditions and extra mutation",missingPreconditions],
+    ["source head mismatch",mismatchedSource],["target CAS mismatch",mismatchedTargetCas]]) {
+    const snapshot=ruledCompletionSnapshot({patch,paused,publication,reconciled:true,
+      phaseEvidence:{reconciliation:evidence,review_gate:null},checksState:"NOT_STARTED"});
+    assert.throws(() => completePatchInterruption({patchProgram:patch,pausedProgram:paused,
+      publication,snapshot}),CoreConflictError,label);
+  }
+});
+
+test("assigned-work inventory IDs must exactly equal its unique canonical item identities",() => {
+  const {paused,patch,publication}=completionFixture();
+  const snapshot=ruledCompletionSnapshot({patch,paused,publication,reconciled:true});
+  snapshot.observation.assigned_work.items.pop();
+  rehashCompletionSnapshot(snapshot);
+
+  assert.throws(() => completePatchInterruption({patchProgram:patch,pausedProgram:paused,
+    publication,snapshot}),CoreConflictError);
+});
+
+test("assigned-work inventory cannot omit an in-scope release epic",() => {
+  const {paused,patch,publication}=completionFixture();
+  const snapshot=ruledCompletionSnapshot({patch,paused,publication,reconciled:false,items:[]});
+  assert.throws(() => completePatchInterruption({patchProgram:patch,pausedProgram:paused,
+    publication,snapshot}),CoreConflictError);
+});
+
+test("patch publication may predate current main while reconciliation merges exact current main CAS",() => {
+  const {paused,patch,publication}=completionFixture();
+  const snapshot=ruledCompletionSnapshot({patch,paused,publication,currentMain:LATER_MAIN_SHA,
+    featureHead:FEATURE_RELEASE_HEAD,reconciled:false,checksState:"NOT_STARTED"});
+
+  const operations=completePatchInterruption({patchProgram:patch,pausedProgram:paused,
+    publication,snapshot});
+  const defaultPrecondition=operations.find(operation =>
+    operation.payload.kind==="release-default-branch-precondition");
+  const merge=operations.find(operation => operation.payload.kind==="release-patch-reconcile");
+  assert.equal(defaultPrecondition.payload.head_sha,LATER_MAIN_SHA);
+  assert.equal(merge.payload.source_sha,LATER_MAIN_SHA);
+  assert.equal(merge.payload.target_sha,FEATURE_RELEASE_HEAD);
+  assert.equal(merge.expected_revision,"feature-completion");
+  assert.notEqual(merge.payload.source_sha,publication.expected_revision,
+    "publication proves ancestry and does not pin current main to the old publication head");
+});
+
+test("a later main advance supersedes prior reconciliation and plans a new exact-head merge",() => {
+  const {paused,patch,publication}=completionFixture();
+  const prior=completionPhaseEvidence({kind:"reconciliation",paused,patch,publication,
+    featureHead:FEATURE_RELEASE_HEAD,currentMain:PATCH_SHA,createdAt:RECONCILED_AT,
+    intentId:"INTENT-20260903-0410",receiptId:"RECEIPT-20260903-0410"});
+  const snapshot=ruledCompletionSnapshot({patch,paused,publication,currentMain:LATER_MAIN_SHA,
+    featureHead:FEATURE_RELEASE_HEAD,reconciled:false,
+    phaseEvidence:{reconciliation:prior,review_gate:null},checksState:"NOT_STARTED"});
+  const operations=completePatchInterruption({patchProgram:patch,pausedProgram:paused,
+    publication,snapshot});
+  assert.equal(operations.find(operation => operation.payload.kind==="release-patch-reconcile")
+    .payload.source_sha,LATER_MAIN_SHA);
+});
+
+test("a reconciliation cannot be superseded without a changed current default head",() => {
+  const {paused,patch,publication}=completionFixture();
+  const prior=completionPhaseEvidence({kind:"reconciliation",paused,patch,publication,
+    featureHead:FEATURE_RELEASE_HEAD,currentMain:PATCH_SHA,createdAt:RECONCILED_AT,
+    intentId:"INTENT-20260903-0561",receiptId:"RECEIPT-20260903-0561"});
+  const snapshot=ruledCompletionSnapshot({patch,paused,publication,currentMain:PATCH_SHA,
+    featureHead:MERGED_SHA,reconciled:false,
+    phaseEvidence:{reconciliation:prior,review_gate:null},checksState:"NOT_STARTED"});
+  let operations=null;
+  assert.throws(() => {
+    operations=completePatchInterruption({patchProgram:patch,pausedProgram:paused,
+      publication,snapshot});
+  },CoreConflictError);
+  assert.equal(operations,null,"inconsistent ancestry must fail before returning operations");
+});
+
+test("a second reconciliation resets validated predecessor evidence and its receipt is consumable",() => {
+  const {paused,patch,publication}=completionFixture();
+  const initial=ruledCompletionSnapshot({patch,paused,publication,currentMain:PATCH_SHA,
+    featureHead:FEATURE_RELEASE_HEAD,reconciled:false,
+    phaseEvidence:{reconciliation:null,review_gate:null},checksState:"NOT_STARTED"});
+  const firstOperations=completePatchInterruption({patchProgram:patch,pausedProgram:paused,
+    publication,snapshot:initial});
+  const first=completedPatchOperations(firstOperations,{paused,createdAt:RECONCILED_AT,
+    intentId:"INTENT-20260903-0541",receiptId:"RECEIPT-20260903-0541"});
+  const advanced=ruledCompletionSnapshot({patch,paused,publication,currentMain:LATER_MAIN_SHA,
+    featureHead:FEATURE_RELEASE_HEAD,reconciled:false,
+    phaseEvidence:{reconciliation:first,review_gate:null},checksState:"NOT_STARTED"});
+  const secondOperations=completePatchInterruption({patchProgram:patch,pausedProgram:paused,
+    publication,snapshot:advanced});
+  const aggregate=secondOperations.find(operation =>
+    operation.payload.kind==="release-patch-completion-precondition");
+  assert.equal(canonicalJson(aggregate.payload.query.phase_evidence),
+    canonicalJson({reconciliation:null,review_gate:null}));
+
+  const second=completedPatchOperations(secondOperations,{paused,
+    createdAt:"2026-09-03T10:25:00.000Z",intentId:"INTENT-20260903-0542",
+    receiptId:"RECEIPT-20260903-0542"});
+  assert.equal(canonicalJson(second).includes(first.intent.intent_id),false,
+    "the active reconciliation round does not recursively embed its predecessor");
+  const reconciled=ruledCompletionSnapshot({patch,paused,publication,
+    currentMain:LATER_MAIN_SHA,featureHead:MERGED_SHA,reconciled:true,
+    phaseEvidence:{reconciliation:second,review_gate:null},checksState:"NOT_STARTED"});
+  const next=completePatchInterruption({patchProgram:patch,pausedProgram:paused,
+    publication,snapshot:reconciled});
+  assert.equal(next.some(operation => operation.payload.kind==="release-patch-review-stale"),true);
+  assert.equal(next.some(operation => operation.payload.kind==="release-check-request"),true);
+});
+
+test("a second reconciliation validates failed or unresolved predecessor evidence before planning",() => {
+  const {paused,patch,publication}=completionFixture();
+  const first=completionPhaseEvidence({kind:"reconciliation",paused,patch,publication,
+    featureHead:FEATURE_RELEASE_HEAD,currentMain:PATCH_SHA,createdAt:RECONCILED_AT,
+    intentId:"INTENT-20260903-0551",receiptId:"RECEIPT-20260903-0551"});
+  const failed=structuredClone(first);
+  failed.receipt.status="failed";
+  const unresolved=structuredClone(first);
+  unresolved.receipt.observed_revisions.pop();
+  for (const [label,evidence] of [["failed",failed],["unresolved",unresolved]]) {
+    const advanced=ruledCompletionSnapshot({patch,paused,publication,currentMain:LATER_MAIN_SHA,
+      featureHead:FEATURE_RELEASE_HEAD,reconciled:false,
+      phaseEvidence:{reconciliation:evidence,review_gate:null},checksState:"NOT_STARTED"});
+    assert.throws(() => completePatchInterruption({patchProgram:patch,pausedProgram:paused,
+      publication,snapshot:advanced}),CoreConflictError,label);
+  }
+});
+
+test("a completed review gate is historically validated before a later main reconciliation",() => {
+  const {paused,patch,publication,reconciliation,reviewGate,
+    reviewGateOperations,current}=completedReviewedReconciliationRound();
+  assert.equal(reviewGateOperations.filter(operation =>
+    operation.payload.kind==="release-patch-review-stale").length,2);
+  const advanced=ruledCompletionSnapshot({patch,paused,publication,currentMain:LATER_MAIN_SHA,
+    featureHead:MERGED_SHA,reconciled:false,items:[current],
+    phaseEvidence:{reconciliation,review_gate:reviewGate},checksState:"PENDING"});
+  const secondOperations=completePatchInterruption({patchProgram:patch,pausedProgram:paused,
+    publication,snapshot:advanced});
+  const aggregate=secondOperations.find(operation =>
+    operation.payload.kind==="release-patch-completion-precondition");
+  assert.equal(canonicalJson(aggregate.payload.query.phase_evidence),
+    canonicalJson({reconciliation:null,review_gate:null}));
+
+  const second=completedPatchOperations(secondOperations,{paused,
+    createdAt:"2026-09-03T10:28:00.000Z",intentId:"INTENT-20260903-0604",
+    receiptId:"RECEIPT-20260903-0604"});
+  const reconciled=ruledCompletionSnapshot({patch,paused,publication,currentMain:LATER_MAIN_SHA,
+    featureHead:SECOND_MERGED_SHA,reconciled:true,items:[current],
+    phaseEvidence:{reconciliation:second,review_gate:null},checksState:"NOT_STARTED"});
+  const next=completePatchInterruption({patchProgram:patch,pausedProgram:paused,
+    publication,snapshot:reconciled});
+  assert.equal(next.some(operation => operation.payload.kind==="release-patch-review-stale"),true);
+  assert.equal(next.some(operation => operation.payload.kind==="release-check-request"),true);
+});
+
+test("historical review gates reject corruption unresolved receipts and feature-head drift",() => {
+  const {paused,patch,publication,reconciliation,reviewGate,
+    current}=completedReviewedReconciliationRound();
+  const corrupt=rewriteCompletedPhaseEvidence(reviewGate,operations => {
+    operations.find(operation =>
+      operation.payload.kind==="release-default-branch-precondition").payload.head_sha=LATER_MAIN_SHA;
+  });
+  const failed=structuredClone(reviewGate);
+  failed.receipt.status="failed";
+  const unresolved=structuredClone(reviewGate);
+  unresolved.receipt.observed_revisions.pop();
+  const cases=[
+    ["corrupt historical default",corrupt,MERGED_SHA],
+    ["failed historical gate",failed,MERGED_SHA],
+    ["unresolved historical gate",unresolved,MERGED_SHA],
+    ["unexpected feature-head drift",reviewGate,SECOND_MERGED_SHA],
+  ];
+  for (const [label,evidence,featureHead] of cases) {
+    const advanced=ruledCompletionSnapshot({patch,paused,publication,currentMain:LATER_MAIN_SHA,
+      featureHead,reconciled:false,items:[current],
+      phaseEvidence:{reconciliation,review_gate:evidence},checksState:"PENDING"});
+    let operations=null;
+    assert.throws(() => {
+      operations=completePatchInterruption({patchProgram:patch,pausedProgram:paused,
+        publication,snapshot:advanced});
+    },CoreConflictError,label);
+    assert.equal(operations,null,`${label} must fail before returning operations`);
+  }
+});
+
+test("completed review gate preserves stored STALE evidence and does not stale a later distinct re-review",() => {
+  const {paused,patch,publication}=completionFixture();
+  const feature=paused.repository_releases[0];
+  const original=ruledCompletionSnapshot({patch,paused,publication,reconciled:true});
+  const reconciliation=completionPhaseEvidence({kind:"reconciliation",paused,patch,publication,
+    featureHead:FEATURE_RELEASE_HEAD,currentMain:LATER_MAIN_SHA,
+    createdAt:RECONCILED_AT,intentId:"INTENT-20260903-0402",
+    receiptId:"RECEIPT-20260903-0402"});
+  const reviewGate=completionPhaseEvidence({kind:"review_gate",paused,patch,publication,
+    featureHead:FEATURE_RELEASE_HEAD,currentMain:LATER_MAIN_SHA,
+    items:original.observation.assigned_work.items,createdAt:REVIEW_GATE_AT,
+    phaseEvidence:{reconciliation,review_gate:null},
+    intentId:"INTENT-20260903-0403",receiptId:"RECEIPT-20260903-0403"});
+  const items=[
+    assignedWorkItem(feature,{number:10,head:EPIC_HEAD,kind:"epic",
+      reviewId:"REVIEW-20260903-0410",recordedAt:REREVIEWED_AT}),
+    assignedWorkItem(feature,{number:11,head:CHILD_HEAD,
+      reviewId:"REVIEW-20260903-0311",freshness:"STALE"}),
+    assignedWorkItem(feature,{number:12,head:"5".repeat(40),hasPullRequest:false}),
+  ];
+  const snapshot=ruledCompletionSnapshot({patch,paused,publication,reconciled:true,items,
+    phaseEvidence:{reconciliation,review_gate:reviewGate},checksState:"PENDING"});
+
+  const operations=completePatchInterruption({patchProgram:patch,pausedProgram:paused,
+    publication,snapshot});
+  assert.equal(operations.some(operation =>
+    operation.payload.kind==="release-patch-review-stale"),false);
+  const manifest=operations.find(operation => operation.payload.kind==="release-program-manifest");
+  assert.equal(manifest.payload.program.phase,"ACTIVE");
+  assert.equal(items[1].work.review,null);
+  assert.equal(items[1].pull_request.formal_review.state,"APPROVED",
+    "formal review remains immutable historical evidence");
+});
+
+test("completed review-gate evidence binds each stale PR to its exact Project item",() => {
+  const {paused,patch,publication}=completionFixture();
+  const feature=paused.repository_releases[0];
+  const current=assignedWorkItem(feature,{number:10,head:EPIC_HEAD,kind:"epic",
+    reviewId:"REVIEW-20260903-0500",recordedAt:NOW});
+  const reconciliation=completionPhaseEvidence({kind:"reconciliation",paused,patch,publication,
+    featureHead:FEATURE_RELEASE_HEAD,currentMain:LATER_MAIN_SHA,
+    createdAt:RECONCILED_AT,intentId:"INTENT-20260903-0501",
+    receiptId:"RECEIPT-20260903-0501"});
+  const reviewGate=completionPhaseEvidence({kind:"review_gate",paused,patch,publication,
+    featureHead:FEATURE_RELEASE_HEAD,currentMain:LATER_MAIN_SHA,items:[current],
+    phaseEvidence:{reconciliation,review_gate:null},createdAt:REVIEW_GATE_AT,
+    intentId:"INTENT-20260903-0502",receiptId:"RECEIPT-20260903-0502"});
+  const forged=rewriteCompletedPhaseEvidence(reviewGate,operations => {
+    const project=operations.find(operation => operation.resource==="project" &&
+      operation.action==="update" && operation.payload.kind==="release-patch-review-stale");
+    project.expected_revision="project-foreign";
+    project.payload.project_id="PVT_FOREIGN";
+    project.payload.item_id="PVTI_foreign";
+  });
+  const stale=assignedWorkItem(feature,{number:10,head:EPIC_HEAD,kind:"epic",
+    reviewId:"REVIEW-20260903-0500",recordedAt:NOW,freshness:"STALE"});
+  const snapshot=ruledCompletionSnapshot({patch,paused,publication,reconciled:true,items:[stale],
+    phaseEvidence:{reconciliation,review_gate:forged},checksState:"PENDING"});
+
+  assert.throws(() => completePatchInterruption({patchProgram:patch,pausedProgram:paused,
+    publication,snapshot}),CoreConflictError);
+});
+
+test("completed review-gate evidence requires all exact completion preconditions",() => {
+  const {paused,patch,publication}=completionFixture();
+  const feature=paused.repository_releases[0];
+  const current=assignedWorkItem(feature,{number:10,head:EPIC_HEAD,kind:"epic",
+    reviewId:"REVIEW-20260903-0510",recordedAt:NOW});
+  const reconciliation=completionPhaseEvidence({kind:"reconciliation",paused,patch,publication,
+    featureHead:FEATURE_RELEASE_HEAD,currentMain:LATER_MAIN_SHA,
+    createdAt:RECONCILED_AT,intentId:"INTENT-20260903-0511",
+    receiptId:"RECEIPT-20260903-0511"});
+  const reviewGate=completionPhaseEvidence({kind:"review_gate",paused,patch,publication,
+    featureHead:FEATURE_RELEASE_HEAD,currentMain:LATER_MAIN_SHA,items:[current],
+    phaseEvidence:{reconciliation,review_gate:null},createdAt:REVIEW_GATE_AT,
+    intentId:"INTENT-20260903-0512",receiptId:"RECEIPT-20260903-0512"});
+  const stale=assignedWorkItem(feature,{number:10,head:EPIC_HEAD,kind:"epic",
+    reviewId:"REVIEW-20260903-0510",recordedAt:NOW,freshness:"STALE"});
+  for (const kind of ["release-patch-completion-precondition",
+    "release-default-branch-precondition","release-branch-precondition"]) {
+    const incomplete=rewriteCompletedPhaseEvidence(reviewGate,operations => {
+      operations.splice(operations.findIndex(operation => operation.payload.kind===kind),1);
+    });
+    const snapshot=ruledCompletionSnapshot({patch,paused,publication,reconciled:true,items:[stale],
+      phaseEvidence:{reconciliation,review_gate:incomplete},checksState:"PENDING"});
+    assert.throws(() => completePatchInterruption({patchProgram:patch,pausedProgram:paused,
+      publication,snapshot}),CoreConflictError,kind);
+  }
+});
+
+test("completed review-gate evidence rejects extra operations and inexact receipt coverage",() => {
+  const {paused,patch,publication}=completionFixture();
+  const feature=paused.repository_releases[0];
+  const current=assignedWorkItem(feature,{number:10,head:EPIC_HEAD,kind:"epic",
+    reviewId:"REVIEW-20260903-0520",recordedAt:NOW});
+  const reconciliation=completionPhaseEvidence({kind:"reconciliation",paused,patch,publication,
+    featureHead:FEATURE_RELEASE_HEAD,currentMain:LATER_MAIN_SHA,
+    createdAt:RECONCILED_AT,intentId:"INTENT-20260903-0521",
+    receiptId:"RECEIPT-20260903-0521"});
+  const reviewGate=completionPhaseEvidence({kind:"review_gate",paused,patch,publication,
+    featureHead:FEATURE_RELEASE_HEAD,currentMain:LATER_MAIN_SHA,items:[current],
+    phaseEvidence:{reconciliation,review_gate:null},createdAt:REVIEW_GATE_AT,
+    intentId:"INTENT-20260903-0522",receiptId:"RECEIPT-20260903-0522"});
+  const stale=assignedWorkItem(feature,{number:10,head:EPIC_HEAD,kind:"epic",
+    reviewId:"REVIEW-20260903-0520",recordedAt:NOW,freshness:"STALE"});
+  const assertRejected=(label,evidence) => {
+    const snapshot=ruledCompletionSnapshot({patch,paused,publication,reconciled:true,items:[stale],
+      phaseEvidence:{reconciliation,review_gate:evidence},checksState:"PENDING"});
+    assert.throws(() => completePatchInterruption({patchProgram:patch,pausedProgram:paused,
+      publication,snapshot}),error => error?.exitCode===5 || error instanceof CoreConflictError,label);
+  };
+  assertRejected("manifest CAS",rewriteCompletedPhaseEvidence(reviewGate,operations => {
+    operations.find(operation => operation.payload.kind==="release-program-manifest")
+      .expected_revision="REV-9999";
+  }));
+  assertRejected("extra stale operation",rewriteCompletedPhaseEvidence(reviewGate,operations => {
+    operations.push({resource:"issue",action:"update",repository:REPOSITORY,
+      expected_revision:"issue-extra",payload:{kind:"release-patch-review-stale"}});
+  }));
+  const duplicated=structuredClone(reviewGate);
+  duplicated.receipt.observed_revisions.push(duplicated.receipt.observed_revisions[0]);
+  assertRejected("duplicate receipt observation",duplicated);
+});
+
+test("post-reconciliation CURRENT exemption requires strict time and a new review identity",() => {
+  const {paused,patch,publication}=completionFixture();
+  const feature=paused.repository_releases[0];
+  const original=ruledCompletionSnapshot({patch,paused,publication,reconciled:true});
+  const reconciliation=completionPhaseEvidence({kind:"reconciliation",paused,patch,publication,
+    featureHead:FEATURE_RELEASE_HEAD,currentMain:LATER_MAIN_SHA,
+    createdAt:RECONCILED_AT,intentId:"INTENT-20260903-0404",
+    receiptId:"RECEIPT-20260903-0404"});
+  const reviewGate=completionPhaseEvidence({kind:"review_gate",paused,patch,publication,
+    featureHead:FEATURE_RELEASE_HEAD,currentMain:LATER_MAIN_SHA,
+    items:original.observation.assigned_work.items,createdAt:REVIEW_GATE_AT,
+    phaseEvidence:{reconciliation,review_gate:null},
+    intentId:"INTENT-20260903-0405",receiptId:"RECEIPT-20260903-0405"});
+  for (const [label,reviewId,recordedAt,evidence] of [
+    ["equal reconciliation receipt time","REVIEW-20260903-0410",RECONCILED_AT,
+      {reconciliation,review_gate:null}],
+    ["equal review-gate receipt time","REVIEW-20260903-0410",REVIEW_GATE_AT,
+      {reconciliation,review_gate:reviewGate}],
+    ["reused staled review ID","REVIEW-20260903-0310",REREVIEWED_AT,
+      {reconciliation,review_gate:reviewGate}],
+  ]) {
+    const items=[assignedWorkItem(feature,{number:10,head:EPIC_HEAD,kind:"epic",
+      reviewId,recordedAt})];
+    const snapshot=ruledCompletionSnapshot({patch,paused,publication,reconciled:true,items,
+      phaseEvidence:evidence,checksState:"PENDING"});
+    assert.throws(() => completePatchInterruption({patchProgram:patch,pausedProgram:paused,
+      publication,snapshot}),CoreConflictError,label);
+  }
 });

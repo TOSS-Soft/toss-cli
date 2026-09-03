@@ -801,6 +801,9 @@ function normalizedStatusSnapshot(input,state,programs,kind,selectedTracks=null)
           release.scope.includes(selected.epic_id)))) {
       throw new CoreConflictError("Release status repository evidence conflicts with the manifest");
     }
+    if (repository.patch_link!==manifestPatchLink(state,program,release)) {
+      throw new CoreConflictError("Release status patch link conflicts with the pinned manifests");
+    }
     if ((release.milestone===null)!==(repository.milestone===null) ||
         (release.branch===null)!==(repository.branch===null)) {
       throw new CoreConflictError("Release status resources do not match the manifest phase");
@@ -835,7 +838,57 @@ function nextReleaseCommand(program,release) {
   return null;
 }
 
-function releaseTrack(program,release,observation,reconciliation) {
+function historicalTransitionResultRevisions(release,event) {
+  const match=/^REV-([0-9]{4,})$/u.exec(release.revision);
+  const current=match===null ? Number.NaN : Number(match[1]);
+  if (!Number.isSafeInteger(current) || current<1) {
+    throw new CoreConflictError(`Release ${release.release_id} revision history is invalid`);
+  }
+  if (current!==release.transitions.length+1) {
+    throw new CoreConflictError(`Release ${release.release_id} revision history is detached`);
+  }
+  const revisions=[];
+  for (let index=0;index<release.transitions.length;index+=1) {
+    if (release.transitions[index].event!==event) continue;
+    const revision=index+2;
+    revisions.push(`REV-${String(revision).padStart(4,"0")}`);
+  }
+  return revisions;
+}
+
+function manifestPatchLink(state,program,release) {
+  if (program.interrupts!==null) {
+    const target=state.programs.find(candidate =>
+      candidate.program_id===program.interrupts.program_id);
+    const targetRelease=target?.repository_releases.find(candidate =>
+      candidate.release_id===program.interrupts.repository_release_id);
+    const interruptionRevision=program.interrupts.paused_release_revision;
+    const pauseRevisions=targetRelease===undefined ? [] : historicalTransitionResultRevisions(
+      targetRelease,"PAUSE_FOR_PATCH",
+    );
+    const revisionMatches=targetRelease?.phase==="PAUSED"
+      ? targetRelease.revision===interruptionRevision
+      : pauseRevisions.includes(interruptionRevision);
+    if (!target || target===program || !targetRelease || targetRelease.repository!==release.repository ||
+        !revisionMatches) {
+      throw new CoreConflictError(`Release patch link target is invalid for ${release.release_id}`);
+    }
+    return target.program_id;
+  }
+  if (release.phase!=="PAUSED") return null;
+  const matches=state.programs.filter(candidate => candidate.interrupts!==null &&
+    candidate.interrupts.program_id===program.program_id &&
+    candidate.interrupts.repository_release_id===release.release_id &&
+    candidate.interrupts.paused_release_revision===release.revision &&
+    candidate.repository_releases.some(candidateRelease =>
+      candidateRelease.repository===release.repository));
+  if (matches.length>1) {
+    throw new CoreConflictError(`Release patch link is ambiguous for ${release.release_id}`);
+  }
+  return matches[0]?.program_id ?? null;
+}
+
+function releaseTrack(state,program,release,observation,reconciliation) {
   return Object.freeze({
     release_id:release.release_id,
     repository:release.repository,
@@ -848,7 +901,7 @@ function releaseTrack(program,release,observation,reconciliation) {
     scope:observation.scope,
     gates:observation.gates,
     checks:observation.checks,
-    patch_link:observation.patch_link,
+    patch_link:manifestPatchLink(state,program,release),
     gate:reconciliation.required ? "RECONCILE_REQUIRED" : "NONE",
     reconciliation,
     next_command:reconciliation.required
@@ -886,7 +939,7 @@ export function releaseStatusResult(input) {
   const reconciliation=reconciliationFromState(state,{
     programId:selected.program.program_id,repository:selected.release.repository,
   });
-  const track=releaseTrack(selected.program,selected.release,repositoryEvidence,reconciliation);
+  const track=releaseTrack(state,selected.program,selected.release,repositoryEvidence,reconciliation);
   return clone({
     kind:"release-status",source:observed.source,
     program:{id:selected.program.program_id,revision:selected.program.revision,phase:selected.program.phase},
@@ -913,7 +966,7 @@ export function programStatusResult(input) {
     programs:programs.map(program => ({
       id:program.program_id,revision:program.revision,phase:program.phase,
       dependency_stages:program.dependency_stages,
-      tracks:program.repository_releases.map(release => releaseTrack(program,release,
+      tracks:program.repository_releases.map(release => releaseTrack(state,program,release,
         byRelease.get(`${program.program_id}:${release.release_id}`),
         reconciliationFromState(state,{programId:program.program_id,repository:release.repository}))),
     })),

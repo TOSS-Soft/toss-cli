@@ -453,6 +453,244 @@ export function planPatchInterruption(input) {
     patchOperations:patchProgramOperations(request,patchProgram)});
 }
 
+function completedPhaseEvidence(value,label,{paused,patch,patchRelease,featureRelease,completionQuery}) {
+  if (value===null) return null;
+  exact(value,["intent","receipt"],`${label} phase evidence`);
+  const intent=validateCoreDocument(value.intent,"operation-intent.v1");
+  const receipt=validateCoreDocument(value.receipt,"operation-receipt.v1");
+  if (receipt.status!=="completed" || intent.intent_id!==receipt.intent_id ||
+      intent.planned_receipt_id!==receipt.receipt_id ||
+      receipt.intent_sha256!==sha256Canonical(intent)) {
+    throw new CoreConflictError(`${label} phase receipt does not bind its immutable intent`);
+  }
+  const observations=new Map(receipt.observed_revisions.map(observation =>
+    [observation.operation_id,observation]));
+  if (receipt.observed_revisions.length!==intent.operations.length ||
+      observations.size!==intent.operations.length || intent.operations.some(operation =>
+    observations.get(operation.operation_id)?.repository!==operation.repository)) {
+    throw new CoreConflictError(`${label} phase receipt omits exact operation evidence`);
+  }
+  const manifests=intent.operations.filter(operation =>
+    operation.payload?.kind==="release-program-manifest");
+  if (manifests.length!==1 ||
+      canonicalJson(manifests[0].payload.program)!==canonicalJson(paused) ||
+      manifests[0].payload.expected_program_revision!==paused.revision ||
+      manifests[0].resource!=="repository" || manifests[0].action!=="commit" ||
+      manifests[0].repository!==completionQuery.control_repository ||
+      manifests[0].expected_revision!==paused.revision) {
+    throw new CoreConflictError(`${label} phase does not preserve the exact paused program`);
+  }
+  const reconciliations=intent.operations.filter(operation =>
+    operation.payload?.kind==="release-patch-reconcile");
+  const stalePulls=intent.operations.filter(operation =>
+    operation.resource==="pull_request" && operation.payload?.kind==="release-patch-review-stale");
+  const staleProjects=intent.operations.filter(operation =>
+    operation.resource==="project" && operation.payload?.kind==="release-patch-review-stale");
+  const aggregates=intent.operations.filter(operation =>
+    operation.payload?.kind==="release-patch-completion-precondition");
+  const defaultBranches=intent.operations.filter(operation =>
+    operation.payload?.kind==="release-default-branch-precondition");
+  const featureBranches=intent.operations.filter(operation =>
+    operation.payload?.kind==="release-branch-precondition");
+  if (aggregates.length!==1 || defaultBranches.length!==1 || featureBranches.length!==1) {
+    throw new CoreConflictError(`${label} phase omits exact completion preconditions`);
+  }
+  const aggregate=aggregates[0];
+  const defaultBranch=defaultBranches[0];
+  const featureBranch=featureBranches[0];
+  const evidenceQuery=aggregate.payload.query;
+  const expectedPhaseEvidence=label==="reconciliation"
+    ? {reconciliation:null,review_gate:null}
+    : {reconciliation:completionQuery.phase_evidence.reconciliation,review_gate:null};
+  if (intent.policy_revision!==completionQuery.organization.policy_revision ||
+      aggregate.resource!=="project" || aggregate.action!=="verify" ||
+      aggregate.repository!==null || aggregate.payload.project_id!==completionQuery.project.node_id ||
+      evidenceQuery.control_repository!==completionQuery.control_repository ||
+      canonicalJson(evidenceQuery.organization)!==canonicalJson(completionQuery.organization) ||
+      canonicalJson(evidenceQuery.repositories)!==canonicalJson(completionQuery.repositories) ||
+      canonicalJson(evidenceQuery.programs)!==canonicalJson(completionQuery.programs) ||
+      canonicalJson(evidenceQuery.patch_program)!==canonicalJson(patch) ||
+      canonicalJson(evidenceQuery.paused_program)!==canonicalJson(paused) ||
+      canonicalJson(evidenceQuery.publication)!==canonicalJson(completionQuery.publication) ||
+      canonicalJson(evidenceQuery.repository_configuration)!==
+        canonicalJson(completionQuery.repository_configuration) ||
+      canonicalJson(evidenceQuery.project)!==canonicalJson(completionQuery.project) ||
+      canonicalJson(evidenceQuery.phase_evidence)!==canonicalJson(expectedPhaseEvidence)) {
+    throw new CoreConflictError(`${label} aggregate does not bind the exact completion source`);
+  }
+  if (defaultBranch.resource!=="branch" || defaultBranch.action!=="verify" ||
+      defaultBranch.repository!==patchRelease.repository ||
+      featureBranch.resource!=="branch" || featureBranch.action!=="verify" ||
+      featureBranch.repository!==patchRelease.repository ||
+      defaultBranch.payload.name!==completionQuery.repository_configuration.default_branch ||
+      featureBranch.payload.name!==featureRelease.branch ||
+      featureBranch.payload.base_branch!==defaultBranch.payload.name) {
+    throw new CoreConflictError(`${label} branch preconditions do not own the release repository`);
+  }
+  let reviewGateDetails=null;
+  if (label==="reconciliation") {
+    const operation=reconciliations[0];
+    const classified=aggregates.length+defaultBranches.length+featureBranches.length+
+      reconciliations.length+manifests.length;
+    if (reconciliations.length!==1 || stalePulls.length!==0 || staleProjects.length!==0 ||
+        classified!==intent.operations.length || operation.resource!=="branch" ||
+        operation.action!=="merge" || operation.repository!==patchRelease.repository ||
+        operation.expected_revision!==featureBranch.expected_revision ||
+        operation.payload.patch_program_id!==patch.program_id ||
+        operation.payload.patch_release_id!==patchRelease.release_id ||
+        operation.payload.feature_program_id!==paused.program_id ||
+        operation.payload.feature_release_id!==featureRelease.release_id ||
+        operation.payload.source_branch!==defaultBranch.payload.name ||
+        operation.payload.source_sha!==defaultBranch.payload.head_sha ||
+        operation.payload.target_branch!==featureBranch.payload.name ||
+        operation.payload.target_sha!==featureBranch.payload.head_sha) {
+      throw new CoreConflictError("Patch reconciliation evidence does not own the exact releases");
+    }
+    exact(operation.payload,["kind","patch_program_id","patch_release_id",
+      "feature_program_id","feature_release_id","source_branch","source_sha",
+      "target_branch","target_sha"],"patch reconciliation payload");
+  } else {
+    const workflows=intent.operations.filter(operation =>
+      operation.payload?.kind==="release-check-request");
+    const classified=aggregates.length+defaultBranches.length+featureBranches.length+
+      stalePulls.length+staleProjects.length+workflows.length+manifests.length;
+    if (reconciliations.length!==0 || stalePulls.length!==staleProjects.length ||
+        aggregates.length!==1 || defaultBranches.length!==1 || featureBranches.length!==1 ||
+        workflows.length>1 || classified!==intent.operations.length) {
+      throw new CoreConflictError("Patch review-gate evidence is not one exact stale surface set");
+    }
+    if (stalePulls.some(operation => operation.payload.patch_program_id!==patch.program_id ||
+        operation.payload.feature_program_id!==paused.program_id ||
+        operation.resource!=="pull_request" || operation.action!=="update" ||
+        operation.repository!==patchRelease.repository || operation.payload.work_review!==null) ||
+        staleProjects.some(operation => operation.payload.patch_program_id!==patch.program_id ||
+          operation.payload.feature_program_id!==paused.program_id ||
+          operation.resource!=="project" || operation.action!=="update" ||
+          operation.repository!==patchRelease.repository ||
+          operation.payload.fields?.Status!=="In review" ||
+          operation.payload.fields?.Gate!=="REVIEW_REQUIRED")) {
+      throw new CoreConflictError("Patch review-gate evidence does not own exact stale semantics");
+    }
+    const pullIds=stalePulls.map(operation => operation.payload.work_item_id)
+      .sort(compareCanonicalText);
+    const projectIds=staleProjects.map(operation => operation.payload.work_item_id)
+      .sort(compareCanonicalText);
+    if (new Set(pullIds).size!==pullIds.length || canonicalJson(pullIds)!==canonicalJson(projectIds)) {
+      throw new CoreConflictError("Patch review-gate evidence has ambiguous stale Work identities");
+    }
+    for (const pull of stalePulls) {
+      exact(pull.payload,["kind","patch_program_id","feature_program_id","work_item_id",
+        "pull_request_number","head_sha","reviewed_revision","current_revision","freshness",
+        "review_result","body","work_review"],"patch review-gate PR stale payload");
+      validateCoreDocument(pull.payload.review_result,"review-result.v1");
+    }
+    for (const project of staleProjects) {
+      exact(project.payload,["kind","patch_program_id","feature_program_id","project_id",
+        "item_id","work_item_id","pull_request_number","pull_request_revision",
+        "reviewed_revision","current_revision","freshness","fields"],
+      "patch review-gate Project stale payload");
+      exact(project.payload.fields,["Status","Gate"],"patch review-gate Project fields");
+    }
+    if (workflows.some(operation => operation.resource!=="workflow" ||
+        operation.action!=="create" || operation.repository!==patchRelease.repository ||
+        operation.payload.patch_program_id!==patch.program_id ||
+        operation.payload.feature_program_id!==paused.program_id ||
+        operation.payload.branch!==featureRelease.branch)) {
+      throw new CoreConflictError("Patch review-gate check evidence does not own the release branch");
+    }
+    reviewGateDetails={stalePulls:Object.freeze(stalePulls),
+      staleProjects:Object.freeze(staleProjects)};
+  }
+  timestamp(receipt.created_at,`${label} phase receipt time`);
+  const staledReviewIds=stalePulls.map(operation => operation.payload.review_result?.review_id);
+  if (staledReviewIds.some(reviewId => typeof reviewId!=="string") ||
+      new Set(staledReviewIds).size!==staledReviewIds.length) {
+    throw new CoreConflictError("Patch review-gate evidence has ambiguous review identities");
+  }
+  return Object.freeze({intent,receipt,reconciliation:reconciliations[0] ?? null,
+    aggregate,defaultBranch,featureBranch,staledReviewIds:Object.freeze(staledReviewIds),
+    ...(reviewGateDetails ?? {})});
+}
+
+function assertReviewGateBindings(request,{superseding=false}={}) {
+  const evidence=request.reviewGateEvidence;
+  if (evidence===null) return;
+  const defaultBranch=evidence.defaultBranch;
+  const featureBranch=evidence.featureBranch;
+  const observedDefault=request.observed.repository.default_branch;
+  const observedFeature=request.observed.repository.feature_branch;
+  if (defaultBranch.payload.name!==observedDefault.name ||
+      featureBranch.expected_revision!==observedFeature.revision ||
+      featureBranch.payload.name!==request.observed.repository.feature_branch.name ||
+      featureBranch.payload.base_branch!==observedDefault.name ||
+      featureBranch.payload.head_sha!==observedFeature.head_sha) {
+    throw new CoreConflictError("Patch review-gate branch preconditions do not bind current heads");
+  }
+  if (superseding) {
+    const reconciliationDefault=request.reconciliationEvidence.defaultBranch;
+    if (defaultBranch.expected_revision!==reconciliationDefault.expected_revision ||
+        defaultBranch.payload.name!==reconciliationDefault.payload.name ||
+        defaultBranch.payload.head_sha!==reconciliationDefault.payload.head_sha) {
+      throw new CoreConflictError("Historical review gate does not bind its superseded reconciliation");
+    }
+  } else if (defaultBranch.expected_revision!==observedDefault.revision ||
+      defaultBranch.payload.head_sha!==observedDefault.head_sha) {
+    throw new CoreConflictError("Patch review-gate branch preconditions do not bind current heads");
+  }
+  const workflows=evidence.intent.operations.filter(operation =>
+    operation.payload?.kind==="release-check-request");
+  for (const operation of workflows) {
+    exact(operation.payload,["kind","patch_program_id","feature_program_id","branch",
+      "head_sha","required"],"patch review-gate check payload");
+    if (operation.payload.head_sha!==request.observed.repository.feature_branch.head_sha ||
+        canonicalJson(operation.payload.required)!==canonicalJson(request.observed.checks.required)) {
+      throw new CoreConflictError("Patch review-gate check evidence does not bind current checks");
+    }
+  }
+  const items=new Map(request.items.map(item => [item.work.item.id,item]));
+  const projects=new Map(evidence.staleProjects.map(operation =>
+    [operation.payload.work_item_id,operation]));
+  const reconciliationTime=Date.parse(request.reconciliationEvidence.receipt.created_at);
+  for (const pull of evidence.stalePulls) {
+    const payload=pull.payload;
+    const project=projects.get(payload.work_item_id);
+    const item=items.get(payload.work_item_id);
+    const result=payload.review_result;
+    if (project===undefined || item===undefined || item.pull_request===null || item.review===null ||
+        payload.patch_program_id!==project.payload.patch_program_id ||
+        payload.feature_program_id!==project.payload.feature_program_id ||
+        payload.pull_request_number!==project.payload.pull_request_number ||
+        payload.reviewed_revision!==project.payload.reviewed_revision ||
+        payload.current_revision!==project.payload.current_revision ||
+        payload.freshness!=="STALE" || project.payload.freshness!=="STALE" ||
+        payload.head_sha!==payload.reviewed_revision ||
+        payload.head_sha!==payload.current_revision ||
+        payload.reviewed_revision!==result.reviewed_revision ||
+        result.repository!==pull.repository ||
+        result.pull_request_number!==payload.pull_request_number ||
+        result.freshness!=="STALE" ||
+        Date.parse(result.recorded_at)>=reconciliationTime ||
+        updateManagedReviewBlock(payload.body,result)!==payload.body ||
+        project.payload.pull_request_revision!==pull.expected_revision ||
+        pull.repository!==item.work.item.repository ||
+        project.repository!==item.work.item.repository ||
+        payload.pull_request_number!==item.pull_request.number ||
+        project.payload.project_id!==item.work.project.project_id ||
+        project.payload.item_id!==item.work.project.item_id) {
+      throw new CoreConflictError("Patch review-gate stale pair does not bind its assigned Work item");
+    }
+    if (item.review.freshness==="STALE" &&
+        (pull.expected_revision!==item.pull_request.revision ||
+          project.expected_revision!==item.work.project.revision ||
+          project.payload.pull_request_revision!==item.pull_request.revision ||
+          payload.head_sha!==item.pull_request.head_sha ||
+          canonicalJson(result)!==canonicalJson(item.review) ||
+          payload.body!==item.pull_request.body)) {
+      throw new CoreConflictError("Stored stale review advanced beyond its completed review gate");
+    }
+  }
+}
+
 function normalizeCompletion(input) {
   const value=closedData(input,"patch completion request");
   exact(value,["patchProgram","pausedProgram","publication","snapshot"],
@@ -482,7 +720,7 @@ function normalizeCompletion(input) {
   exact(snapshot.source,["repository","revision","sha256"],"patch completion source");
   exact(snapshot.query,["kind","control_revision","control_repository","organization",
     "repositories","programs","ledger_sha256","patch_program","paused_program",
-    "publication","repository_configuration","project"],"patch completion query");
+    "publication","repository_configuration","project","phase_evidence"],"patch completion query");
   const query=snapshot.query;
   const queryOrganization=validateCoreDocument(query.organization,"organization-config.v1");
   const queryRepositories=Array.isArray(query.repositories) ? query.repositories.map(repository =>
@@ -515,9 +753,28 @@ function normalizeCompletion(input) {
     throw new CoreConflictError("Patch completion query and immutable source are inconsistent");
   }
   timestamp(snapshot.timestamp,"Patch completion timestamp");
+  exact(query.phase_evidence,["reconciliation","review_gate"],
+    "patch completion phase evidence");
+  const reconciliationEvidence=completedPhaseEvidence(query.phase_evidence.reconciliation,
+    "reconciliation",{paused,patch,patchRelease,featureRelease,completionQuery:query});
+  const reviewGateEvidence=completedPhaseEvidence(query.phase_evidence.review_gate,
+    "review-gate",{paused,patch,patchRelease,featureRelease,completionQuery:query});
+  if (reviewGateEvidence!==null && reconciliationEvidence===null) {
+    throw new CoreConflictError("Patch review-gate evidence requires completed reconciliation evidence");
+  }
+  if (reviewGateEvidence!==null &&
+      Date.parse(reviewGateEvidence.receipt.created_at)<Date.parse(reconciliationEvidence.receipt.created_at)) {
+    throw new CoreConflictError("Patch review-gate receipt predates reconciliation");
+  }
+  if ((reconciliationEvidence!==null &&
+        Date.parse(reconciliationEvidence.receipt.created_at)>Date.parse(snapshot.timestamp)) ||
+      (reviewGateEvidence!==null &&
+        Date.parse(reviewGateEvidence.receipt.created_at)>Date.parse(snapshot.timestamp))) {
+    throw new CoreConflictError("Patch completion phase evidence is newer than its snapshot");
+  }
   const observed=snapshot.observation;
   exact(observed,["kind","control_revision","project","patch","feature","repository",
-    "reviews","checks"],"patch completion observation");
+    "assigned_work","checks"],"patch completion observation");
   exact(observed.project,["id","revision"],"patch completion Project");
   exact(observed.patch,["program_id","program_revision","release_id","release_revision"],
     "patch completion release observation");
@@ -529,8 +786,12 @@ function normalizeCompletion(input) {
     "patch completion default branch");
   exact(observed.repository.feature_branch,["name","revision","head_sha"],
     "patch completion feature branch");
-  exact(observed.repository.reconciliation,["patch_commit","patch_commit_is_ancestor","drifted"],
+  exact(observed.repository.reconciliation,["publication_commit",
+    "publication_is_ancestor_of_current_default","current_default_is_ancestor_of_feature_release",
+    "drifted"],
     "patch completion reconciliation");
+  exact(observed.assigned_work,["release_id","release_revision","project_id",
+    "project_revision","work_item_ids","items"],"patch completion assigned Work inventory");
   exact(observed.checks,["head_sha","state","required"],"patch completion checks");
   if (observed.kind!=="patch-completion" || observed.control_revision!==query.control_revision ||
       observed.project.id!==query.project.node_id ||
@@ -542,10 +803,10 @@ function normalizeCompletion(input) {
       observed.feature.release_revision!==featureRelease.revision ||
       observed.repository.repository!==patchRelease.repository ||
       observed.repository.default_branch.name!==query.repository_configuration.default_branch ||
-      observed.repository.default_branch.head_sha!==publication.expected_revision ||
       observed.repository.feature_branch.name!==featureRelease.branch ||
-      observed.repository.reconciliation.patch_commit!==publication.expected_revision ||
-      typeof observed.repository.reconciliation.patch_commit_is_ancestor!=="boolean" ||
+      observed.repository.reconciliation.publication_commit!==publication.expected_revision ||
+      observed.repository.reconciliation.publication_is_ancestor_of_current_default!==true ||
+      typeof observed.repository.reconciliation.current_default_is_ancestor_of_feature_release!=="boolean" ||
       typeof observed.repository.reconciliation.drifted!=="boolean" ||
       !SHA.test(observed.repository.default_branch.head_sha) ||
       !SHA.test(observed.repository.feature_branch.head_sha)) {
@@ -554,11 +815,18 @@ function normalizeCompletion(input) {
   if (observed.repository.reconciliation.drifted) {
     throw new CoreBlockedError("Patch completion reconciliation is drifted");
   }
-  if (!Array.isArray(observed.reviews) || !Array.isArray(observed.checks.required) ||
+  if (!Array.isArray(observed.assigned_work.work_item_ids) ||
+      !Array.isArray(observed.assigned_work.items) || !Array.isArray(observed.checks.required) ||
       observed.checks.required.length===0 ||
       !["NOT_STARTED","PENDING","PASSED","FAILED"].includes(observed.checks.state) ||
       !(observed.checks.head_sha===null || SHA.test(observed.checks.head_sha))) {
     invalid("Patch completion reviews or checks are malformed");
+  }
+  if (observed.assigned_work.release_id!==featureRelease.release_id ||
+      observed.assigned_work.release_revision!==featureRelease.revision ||
+      observed.assigned_work.project_id!==observed.project.id ||
+      observed.assigned_work.project_revision!==observed.project.revision) {
+    throw new CoreConflictError("Patch completion Work inventory is not bound to the release and Project revision");
   }
   for (let index=0;index<observed.checks.required.length;index+=1) {
     const name=observed.checks.required[index];
@@ -571,70 +839,123 @@ function normalizeCompletion(input) {
   const reviewPullRequests=new Set();
   const reviewProjectItems=new Set();
   const reviewIds=new Set();
-  for (let index=0;index<observed.reviews.length;index+=1) {
-    const review=observed.reviews[index];
-    exact(review,["work_item_id","pull_request_number","pull_request_revision","head_sha",
-      "body","review_result","work"],`patch completion review[${index}]`);
-    const identity=parseWorkItemId(review.work_item_id);
-    const result=validateCoreDocument(review.review_result,"review-result.v1");
-    const state=deriveWorkItemState(review.work);
-    const pullKey=`${identity.repository}#${review.pull_request_number}`;
-    if (!Number.isSafeInteger(review.pull_request_number) || review.pull_request_number<1 ||
-        typeof review.pull_request_revision!=="string" || review.pull_request_revision.length===0 ||
-        typeof review.body!=="string" || !SHA.test(review.head_sha) ||
-        review.head_sha!==observed.repository.feature_branch.head_sha ||
-        result.pull_request_number!==review.pull_request_number ||
-        result.reviewed_revision!==review.work.review?.reviewed_revision ||
-        result.verdict!==review.work.review?.verdict ||
-        updateManagedReviewBlock(review.body,result)!==review.body ||
-        review.work.item.id!==review.work_item_id ||
-        review.work.pull_request?.state!=="READY" ||
-        review.work.pull_request.head_sha!==review.head_sha ||
-        review.work.physical_branch.head_sha!==review.head_sha ||
-        (result.reviewed_revision===review.head_sha && result.freshness!=="CURRENT") ||
-        (result.reviewed_revision!==review.head_sha &&
-          !["CURRENT","STALE"].includes(result.freshness))) {
-      invalid(`Patch completion review[${index}] is malformed`);
+  const itemIds=[];
+  const items=[];
+  for (let index=0;index<observed.assigned_work.items.length;index+=1) {
+    const item=observed.assigned_work.items[index];
+    exact(item,["work","pull_request","review"],`patch completion assigned Work[${index}]`);
+    const work=item.work;
+    deriveWorkItemState(work);
+    const identity=parseWorkItemId(work.item.id);
+    itemIds.push(work.item.id);
+    if (index>0 && itemIds[index-1]===work.item.id) {
+      throw new CoreConflictError("Patch completion assigned Work identities are duplicated");
+    }
+    if (index>0 && compareCanonicalText(itemIds[index-1],work.item.id)>0) {
+      invalid("Patch completion assigned Work identities must be unique and canonically ordered");
+    }
+    const assignment=work.release;
+    if (assignment.assigned!==true || assignment.active!==true ||
+        assignment.id!==`${featureRelease.repository}@${featureRelease.branch}` ||
+        assignment.repository!==featureRelease.repository ||
+        assignment.branch!==featureRelease.branch ||
+        assignment.milestone!==featureRelease.milestone ||
+        assignment.revision!==featureRelease.revision) {
+      throw new CoreConflictError("Patch completion Work assignment does not bind the paused feature release");
     }
     if (identity.repository!==patchRelease.repository ||
-        result.repository!==identity.repository ||
-        review.work.item.repository!==identity.repository ||
-        review.work.project.project_id!==observed.project.id ||
-        review.work.project.fields.repository!==identity.repository) {
-      throw new CoreConflictError("Patch completion review belongs to a foreign repository or Project");
+        work.item.repository!==identity.repository ||
+        work.project.project_id!==observed.project.id ||
+        work.project.fields.repository!==identity.repository) {
+      throw new CoreConflictError("Patch completion Work belongs to a foreign repository or Project");
     }
-    const scopedEpicId=review.work.item.kind==="epic"
-      ? review.work.item.id
-      : review.work.item.kind==="issue" ? review.work.parent?.id : null;
+    const scopedEpicId=work.item.kind==="epic"
+      ? work.item.id
+      : work.item.kind==="issue" ? work.parent?.id : null;
     if (scopedEpicId===null || !featureRelease.scope.includes(scopedEpicId)) {
-      throw new CoreConflictError("Patch completion review is outside the paused feature release scope");
+      throw new CoreConflictError("Patch completion Work is outside the paused feature release scope");
     }
-    if (review.work.item.kind==="epic") {
-      const assignment=review.work.release;
-      if (assignment.assigned!==true || assignment.active!==true ||
-          assignment.id!==`${featureRelease.repository}@${featureRelease.branch}` ||
-          assignment.repository!==featureRelease.repository ||
-          assignment.branch!==featureRelease.branch ||
-          assignment.milestone!==featureRelease.milestone ||
-          assignment.revision!==featureRelease.revision) {
-        throw new CoreConflictError("Patch completion epic assignment does not bind the paused feature release");
+    if (item.pull_request===null) {
+      if (item.review!==null || work.pull_request!==null || work.review!==null) {
+        throw new CoreConflictError("Patch completion Work without a pull request carries review evidence");
+      }
+    } else {
+      const pull=item.pull_request;
+      exact(pull,["repository","number","revision","head_branch","base_branch","head_sha",
+        "body","formal_review"],`patch completion pull request[${index}]`);
+      exact(pull.formal_review,["state","review_id","reviewed_revision"],
+        `patch completion formal review[${index}]`);
+      const pullKey=`${pull.repository}#${pull.number}`;
+      if (pull.repository!==identity.repository || !Number.isSafeInteger(pull.number) || pull.number<1 ||
+          typeof pull.revision!=="string" || pull.revision.length===0 ||
+          pull.head_branch!==work.item.branch || pull.base_branch!==work.item.base_branch ||
+          !SHA.test(pull.head_sha) || typeof pull.body!=="string" ||
+          work.pull_request?.state!=="READY" || work.pull_request.head_sha!==pull.head_sha ||
+          work.physical_branch.head_sha!==pull.head_sha) {
+        invalid(`Patch completion pull request[${index}] is malformed`);
+      }
+      if (reviewPullRequests.has(pullKey)) {
+        throw new CoreConflictError("Patch completion pull request identities are duplicated or ambiguous");
+      }
+      reviewPullRequests.add(pullKey);
+      if (item.review===null) {
+        if (work.review!==null || pull.formal_review.state!=="NONE" ||
+            pull.formal_review.review_id!==null || pull.formal_review.reviewed_revision!==null) {
+          throw new CoreConflictError("Patch completion unreviewed pull request carries review evidence");
+        }
+      } else {
+        const result=validateCoreDocument(item.review,"review-result.v1");
+        const expectedFormal=result.verdict==="APPROVED" ? "APPROVED" : "CHANGES_REQUESTED";
+        const expectedWorkReview=result.freshness==="STALE" ? null :
+          {verdict:result.verdict,reviewed_revision:result.reviewed_revision};
+        if (result.repository!==identity.repository || result.pull_request_number!==pull.number ||
+            result.reviewed_revision!==pull.head_sha || updateManagedReviewBlock(pull.body,result)!==pull.body ||
+            pull.formal_review.state!==expectedFormal || pull.formal_review.review_id!==result.review_id ||
+            pull.formal_review.reviewed_revision!==result.reviewed_revision ||
+            canonicalJson(work.review)!==canonicalJson(expectedWorkReview)) {
+          throw new CoreConflictError(`Patch completion review[${index}] is not exact`);
+        }
+        if (reviewIds.has(result.review_id)) {
+          throw new CoreConflictError("Patch completion review identities are duplicated or ambiguous");
+        }
+        reviewIds.add(result.review_id);
       }
     }
-    if (reviewWorkIds.has(review.work_item_id) || reviewPullRequests.has(pullKey) ||
-        reviewProjectItems.has(review.work.project.item_id) || reviewIds.has(result.review_id)) {
-      throw new CoreConflictError("Patch completion review identities are duplicated or ambiguous");
+    if (reviewWorkIds.has(work.item.id) || reviewProjectItems.has(work.project.item_id)) {
+      throw new CoreConflictError("Patch completion Work identities are duplicated or ambiguous");
     }
-    reviewWorkIds.add(review.work_item_id);
-    reviewPullRequests.add(pullKey);
-    reviewProjectItems.add(review.work.project.item_id);
-    reviewIds.add(result.review_id);
-    if (result.reviewed_revision!==review.head_sha &&
-        (state.status!=="In review" || state.gate!=="REVIEW_REQUIRED")) {
-      throw new CoreConflictError("Stale patch review does not derive the authoritative Work state");
-    }
+    reviewWorkIds.add(work.item.id);
+    reviewProjectItems.add(work.project.item_id);
+    items.push(Object.freeze({work,pull_request:item.pull_request,review:item.review}));
+  }
+  if (canonicalJson(observed.assigned_work.work_item_ids)!==canonicalJson(itemIds)) {
+    throw new CoreConflictError("Patch completion Work inventory is incomplete or ambiguous");
+  }
+  if (featureRelease.scope.some(epicId => !reviewWorkIds.has(epicId))) {
+    throw new CoreConflictError("Patch completion Work inventory omits a release-scope epic");
+  }
+  const requiresReconciliation=
+    !observed.repository.reconciliation.current_default_is_ancestor_of_feature_release;
+  if (requiresReconciliation && reconciliationEvidence!==null &&
+      observed.repository.default_branch.head_sha===
+        reconciliationEvidence.defaultBranch.payload.head_sha) {
+    throw new CoreConflictError("Patch reconciliation cannot be superseded without a new default head");
+  }
+  assertReviewGateBindings({reviewGateEvidence,reconciliationEvidence,observed,items},
+    {superseding:requiresReconciliation});
+  if (observed.repository.reconciliation.current_default_is_ancestor_of_feature_release &&
+      reconciliationEvidence!==null &&
+      reconciliationEvidence.reconciliation.payload.source_sha!==
+        observed.repository.default_branch.head_sha) {
+    throw new CoreConflictError("Patch reconciliation receipt does not bind current main");
+  }
+  if (observed.repository.reconciliation.current_default_is_ancestor_of_feature_release &&
+      reconciliationEvidence===null) {
+    throw new CoreConflictError("Patch completion lacks receipt-backed current-main reconciliation");
   }
   return Object.freeze({value,patch,paused,publication,patchRelease,featureRelease,
-    snapshot,query,observed});
+    snapshot,query,observed,items,reconciliationEvidence,reviewGateEvidence,
+    requiresReconciliation});
 }
 
 function completionManifest(request,program=request.paused) {
@@ -643,11 +964,14 @@ function completionManifest(request,program=request.paused) {
       expected_program_revision:request.paused.revision,program}};
 }
 
-function completionPreconditions(request) {
+function completionPreconditions(request,{resetPhaseEvidence=false}={}) {
+  const query=resetPhaseEvidence
+    ? {...request.query,phase_evidence:{reconciliation:null,review_gate:null}}
+    : request.query;
   return [{resource:"project",action:"verify",repository:null,
     expected_revision:request.observed.project.revision,
     payload:{kind:"release-patch-completion-precondition",
-      project_id:request.observed.project.id,query:request.query,
+      project_id:request.observed.project.id,query,
       snapshot_sha256:sha256Canonical(request.observed)}},
   {resource:"branch",action:"verify",repository:request.patchRelease.repository,
     expected_revision:request.observed.repository.default_branch.revision,
@@ -664,8 +988,9 @@ function completionPreconditions(request) {
 
 export function completePatchInterruption(input) {
   const request=normalizeCompletion(input);
-  const operations=completionPreconditions(request);
-  if (!request.observed.repository.reconciliation.patch_commit_is_ancestor) {
+  const operations=completionPreconditions(request,
+    {resetPhaseEvidence:request.requiresReconciliation});
+  if (request.requiresReconciliation) {
     operations.push({resource:"branch",action:"merge",repository:request.patchRelease.repository,
       expected_revision:request.observed.repository.feature_branch.revision,
       payload:{kind:"release-patch-reconcile",patch_program_id:request.patch.program_id,
@@ -673,37 +998,69 @@ export function completePatchInterruption(input) {
         feature_program_id:request.paused.program_id,
         feature_release_id:request.featureRelease.release_id,
         source_branch:request.observed.repository.default_branch.name,
-        source_sha:request.publication.expected_revision,
+        source_sha:request.observed.repository.default_branch.head_sha,
         target_branch:request.featureRelease.branch,
         target_sha:request.observed.repository.feature_branch.head_sha}});
     operations.push(completionManifest(request));
     return closedData(operations,"patch reconciliation operations");
   }
-  for (const review of request.observed.reviews) {
-    const result=review.review_result;
-    const state=deriveWorkItemState(review.work);
-    if (result.reviewed_revision!==review.head_sha && result.freshness!=="STALE") {
+  let reviewPhaseChanged=request.reviewGateEvidence===null;
+  for (const item of request.items) {
+    if (item.review===null) continue;
+    const result=item.review;
+    const pull=item.pull_request;
+    if (request.reviewGateEvidence!==null) {
+      const gateTime=Date.parse(request.reviewGateEvidence.receipt.created_at);
+      const recordedTime=Date.parse(result.recorded_at);
+      const staled=request.reviewGateEvidence.intent.operations.find(operation =>
+        operation.resource==="pull_request" && operation.payload?.kind==="release-patch-review-stale" &&
+        operation.payload.work_item_id===item.work.item.id &&
+        operation.payload.review_result?.review_id===result.review_id);
+      if (result.freshness==="STALE") {
+        const state=deriveWorkItemState(item.work);
+        if (!staled || canonicalJson(staled.payload.review_result)!==canonicalJson(result) ||
+            staled.payload.body!==pull.body || state.status!=="In review" ||
+            state.gate!=="REVIEW_REQUIRED" ||
+            item.work.project.fields.Status!==state.status ||
+            item.work.project.fields.Gate!==state.gate) {
+          throw new CoreConflictError("Stored stale review is not backed by the completed review gate");
+        }
+        continue;
+      }
+      if (recordedTime<=gateTime ||
+          request.reviewGateEvidence.staledReviewIds.includes(result.review_id)) {
+        throw new CoreConflictError("Current review does not postdate the completed review gate uniquely");
+      }
+      continue;
+    }
+    if (result.freshness==="STALE") {
+      throw new CoreConflictError("Stored stale review lacks completed review-gate evidence");
+    }
+    const reconciliationTime=Date.parse(request.reconciliationEvidence.receipt.created_at);
+    const recordedTime=Date.parse(result.recorded_at);
+    if (recordedTime===reconciliationTime) {
+      throw new CoreConflictError("Review time is ambiguous with the reconciliation receipt");
+    }
+    if (recordedTime<reconciliationTime) {
       const stale=validateCoreDocument({...result,freshness:"STALE"},"review-result.v1");
+      const projected=closedData({...item.work,review:null},"patch-staled Work snapshot");
+      const state=deriveWorkItemState(projected);
       operations.push({resource:"pull_request",action:"update",
-        repository:request.patchRelease.repository,expected_revision:review.pull_request_revision,
+        repository:request.patchRelease.repository,expected_revision:pull.revision,
         payload:{kind:"release-patch-review-stale",patch_program_id:request.patch.program_id,
-          feature_program_id:request.paused.program_id,work_item_id:review.work_item_id,
-          pull_request_number:review.pull_request_number,head_sha:review.head_sha,
-          reviewed_revision:result.reviewed_revision,current_revision:review.head_sha,
-          freshness:"STALE",body:updateManagedReviewBlock(review.body,stale),review_result:stale}});
+          feature_program_id:request.paused.program_id,work_item_id:item.work.item.id,
+          pull_request_number:pull.number,head_sha:pull.head_sha,
+          reviewed_revision:result.reviewed_revision,current_revision:pull.head_sha,
+          freshness:"STALE",body:updateManagedReviewBlock(pull.body,stale),
+          review_result:stale,work_review:null}});
       operations.push({resource:"project",action:"update",
-        repository:request.patchRelease.repository,expected_revision:review.work.project.revision,
+        repository:request.patchRelease.repository,expected_revision:item.work.project.revision,
         payload:{kind:"release-patch-review-stale",patch_program_id:request.patch.program_id,
-          feature_program_id:request.paused.program_id,work_item_id:review.work_item_id,
-          pull_request_number:review.pull_request_number,
-          pull_request_revision:review.pull_request_revision,
-          project_id:review.work.project.project_id,item_id:review.work.project.item_id,
-          reviewed_revision:result.reviewed_revision,current_revision:review.head_sha,
+          feature_program_id:request.paused.program_id,work_item_id:item.work.item.id,
+          pull_request_number:pull.number,pull_request_revision:pull.revision,
+          project_id:item.work.project.project_id,item_id:item.work.project.item_id,
+          reviewed_revision:result.reviewed_revision,current_revision:pull.head_sha,
           freshness:"STALE",fields:{Status:state.status,Gate:state.gate}}});
-    } else if (result.reviewed_revision!==review.head_sha &&
-        (review.work.project.fields.Status!==state.status ||
-          review.work.project.fields.Gate!==state.gate)) {
-      throw new CoreConflictError("Stale patch review does not carry REVIEW_REQUIRED Project state");
     }
   }
   const checksCurrent=request.observed.checks.head_sha===
@@ -716,8 +1073,9 @@ export function completePatchInterruption(input) {
         feature_program_id:request.paused.program_id,branch:request.featureRelease.branch,
         head_sha:request.observed.repository.feature_branch.head_sha,
         required:request.observed.checks.required}});
+    reviewPhaseChanged=true;
   }
-  if (operations.length>3) {
+  if (reviewPhaseChanged) {
     operations.push(completionManifest(request));
     return closedData(operations,"patch review and check operations");
   }

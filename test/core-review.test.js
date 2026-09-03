@@ -648,11 +648,10 @@ test("status recomputes stale freshness after a push and reports body formal and
   assert.equal(drift.next_command,"toss-core sync");
 });
 
-test("stored review control evidence rejects foreign pull requests repositories and recorded STALE state",() => {
+test("stored review control evidence rejects foreign repository and pull request identities",() => {
   for (const stored of [
     result({repository:OTHER_REPOSITORY}),
     result({pull_request_number:92}),
-    result({freshness:"STALE"}),
   ]) {
     const current=pullRequest({
       body:updateManagedReviewBlock("Human introduction.",stored),
@@ -670,6 +669,44 @@ test("stored review control evidence rejects foreign pull requests repositories 
       error => error instanceof CoreConflictError && error.exitCode===6,
     );
   }
+});
+
+test("stored patch-staled review remains reportable and can be replaced by a fresh review",() => {
+  const stale=result({freshness:"STALE"});
+  const stalePull=pullRequest({
+    body:updateManagedReviewBlock("Human introduction.",stale),
+    formal_review:{state:"APPROVED",review_id:stale.review_id,
+      reviewed_revision:stale.reviewed_revision},
+    recorded_result:stale,
+    work:workSnapshot({review:null}),
+  });
+  const contradictory={...stalePull,work:workSnapshot({review:{
+    verdict:stale.verdict,reviewed_revision:stale.reviewed_revision,
+  }})};
+  assert.throws(() => reviewStatus(statusInput(recording({
+    pullRequest:contradictory,result:stale,
+  }))),CoreConflictError,"STALE storage must clear the active Work review projection");
+
+  const status=reviewStatus(statusInput(recording({pullRequest:stalePull,result:stale})));
+  assert.equal(status.freshness,"STALE");
+  assert.equal(parseManagedReviewBlock(stalePull.body).block,renderManagedReviewBlock(stale));
+  assert.equal(status.formal_review.state,"APPROVED","formal review remains historical evidence");
+  assert.equal(status.merge_eligible,false);
+  assert.equal(status.state.status,"In review");
+  assert.equal(status.state.gate,"REVIEW_REQUIRED");
+  assert.equal(status.next_command,"toss-core review record");
+
+  const fresh=result({review_id:"REVIEW-20260903-0002",reviewed_at:LATER,recorded_at:LATER});
+  const operations=recordReview(recording({pullRequest:stalePull,result:fresh}));
+  const pull=operations.find(operation => operation.resource==="pull_request");
+  const projectUpdate=operations.find(operation => operation.resource==="project");
+  assert.equal(pull.payload.review_result.freshness,"CURRENT");
+  assert.equal(pull.payload.review_result.review_id,fresh.review_id);
+  assert.equal(pull.payload.formal_review.action,"APPROVE");
+  assert.equal(pull.payload.formal_review.review_id,fresh.review_id);
+  assert.equal(parseManagedReviewBlock(pull.payload.body).block,renderManagedReviewBlock(fresh));
+  assert.equal(projectUpdate.payload.fields.Status ?? stalePull.work.project.fields.Status,"In review");
+  assert.equal(projectUpdate.payload.fields.Gate,"NONE");
 });
 
 test("recording rejects stale checks while current pending checks can record approval without merge eligibility",() => {

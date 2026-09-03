@@ -193,9 +193,10 @@ function patchTransitionEvidence(state,featureProgram,patchPrograms,repository,i
 }
 
 export async function runPatchInterruptionStep(command,services,bugSnapshot) {
-  if (bugSnapshot?.work?.item?.kind!=="bug") return null;
-  const id=bugSnapshot.work.item.id;
-  const repository=bugSnapshot.work.item.repository;
+  const bug=closedData(bugSnapshot,"patch interruption bug snapshot");
+  if (bug?.work?.item?.kind!=="bug") return null;
+  const id=bug.work.item.id;
+  const repository=bug.work.item.repository;
   const state=await planningState(services,{requireResolved:false});
   assertResolvedReleaseEvidence(state,{repository});
   const program=featureProgramForBug(state,repository);
@@ -227,7 +228,7 @@ export async function runPatchInterruptionStep(command,services,bugSnapshot) {
     query,observation,receipt_id:receiptId,
     timestamp:ownDataFunction(services,"clock","services")(),
   },"patch interruption aggregate snapshot");
-  const decision=planPatchInterruption({bug:bugSnapshot,
+  const decision=planPatchInterruption({bug,
     latestPublished:observation.latest_published,activeFeatureProgram:program,snapshot});
   const selected=decision.pauseOperations.length>0
     ? decision.pauseOperations

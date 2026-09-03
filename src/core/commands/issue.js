@@ -58,7 +58,10 @@ async function start(command,services) {
   assertUngated(command);
   if (command.options.from!==null) throw new CoreValidationError("issue start does not consume an input file");
   const id=command.args[0]; parseWorkItemId(id);
-  const observed=await ownDataFunction(ownDataValue(services,"github","services"),"snapshot","github")({kind:"issue-start",id});
+  const observed=closedData(
+    await ownDataFunction(ownDataValue(services,"github","services"),"snapshot","github")({kind:"issue-start",id}),
+    "issue start snapshot",
+  );
   const reconciliation=await reconciliationEvidence(services,id);
   const snapshot=reconciliation.required
     ? closedData({...observed,work:applyReconciliationGate(observed.work,reconciliation)},"reconciliation-gated issue start snapshot")

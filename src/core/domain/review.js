@@ -208,5 +208,5 @@ export function reviewFreshness(resultInput,currentHeadSha) {
   const result=normalizeReviewResult(resultInput);
   const current=sha(currentHeadSha,"Current pull request head");
   sha(result.reviewed_revision,"Reviewed revision");
-  return result.reviewed_revision===current ? "CURRENT" : "STALE";
+  return result.freshness==="STALE" || result.reviewed_revision!==current ? "STALE" : "CURRENT";
 }

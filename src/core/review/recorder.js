@@ -271,8 +271,8 @@ function validateRecordedSurfaces(pullRequest,recorded) {
     return parsed;
   }
   if (recorded.repository!==pullRequest.repository ||
-      recorded.pull_request_number!==pullRequest.number || recorded.freshness!=="CURRENT") {
-    conflict("The stored review result does not identify an originally current result for this pull request");
+      recorded.pull_request_number!==pullRequest.number) {
+    conflict("The stored review result does not identify this pull request");
   }
   if (parsed===null || parsed.block!==renderManagedReviewBlock(recorded)) {
     conflict("The managed PR review body conflicts with the recorded review result");
@@ -283,9 +283,8 @@ function validateRecordedSurfaces(pullRequest,recorded) {
       pullRequest.formal_review.reviewed_revision!==recorded.reviewed_revision) {
     conflict("The formal GitHub review conflicts with the recorded review result");
   }
-  const expectedWork=Object.freeze({
-    verdict:recorded.verdict,
-    reviewed_revision:recorded.reviewed_revision,
+  const expectedWork=recorded.freshness==="STALE" ? null : Object.freeze({
+    verdict:recorded.verdict,reviewed_revision:recorded.reviewed_revision,
   });
   if (canonicalJson(pullRequest.work.review)!==canonicalJson(expectedWork)) {
     conflict("Task 3 work review evidence conflicts with the recorded result");
