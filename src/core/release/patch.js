@@ -845,7 +845,10 @@ function normalizeCompletion(input) {
     const item=observed.assigned_work.items[index];
     exact(item,["work","pull_request","review"],`patch completion assigned Work[${index}]`);
     const work=item.work;
-    deriveWorkItemState(work);
+    const derived=deriveWorkItemState(work);
+    if (work.project.fields.Status!==derived.status || work.project.fields.Gate!==derived.gate) {
+      throw new CoreConflictError("Patch completion Project Status or Gate is not authoritative");
+    }
     const identity=parseWorkItemId(work.item.id);
     itemIds.push(work.item.id);
     if (index>0 && itemIds[index-1]===work.item.id) {

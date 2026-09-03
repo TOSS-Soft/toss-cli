@@ -174,7 +174,8 @@ function activePatchProgram(paused,scope=BUG,{programId="TOSS-OS-R0002",
 function linkedStatusSnapshot(state,kind,program,patchLink) {
   const release=program.repository_releases[0];
   const body={kind,control_revision:state.revision,
-    program_revisions:[{program_id:program.program_id,revision:program.revision}],
+    program_revisions:state.programs.map(value => ({program_id:value.program_id,
+      revision:value.revision})),
     project:{id:"PVT_TOSS_OS_2",revision:"project-status-1"},
     repositories:[{program_id:program.program_id,repository:release.repository,
       repository_revision:"repository-status-1",release_id:release.release_id,
@@ -186,6 +187,37 @@ function linkedStatusSnapshot(state,kind,program,patchLink) {
       gates:[],checks:[],patch_link:patchLink}]};
   return {...body,source:{repository:CONTROL_REPOSITORY,revision:state.revision,
     sha256:sha256Canonical({control:state,github:body})}};
+}
+
+function statelessPublicStatusSnapshot(query) {
+  const manifests=Array.isArray(query.programs) ? query.programs : [];
+  const selected=query.kind==="release-status"
+    ? (query.program===null ? [] : [query.program])
+    : (Array.isArray(query.selected_programs) ? query.selected_programs : manifests);
+  const patchLink=(program,release) => {
+    if (program.interrupts!==null) return program.interrupts.program_id;
+    if (release.phase!=="PAUSED") return null;
+    const matches=manifests.filter(candidate => candidate.interrupts!==null &&
+      candidate.interrupts.program_id===program.program_id &&
+      candidate.interrupts.repository_release_id===release.release_id &&
+      candidate.interrupts.paused_release_revision===release.revision);
+    return matches.length===1 ? matches[0].program_id : null;
+  };
+  return {kind:query.kind,control_revision:query.control_revision,
+    program_revisions:manifests.map(program => ({program_id:program.program_id,
+      revision:program.revision})),
+    project:{id:query.project.node_id,revision:"project-status-public"},
+    repositories:selected.flatMap(program => program.repository_releases.map(release => ({
+      program_id:program.program_id,repository:release.repository,
+      repository_revision:"repository-status-public",release_id:release.release_id,
+      release_revision:release.revision,
+      milestone:release.milestone===null ? null : {title:release.milestone,state:"OPEN",
+        revision:"milestone-status-public"},
+      branch:release.branch===null ? null : {name:release.branch,base_branch:"main",
+        head_sha:MAIN_SHA,revision:"branch-status-public"},release_pull_request:null,
+      scope:program.selected_scope.filter(value => release.scope.includes(value.epic_id)),
+      gates:[],checks:[],patch_link:patchLink(program,release),
+    })))};
 }
 
 async function startIssueWithSnapshot(snapshot) {
@@ -327,13 +359,13 @@ function makeCompletionChildReview(snapshot,{parentId=FEATURE}={}) {
   review.work={...review.work,
     item:{...review.work.item,id:childId,issue_number:11,kind:"issue",parent_id:parentId,
       acceptance_criteria:["The governed child remains reviewable after patch reconciliation."],
-      branch:"issue/11-governed-child",base_branch:parentBranch,milestone:"v2.2.0"},
+      branch:"issue/11-governed-child",base_branch:parentBranch,milestone:"v2.2.0",gate:"NONE"},
     prepared:null,scope_approved:null,children_complete:null,
     parent:{id:parentId,branch:parentBranch,revision:"issue-10-1"},
     authority:{epic_acceptance_required:false,release_approval_required:false},
     project:{...review.work.project,item_id:"PVTI_issue_11",revision:"project-issue-11",
-      fields:{...review.work.project.fields,parent:parentId,branch:"issue/11-governed-child",
-        base_branch:parentBranch}}};
+      fields:{...review.work.project.fields,Gate:"NONE",parent:parentId,
+        branch:"issue/11-governed-child",base_branch:parentBranch}}};
   snapshot.observation.assigned_work.items.push(review);
   snapshot.observation.assigned_work.work_item_ids.push(childId);
   return review;
@@ -355,7 +387,8 @@ function assignedFeatureWork(feature,{number,head,kind="issue",parentId=FEATURE,
   const branch=epic ? "epic/10-feature" : `issue/${number}-governed-child`;
   const baseBranch=epic ? feature.branch : "epic/10-feature";
   const status=hasPullRequest ? "In review" : "In progress";
-  const gate=reviewResult?.freshness==="STALE" ? "REVIEW_REQUIRED" : "NONE";
+  const gate=reviewResult?.freshness==="STALE" ? "REVIEW_REQUIRED" :
+    hasPullRequest && epic ? "EPIC_ACCEPTANCE_REQUIRED" : "NONE";
   return {schema_version:"work-state-snapshot.v1",item:{schema_version:"work-item.v1",
     id,repository:REPOSITORY,issue_number:number,kind,parent_id:epic ? null : parentId,
     ...(epic ? {} : {acceptance_criteria:["The governed child remains complete after reconciliation."]}),
@@ -812,6 +845,42 @@ test("exported patch command helper rejects hostile bug snapshots without invoki
       error => error?.exitCode===5);
   }
   assert.equal(traps,0);
+});
+
+test("public status queries give a stateless adapter the complete pinned manifest set",async () => {
+  const paused=pausedFeatureProgram();
+  const released=releasedPatchProgram(activePatchProgram(paused)).program;
+  const state={revision:"control-status-public",organization:organization(),
+    repositories:[repositoryConfiguration()],programs:[paused,released],intents:[],receipts:[]};
+  const queries=[];
+  const services={
+    control:{async loadReleasePlanningState() { return structuredClone(state); }},
+    github:{async snapshot(query) {
+      queries.push(structuredClone(query));
+      return statelessPublicStatusSnapshot(query);
+    }},
+  };
+
+  const release=await dispatchCoreCommand(
+    parseCoreCommand(["release","status",REPOSITORY]),{services},
+  );
+  assert.equal(release.exitCode,0,JSON.stringify(release.result.error));
+  assert.equal(release.result.data.program.id,paused.program_id);
+  assert.equal(release.result.data.patch_link,released.program_id);
+
+  const program=await dispatchCoreCommand(
+    parseCoreCommand(["program","status",paused.program_id]),{services},
+  );
+  assert.equal(program.exitCode,0,JSON.stringify(program.result.error));
+  assert.deepEqual(program.result.data.programs.map(value => value.id),[paused.program_id]);
+  assert.equal(program.result.data.programs[0].tracks[0].patch_link,released.program_id);
+
+  const expectedIds=[paused.program_id,released.program_id];
+  assert.equal(queries.length,2);
+  for (const query of queries) {
+    assert.deepEqual(query.programs.map(value => value.program_id),expectedIds);
+  }
+  assert.deepEqual(queries[1].selected_programs.map(value => value.program_id),[paused.program_id]);
 });
 
 test("release status derives the patch target and rejects a null adapter override",() => {
@@ -1874,6 +1943,29 @@ test("completed review gate preserves stored STALE evidence and does not stale a
   assert.equal(items[1].work.review,null);
   assert.equal(items[1].pull_request.formal_review.state,"APPROVED",
     "formal review remains immutable historical evidence");
+});
+
+test("patch resume requires authoritative Project fields for a later CURRENT re-review",() => {
+  const {paused,patch,publication,reconciliation,reviewGate,current}=
+    completedReviewedReconciliationRound();
+  const exact=ruledCompletionSnapshot({patch,paused,publication,currentMain:PATCH_SHA,
+    featureHead:MERGED_SHA,reconciled:true,items:[current],
+    phaseEvidence:{reconciliation,review_gate:reviewGate},checksState:"PENDING"});
+  const resumed=completePatchInterruption({patchProgram:patch,pausedProgram:paused,
+    publication,snapshot:exact});
+  assert.equal(resumed.find(operation => operation.payload.kind==="release-program-manifest")
+    .payload.program.phase,"ACTIVE");
+  assert.equal(current.work.project.fields.Gate,"EPIC_ACCEPTANCE_REQUIRED");
+
+  const drifted=structuredClone(exact);
+  drifted.observation.assigned_work.items[0].work.project.fields.Gate="NONE";
+  rehashCompletionSnapshot(drifted);
+  let operations=null;
+  assert.throws(() => {
+    operations=completePatchInterruption({patchProgram:patch,pausedProgram:paused,
+      publication,snapshot:drifted});
+  },CoreConflictError);
+  assert.equal(operations,null,"Project reconciliation drift must fail before operations are returned");
 });
 
 test("completed review-gate evidence binds each stale PR to its exact Project item",() => {

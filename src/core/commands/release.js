@@ -79,7 +79,8 @@ async function status(command,services) {
   const programId=candidates[0]?.program.program_id ?? null;
   const githubSnapshot=await ownDataFunction(
     ownDataValue(services,"github","services"),"snapshot","github",
-  )({kind:"release-status",control_revision:state.revision,program:candidates[0]?.program ?? null,
+  )({kind:"release-status",control_revision:state.revision,programs:state.programs,
+    program:candidates[0]?.program ?? null,
     release:candidates[0]?.release ?? null,repository,
     repository_configuration:state.repositories.find(value => value.repository===repository) ?? null,
     project:state.organization.project});

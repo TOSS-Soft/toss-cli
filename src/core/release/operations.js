@@ -778,7 +778,8 @@ function normalizedStatusSnapshot(input,state,programs,kind,selectedTracks=null)
   if (value.source.sha256!==sha256Canonical({control:state,github:statusBody(value)})) {
     throw new CoreConflictError("Release status source hash does not bind its control and GitHub observations");
   }
-  const revisions=programs.map(program => ({program_id:program.program_id,revision:program.revision}));
+  const revisions=state.programs.map(program => ({program_id:program.program_id,
+    revision:program.revision}));
   if (canonicalJson(value.program_revisions)!==canonicalJson(revisions)) {
     throw new CoreConflictError("Release status program revisions are stale");
   }

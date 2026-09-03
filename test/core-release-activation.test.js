@@ -122,7 +122,8 @@ function activationBody(state,program) {
 function statusBody(state,kind,programs) {
   return {
     kind,control_revision:state.revision,
-    program_revisions:programs.map(program => ({program_id:program.program_id,revision:program.revision})),
+    program_revisions:(state.programs ?? programs).map(program => ({program_id:program.program_id,
+      revision:program.revision})),
     project:{id:"PVT_TOSS_OS_2",revision:"project-2"},
     repositories:programs.flatMap(program => program.repository_releases.map(release => ({
       program_id:program.program_id,repository:release.repository,
@@ -369,9 +370,9 @@ function releaseHarness() {
   const github=Object.freeze({
     async snapshot(query) {
       calls.push({method:"snapshot",query:structuredClone(query)});
-      const selectedPrograms=query.kind==="program-status" ? query.programs :
+      const selectedPrograms=query.kind==="program-status" ? query.selected_programs :
         query.program===null || query.program===undefined ? [] : [query.program];
-      const planning={revision:query.control_revision};
+      const planning={revision:query.control_revision,programs:query.programs};
       const body=query.kind==="release-plan" ? releasePlanBody(query.control_revision,{approved:planApproved}) :
         query.kind==="release-activation"
           ? structuredClone(activationOverride ?? activationBody(planning,query.program))

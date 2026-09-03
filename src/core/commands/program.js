@@ -36,7 +36,8 @@ export async function runProgramCommand(command,services) {
       program.repository_releases.map(release => release.repository)));
     const github=closedData(await ownDataFunction(
       ownDataValue(services,"github","services"),"snapshot","github",
-    )({kind:"program-status",control_revision:state.revision,programs,
+    )({kind:"program-status",control_revision:state.revision,programs:state.programs,
+      selected_programs:programs,
       repository_configurations:state.repositories.filter(value => repositories.has(value.repository)),
       project:state.organization.project}),"program status GitHub snapshot");
     if (!github || typeof github!=="object" || Array.isArray(github) || Object.hasOwn(github,"source")) {
