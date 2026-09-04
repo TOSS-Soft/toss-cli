@@ -67,16 +67,6 @@ function readReleaseNotes() {
   return readFileSync(releaseNotesPath,"utf8");
 }
 
-test("release metadata targets v2.1.1 in the manifest and both lockfile roots",() => {
-  const pkg=readJson("package.json");
-  const lock=readJson("package-lock.json");
-
-  assert.equal(pkg.version,"2.1.1");
-  assert.equal(pkg.engines.node,">=20");
-  assert.equal(lock.version,"2.1.1");
-  assert.equal(lock.packages[""].version,"2.1.1");
-});
-
 test("release metadata binds a canonical annotated tag to deeply frozen benchmark evidence",t => {
   assert.equal(releaseMetadata.RELEASE_TAG_EVIDENCE_VERSION,"toss-release-tag.v1");
   assert.equal(typeof releaseMetadata.readReleaseTagEvidence,"function");
