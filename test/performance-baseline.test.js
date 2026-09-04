@@ -17,8 +17,6 @@ const historicalLockSource=readFileSync(
 const historicalLock=JSON.parse(historicalLockSource);
 const currentLock=JSON.parse(lock);
 const BASELINE_SHA256="f84798183d695a7ddbcef775a9b502d3d4c393259d94ff53993303a44ed699a9";
-const HISTORICAL_ROOT_BIN=Object.freeze({toss:"bin/toss.js"});
-const CORE_DUAL_BIN=Object.freeze({toss:"bin/toss.js","toss-core":"bin/toss-core.js"});
 const FAST_URI_PATH="node_modules/fast-uri";
 const HISTORICAL_FAST_URI=Object.freeze({
   version:"3.1.5",
@@ -41,13 +39,6 @@ const APPROVED_FAST_URI=Object.freeze({
   license:"BSD-3-Clause",
 });
 
-function hasExactBin(value,expected) {
-  const keys=Object.keys(expected);
-  return value!==null && typeof value==="object" && !Array.isArray(value) &&
-    Object.keys(value).length===keys.length &&
-    keys.every(key => value[key]===expected[key]);
-}
-
 function hasExactRecord(value,expected) {
   return isDeepStrictEqual(value,expected);
 }
@@ -56,11 +47,6 @@ function normalizedReleaseVersionLock(value,{normalizeHistoricalFastUri=false}={
   const normalized=structuredClone(value);
   normalized.version="<release-version>";
   normalized.packages[""].version="<release-version>";
-  // The v2.1.1 capture predates the approved second executable. Normalize
-  // only that exact historical root metadata, never arbitrary bin drift.
-  if (hasExactBin(normalized.packages[""].bin,HISTORICAL_ROOT_BIN)) {
-    normalized.packages[""].bin=structuredClone(CORE_DUAL_BIN);
-  }
   // The sole dependency normalization is the reviewed security repair. Any
   // field-level drift prevents an exact match and remains visible to the diff.
   if (normalizeHistoricalFastUri &&
@@ -138,6 +124,16 @@ test("historical performance lock permits only approved metadata and fast-uri se
   assert.notDeepEqual(
     normalizedHistoricalReleaseVersionLock(historicalLock),
     normalizedReleaseVersionLock(fastUriReversion),
+  );
+
+  const formerDualBinCandidate=structuredClone(currentLock);
+  formerDualBinCandidate.packages[""].bin={
+    toss:"bin/toss.js",
+    "toss-core":"bin/toss-core.js",
+  };
+  assert.notDeepEqual(
+    normalizedHistoricalReleaseVersionLock(historicalLock),
+    normalizedReleaseVersionLock(formerDualBinCandidate),
   );
 
   const dependencyDrift=structuredClone(currentLock);

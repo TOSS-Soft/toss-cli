@@ -39,6 +39,8 @@ test("v2.1.3 release notes record the corrected standalone Core package",() => {
   assert.equal(notes.includes("TOSS-Soft/toss-core"),true);
   assert.equal(notes.includes("126986a97a2123db9f20d4bf8ca165b8ded2bde5"),true);
   assert.equal(notes.includes("d51a1123662a0b2c38e8aa6b69fcd5eb77e3160f97ab55b38400097df4ac69d3"),true);
+  assert.equal(notes.includes("private `@toss-soft/core@0.1.0` package"),true);
+  assert.equal(notes.includes("The `toss` CLI is unchanged."),true);
   assert.equal(notes.includes("The `toss` command behavior remains in this package."),true);
   assert.equal(notes.includes("TOSS CLI does not include a Core shim or dependency."),true);
   assert.equal(notes.includes("fast-uri@3.1.7"),true);

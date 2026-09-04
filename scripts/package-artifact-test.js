@@ -57,6 +57,35 @@ function runPackedCli(packageRoot,args,cwd) {
   return run(process.execPath,[path.join(packageRoot,"bin","toss.js"),...args],{cwd});
 }
 
+function assertPackedContractReferencesResolve(packageRoot) {
+  const contractsRoot=path.join(packageRoot,"docs","contracts");
+  const contractPaths=fs.readdirSync(contractsRoot)
+    .filter(filename => filename.endsWith(".md"))
+    .sort();
+  let referenceCount=0;
+  for (const contractPath of contractPaths) {
+    const source=fs.readFileSync(path.join(contractsRoot,contractPath),"utf8");
+    for (const match of source.matchAll(
+      /`((?:\.\.?\/)?[A-Za-z0-9][A-Za-z0-9._/-]*\.md(?:#[^`\s]+)?)`/gu,
+    )) {
+      referenceCount+=1;
+      const referencePath=match[1].split("#",1)[0];
+      const resolved=path.resolve(contractsRoot,path.dirname(contractPath),referencePath);
+      assert.equal(
+        resolved.startsWith(`${contractsRoot}${path.sep}`),
+        true,
+        `packed contract ${contractPath} has an unsafe local reference: ${match[1]}`,
+      );
+      assert.equal(
+        fs.existsSync(resolved),
+        true,
+        `packed contract ${contractPath} has a missing local reference: ${match[1]}`,
+      );
+    }
+  }
+  assert.ok(referenceCount>0,"packed contracts contain no checked local references");
+}
+
 try {
   const npmRoot=resolveNpmRoot();
   const npmRequire=createRequire(path.join(npmRoot,"package.json"));
@@ -80,6 +109,7 @@ try {
   await npmTar.x({file:artifact,cwd:extractRoot});
   const packedRoot=path.join(extractRoot,"package");
   installYaml(packedRoot);
+  assertPackedContractReferencesResolve(packedRoot);
   const packedManifest=JSON.parse(fs.readFileSync(path.join(packedRoot,"package.json"),"utf8"));
   assert.deepEqual(packedManifest.bin,{toss:"bin/toss.js"});
   assert.equal(packedFiles.some(file => file?.path==="bin/toss-core.js"),false);
