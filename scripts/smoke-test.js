@@ -188,9 +188,9 @@ assert.doesNotMatch(projectBriefTemplate,/^langsmith:/m);
 
 const packageMetadata=JSON.parse(fs.readFileSync(path.join(root,"package.json"),"utf8"));
 assert.equal(packageMetadata.version,packageVersion);
-assert.equal(packageMetadata.version,"2.1.1");
-assert.equal(lockMetadata.version,"2.1.1");
-assert.equal(lockMetadata.packages[""].version,"2.1.1");
+assert.equal(packageMetadata.version,"2.1.2");
+assert.equal(lockMetadata.version,"2.1.2");
+assert.equal(lockMetadata.packages[""].version,"2.1.2");
 assert.equal(packageMetadata.keywords.includes("langsmith"),false);
 assert.ok(packageMetadata.keywords.includes("modular-governance"));
 assert.ok(fs.existsSync(path.join(root,"docs/migrations/governance-v2.md")));
