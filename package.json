@@ -4,8 +4,7 @@
   "description": "TOSS PM Governance project bootstrap CLI",
   "type": "module",
   "bin": {
-    "toss": "bin/toss.js",
-    "toss-core": "bin/toss-core.js"
+    "toss": "bin/toss.js"
   },
   "files": [
     "bin",
