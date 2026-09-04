@@ -52,7 +52,7 @@ function hasExactRecord(value,expected) {
   return isDeepStrictEqual(value,expected);
 }
 
-function normalizedReleaseVersionLock(value) {
+function normalizedReleaseVersionLock(value,{normalizeHistoricalFastUri=false}={}) {
   const normalized=structuredClone(value);
   normalized.version="<release-version>";
   normalized.packages[""].version="<release-version>";
@@ -63,10 +63,15 @@ function normalizedReleaseVersionLock(value) {
   }
   // The sole dependency normalization is the reviewed security repair. Any
   // field-level drift prevents an exact match and remains visible to the diff.
-  if (hasExactRecord(normalized.packages[FAST_URI_PATH],HISTORICAL_FAST_URI)) {
+  if (normalizeHistoricalFastUri &&
+    hasExactRecord(normalized.packages[FAST_URI_PATH],HISTORICAL_FAST_URI)) {
     normalized.packages[FAST_URI_PATH]=structuredClone(APPROVED_FAST_URI);
   }
   return normalized;
+}
+
+function normalizedHistoricalReleaseVersionLock(value) {
+  return normalizedReleaseVersionLock(value,{normalizeHistoricalFastUri:true});
 }
 
 function median(samples,field) {
@@ -88,7 +93,7 @@ function assertBaselineIntegrity(candidate,source=baselineSource) {
     createHash("sha256").update(historicalLockSource).digest("hex"),
   );
   assert.deepEqual(
-    normalizedReleaseVersionLock(historicalLock),
+    normalizedHistoricalReleaseVersionLock(historicalLock),
     normalizedReleaseVersionLock(currentLock),
   );
   assert.equal(candidate.samples.length,3);
@@ -123,28 +128,36 @@ test("historical performance lock permits only approved metadata and fast-uri se
     baseline.identity.lock_sha256,
   );
   assert.deepEqual(
-    normalizedReleaseVersionLock(historicalLock),
+    normalizedHistoricalReleaseVersionLock(historicalLock),
     normalizedReleaseVersionLock(currentLock),
+  );
+  assert.deepEqual(currentLock.packages[FAST_URI_PATH],APPROVED_FAST_URI);
+
+  const fastUriReversion=structuredClone(currentLock);
+  fastUriReversion.packages[FAST_URI_PATH]=structuredClone(HISTORICAL_FAST_URI);
+  assert.notDeepEqual(
+    normalizedHistoricalReleaseVersionLock(historicalLock),
+    normalizedReleaseVersionLock(fastUriReversion),
   );
 
   const dependencyDrift=structuredClone(currentLock);
   dependencyDrift.packages["node_modules/ajv"].integrity="sha512-drift";
   assert.notDeepEqual(
-    normalizedReleaseVersionLock(historicalLock),
+    normalizedHistoricalReleaseVersionLock(historicalLock),
     normalizedReleaseVersionLock(dependencyDrift),
   );
 
   const fastUriVersionDrift=structuredClone(currentLock);
   fastUriVersionDrift.packages[FAST_URI_PATH].version="3.1.6";
   assert.notDeepEqual(
-    normalizedReleaseVersionLock(historicalLock),
+    normalizedHistoricalReleaseVersionLock(historicalLock),
     normalizedReleaseVersionLock(fastUriVersionDrift),
   );
 
   const fastUriIntegrityDrift=structuredClone(currentLock);
   fastUriIntegrityDrift.packages[FAST_URI_PATH].integrity="sha512-drift";
   assert.notDeepEqual(
-    normalizedReleaseVersionLock(historicalLock),
+    normalizedHistoricalReleaseVersionLock(historicalLock),
     normalizedReleaseVersionLock(fastUriIntegrityDrift),
   );
 
@@ -152,7 +165,7 @@ test("historical performance lock permits only approved metadata and fast-uri se
   fastUriResolutionDrift.packages[FAST_URI_PATH].resolved=
     "https://registry.npmjs.org/fast-uri/-/fast-uri-3.1.8.tgz";
   assert.notDeepEqual(
-    normalizedReleaseVersionLock(historicalLock),
+    normalizedHistoricalReleaseVersionLock(historicalLock),
     normalizedReleaseVersionLock(fastUriResolutionDrift),
   );
 
@@ -160,14 +173,14 @@ test("historical performance lock permits only approved metadata and fast-uri se
   fastUriFundingDrift.packages[FAST_URI_PATH].funding[0].url=
     "https://example.invalid/fast-uri";
   assert.notDeepEqual(
-    normalizedReleaseVersionLock(historicalLock),
+    normalizedHistoricalReleaseVersionLock(historicalLock),
     normalizedReleaseVersionLock(fastUriFundingDrift),
   );
 
   const binDrift=structuredClone(currentLock);
   binDrift.packages[""].bin={toss:"bin/toss.js",forged:"bin/forged.js"};
   assert.notDeepEqual(
-    normalizedReleaseVersionLock(historicalLock),
+    normalizedHistoricalReleaseVersionLock(historicalLock),
     normalizedReleaseVersionLock(binDrift),
   );
 });
