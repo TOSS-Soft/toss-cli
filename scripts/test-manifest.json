@@ -13,6 +13,7 @@
       "test/core-foundation-commands.test.js",
       "test/core-release-planner.test.js",
       "test/core-release-state.test.js",
+      "test/core-removal-boundary.test.js",
       "test/core-semver.test.js",
       "test/core-state.test.js",
       "test/decisions.test.js",
