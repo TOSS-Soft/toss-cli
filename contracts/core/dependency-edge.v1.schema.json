@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://toss.software/schemas/core/dependency-edge.v1.schema.json",
+  "title": "TOSS Core Dependency Edge v1",
+  "description": "A revision-bound, provenance-bearing mandatory dependency between governed work items.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "edge_id", "source", "target", "kind", "rationale", "provenance", "revision"],
+  "properties": {
+    "schema_version": {"const": "dependency-edge.v1"},
+    "edge_id": {"type": "string", "pattern": "^DEP-[A-Za-z0-9][A-Za-z0-9._-]*$"},
+    "source": {"$ref": "#/$defs/work_item_id"},
+    "target": {"$ref": "#/$defs/work_item_id"},
+    "kind": {"const": "requires"},
+    "rationale": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"},
+    "provenance": {"$ref": "#/$defs/provenance"},
+    "revision": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"}
+  },
+  "$defs": {
+    "work_item_id": {"type": "string", "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?/[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?#[1-9][0-9]*$"},
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_revision", "source_sha256", "locations"],
+      "properties": {
+        "source_revision": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"},
+        "source_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "locations": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"}
+        }
+      }
+    }
+  }
+}

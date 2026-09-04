@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://toss.software/schemas/core/work-item.v1.schema.json",
+  "title": "TOSS Core Work Item v1",
+  "description": "A closed machine-owned lifecycle projection for one governed epic, issue, or bounded bug.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "repository", "issue_number", "kind", "parent_id", "branch", "base_branch", "milestone", "status", "gate"],
+  "properties": {
+    "schema_version": {"const": "work-item.v1"},
+    "id": {"$ref": "#/$defs/work_item_id"},
+    "repository": {"$ref": "#/$defs/repository"},
+    "issue_number": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+    "kind": {"enum": ["bug", "epic", "issue"]},
+    "parent_id": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/work_item_id"}]},
+    "acceptance_criteria": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"}
+    },
+    "branch": {"type": "string", "pattern": "^(?:bug|epic|issue)/[1-9][0-9]*-[a-z0-9]+(?:-[a-z0-9]+)*$"},
+    "base_branch": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/base_branch"}]},
+    "milestone": {"type": ["string", "null"], "minLength": 1, "pattern": ".*\\S.*"},
+    "status": {"enum": ["Backlog", "Blocked", "Done", "In progress", "In review", "Ready"]},
+    "gate": {"enum": ["CHANGES_REQUESTED", "DEPENDENCY_REQUIRED", "EPIC_ACCEPTANCE_REQUIRED", "EPIC_APPROVAL_REQUIRED", "EPIC_PREPARATION_REQUIRED", "EPIC_REQUIRED", "NONE", "RECONCILE_REQUIRED", "RELEASE_APPROVAL_REQUIRED", "RELEASE_PLANNING", "REVIEW_REQUIRED"]}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"kind": {"const": "issue"}}},
+      "then": {
+        "properties": {
+          "parent_id": {"$ref": "#/$defs/work_item_id"},
+          "branch": {"type": "string", "pattern": "^issue/[1-9][0-9]*-[a-z0-9]+(?:-[a-z0-9]+)*$"},
+          "base_branch": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/epic_branch"}]}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"kind": {"const": "epic"}}},
+      "then": {
+        "properties": {
+          "parent_id": {"type": "null"},
+          "branch": {"type": "string", "pattern": "^epic/[1-9][0-9]*-[a-z0-9]+(?:-[a-z0-9]+)*$"},
+          "base_branch": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/release_branch"}]}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"kind": {"const": "bug"}}},
+      "then": {
+        "properties": {
+          "parent_id": {"type": "null"},
+          "branch": {"type": "string", "pattern": "^bug/[1-9][0-9]*-[a-z0-9]+(?:-[a-z0-9]+)*$"},
+          "base_branch": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/release_branch"}]}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "repository": {"type": "string", "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?/[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$"},
+    "work_item_id": {"type": "string", "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?/[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?#[1-9][0-9]*$"},
+    "epic_branch": {"type": "string", "pattern": "^epic/[1-9][0-9]*-[a-z0-9]+(?:-[a-z0-9]+)*$"},
+    "release_branch": {"type": "string", "pattern": "^release/v(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)$"},
+    "base_branch": {"type": "string", "pattern": "^(?:(?:bug|epic|issue)/[1-9][0-9]*-[a-z0-9]+(?:-[a-z0-9]+)*|release/v(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*)\\.(?:0|[1-9][0-9]*))$"}
+  }
+}

@@ -16,11 +16,25 @@ const historicalLockSource=readFileSync(
 const historicalLock=JSON.parse(historicalLockSource);
 const currentLock=JSON.parse(lock);
 const BASELINE_SHA256="f84798183d695a7ddbcef775a9b502d3d4c393259d94ff53993303a44ed699a9";
+const HISTORICAL_ROOT_BIN=Object.freeze({toss:"bin/toss.js"});
+const CORE_DUAL_BIN=Object.freeze({toss:"bin/toss.js","toss-core":"bin/toss-core.js"});
+
+function hasExactBin(value,expected) {
+  const keys=Object.keys(expected);
+  return value!==null && typeof value==="object" && !Array.isArray(value) &&
+    Object.keys(value).length===keys.length &&
+    keys.every(key => value[key]===expected[key]);
+}
 
 function normalizedReleaseVersionLock(value) {
   const normalized=structuredClone(value);
   normalized.version="<release-version>";
   normalized.packages[""].version="<release-version>";
+  // The v2.1.1 capture predates the approved second executable. Normalize
+  // only that exact historical root metadata, never arbitrary bin drift.
+  if (hasExactBin(normalized.packages[""].bin,HISTORICAL_ROOT_BIN)) {
+    normalized.packages[""].bin=structuredClone(CORE_DUAL_BIN);
+  }
   return normalized;
 }
 
@@ -72,7 +86,7 @@ test("v2.1.1 baseline is exact and cannot relax its budgets",() => {
   assertBaselineIntegrity(baseline);
 });
 
-test("historical performance lock permits only the release-root version update",() => {
+test("historical performance lock permits only the release-root version and approved dual-bin update",() => {
   assert.equal(
     createHash("sha256").update(historicalLockSource).digest("hex"),
     baseline.identity.lock_sha256,
@@ -87,6 +101,13 @@ test("historical performance lock permits only the release-root version update",
   assert.notDeepEqual(
     normalizedReleaseVersionLock(historicalLock),
     normalizedReleaseVersionLock(dependencyDrift),
+  );
+
+  const binDrift=structuredClone(currentLock);
+  binDrift.packages[""].bin={toss:"bin/toss.js",forged:"bin/forged.js"};
+  assert.notDeepEqual(
+    normalizedReleaseVersionLock(historicalLock),
+    normalizedReleaseVersionLock(binDrift),
   );
 });
 

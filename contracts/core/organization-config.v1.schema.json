@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://toss.software/schemas/core/organization-config.v1.schema.json",
+  "title": "TOSS Core Organization Configuration v1",
+  "description": "Closed configuration for one organization control repository.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "organization", "project", "control_repository", "policy_revision", "repositories"],
+  "properties": {
+    "schema_version": {"const": "organization-config.v1"},
+    "organization": {"type": "string", "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$"},
+    "project": {"$ref": "#/$defs/project"},
+    "control_repository": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"},
+    "policy_revision": {"type": "string", "pattern": "^POLICY-[0-9]{4,}$"},
+    "repositories": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"}
+    }
+  },
+  "$defs": {
+    "project": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node_id", "number"],
+      "properties": {
+        "node_id": {"type": "string", "minLength": 1, "pattern": ".*\\S.*"},
+        "number": {"type": "integer", "minimum": 1}
+      }
+    }
+  }
+}

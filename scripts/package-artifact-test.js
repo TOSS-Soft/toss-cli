@@ -57,6 +57,21 @@ function runPackedCli(packageRoot,args,cwd) {
   return run(process.execPath,[path.join(packageRoot,"bin","toss.js"),...args],{cwd});
 }
 
+function runPackedCoreCli(packageRoot,args,cwd) {
+  return run(process.execPath,[path.join(packageRoot,"bin","toss-core.js"),...args],{cwd});
+}
+
+function regularFiles(rootDirectory,current="") {
+  const directory=path.join(rootDirectory,current);
+  return fs.readdirSync(directory,{withFileTypes:true})
+    .sort((left,right) => left.name===right.name ? 0 : left.name<right.name ? -1 : 1)
+    .flatMap(entry => {
+      const relative=path.join(current,entry.name);
+      if (entry.isDirectory()) return regularFiles(rootDirectory,relative);
+      return entry.isFile() ? [relative.split(path.sep).join("/")] : [];
+    });
+}
+
 try {
   const npmRoot=resolveNpmRoot();
   const npmRequire=createRequire(path.join(npmRoot,"package.json"));
@@ -80,6 +95,35 @@ try {
   await npmTar.x({file:artifact,cwd:extractRoot});
   const packedRoot=path.join(extractRoot,"package");
   installYaml(packedRoot);
+  const packedManifest=JSON.parse(fs.readFileSync(path.join(packedRoot,"package.json"),"utf8"));
+  assert.deepEqual(packedManifest.bin,{
+    toss:"bin/toss.js",
+    "toss-core":"bin/toss-core.js",
+  });
+  for (const executable of ["toss.js","toss-core.js"]) {
+    const entry=path.join(packedRoot,"bin",executable);
+    assert.equal(fs.statSync(entry).isFile(),true,`packed ${executable} is missing`);
+    assert.notEqual(fs.statSync(entry).mode&0o111,0,`packed ${executable} is not executable`);
+  }
+  assertSuccess(runPackedCoreCli(packedRoot,["--help"],tmp),"packed toss-core help");
+  const packedVersion=runPackedCoreCli(packedRoot,["--version"],tmp);
+  assertSuccess(packedVersion,"packed toss-core version");
+  assert.equal(packedVersion.stderr,"");
+  assert.equal(packedVersion.stdout,packedManifest.version+"\n");
+
+  const coreContractFiles=fs.readdirSync(path.join(root,"contracts","core"));
+  for (const filename of coreContractFiles) {
+    assert.ok(
+      packedFiles.some(file => file?.path===`contracts/core/${filename}`),
+      `packed artifact omits core contract ${filename}`,
+    );
+  }
+  for (const sourceFile of regularFiles(path.join(root,"src","core")).map(file => `src/core/${file}`)) {
+    assert.ok(
+      packedFiles.some(file => file?.path===sourceFile),
+      `packed artifact omits core source ${sourceFile}`,
+    );
+  }
 
   const brokenRoot=path.join(tmp,"broken-package");
   fs.cpSync(packedRoot,brokenRoot,{recursive:true});
