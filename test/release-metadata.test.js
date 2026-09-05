@@ -67,6 +67,23 @@ function readReleaseNotes() {
   return readFileSync(releaseNotesPath,"utf8");
 }
 
+test("v2.1.2 keeps bounded historical release notes for the organizational lifecycle",() => {
+  const notes=readFileSync(join(root,"docs","releases","v2.1.2.md"),"utf8");
+  assert.match(notes,/^# TOSS CLI v2\.1\.2$/m);
+  for (const heading of [
+    "Organizational control",
+    "Work lifecycle",
+    "Release programs",
+    "Safety and compatibility",
+    "Verification",
+    "Included pull requests",
+  ]) {
+    assert.match(notes,new RegExp(`^## ${heading}$`,`m`));
+  }
+  assert.match(notes,/^- #105 — /m);
+  assert.doesNotMatch(notes,/CLI is \d+% faster/i);
+});
+
 test("release metadata binds a canonical annotated tag to deeply frozen benchmark evidence",t => {
   assert.equal(releaseMetadata.RELEASE_TAG_EVIDENCE_VERSION,"toss-release-tag.v1");
   assert.equal(typeof releaseMetadata.readReleaseTagEvidence,"function");

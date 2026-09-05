@@ -1,11 +1,10 @@
 {
   "name": "@toss-software/cli",
-  "version": "2.1.2",
+  "version": "2.1.3",
   "description": "TOSS PM Governance project bootstrap CLI",
   "type": "module",
   "bin": {
-    "toss": "bin/toss.js",
-    "toss-core": "bin/toss-core.js"
+    "toss": "bin/toss.js"
   },
   "files": [
     "bin",

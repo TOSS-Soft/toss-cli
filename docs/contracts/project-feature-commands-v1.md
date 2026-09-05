@@ -1,9 +1,37 @@
 # Project and Feature Commands v1
 
 This document is the normative orchestration contract for the `project` and
-`feature` lifecycle commands. It extends, but does not change, the ownership,
-transition, and authority rules in `analysis-state-machine.md` and
-`authority-severity-mapping.md`.
+`feature` lifecycle commands. It retains the ownership and transition rules in
+`analysis-state-machine.md` and defines the decision-authority rules used by
+these commands below.
+
+## Decision severity, authority, and continuation
+
+| Severity | Authority | Decision owner | Hard stop | Blocks while unresolved | Assumption evidence |
+| --- | --- | --- | --- | --- | --- |
+| `P0` | `A3` | `USER` | yes | yes | no |
+| `P1` | `A2` | `ARCHITECT` | no | yes | no |
+| `P1` with `business_input_missing: true` | `A3` | `USER` | no | yes | no |
+| `P2` | `A3` | `USER` | no | yes | no |
+| `P3` | `A1` | `PM` | no | no | required |
+| `P4` | `A1` | `PM` | no | no | required |
+
+Only the structured `business_input_missing: true` condition on a `P1`
+question changes its default route. It is the sole route by which a technical
+preference may escalate directly to `USER`. A technical preference on `P0` or
+`P2` is invalid; one on `P3` or `P4` remains an A1 PM-owned assumption.
+
+An unresolved `P0`–`P2` decision blocks continuation. Resolving one requires a
+closed authority-resolution record with the exact mapped authority and owner,
+plus a decision-bound authority attestation verified against the external
+trusted authority registry. A3 routes use
+`A3_VERIFIED_CEO_OR_USER_AUTHORITY` with a `CEO` or `USER` actor. The ordinary
+P1 A2 route uses `A2_ARCHITECT_OR_SPECIALIST_EVIDENCE` with an `ARCHITECT` or
+`SPECIALIST` actor. Ordinary provenance alone does not establish authority.
+
+P3 and P4 never block or become authority attestations. They may continue only
+as visible assumptions with provenance, material impact, and a valid
+`reversible`, `partially-reversible`, or `irreversible` reversibility value.
 
 ## Input and service boundary
 
@@ -61,7 +89,7 @@ An unresolved P0–P2 decision stops with the exact decision package. A pending
 ADR stops with the exact ADR approval package. Interactive callers receive the
 package without invented answers or approvals; non-interactive callers receive
 the same canonical package in structured data with the blocked exit code.
-P3/P4 assumptions remain warnings and never become authority attestations.
+P3/P4 assumptions remain visible and never become authority attestations.
 
 A `READY_FOR_ISSUES` result resolves exactly one spec-audit reference from the
 verified READY transition. The audit must bind the exact issue-plan revision;

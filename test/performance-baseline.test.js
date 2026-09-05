@@ -3,6 +3,7 @@ import {createHash} from "node:crypto";
 import {readFileSync} from "node:fs";
 import {join} from "node:path";
 import test from "node:test";
+import {isDeepStrictEqual} from "node:util";
 import {fileURLToPath} from "node:url";
 
 const root=fileURLToPath(new URL("../",import.meta.url));
@@ -16,26 +17,47 @@ const historicalLockSource=readFileSync(
 const historicalLock=JSON.parse(historicalLockSource);
 const currentLock=JSON.parse(lock);
 const BASELINE_SHA256="f84798183d695a7ddbcef775a9b502d3d4c393259d94ff53993303a44ed699a9";
-const HISTORICAL_ROOT_BIN=Object.freeze({toss:"bin/toss.js"});
-const CORE_DUAL_BIN=Object.freeze({toss:"bin/toss.js","toss-core":"bin/toss-core.js"});
+const FAST_URI_PATH="node_modules/fast-uri";
+const HISTORICAL_FAST_URI=Object.freeze({
+  version:"3.1.5",
+  resolved:"https://registry.npmjs.org/fast-uri/-/fast-uri-3.1.5.tgz",
+  integrity:"sha512-gHwA1O9LDIcKunMKhObS/HimwtehO1nPUECKAu5TpKgaO19fcWEl4bliWe1jWxVFvIXztJjjQ4L8XQ1EU9f7Jw==",
+  funding:[
+    {type:"github",url:"https://github.com/sponsors/fastify"},
+    {type:"opencollective",url:"https://opencollective.com/fastify"},
+  ],
+  license:"BSD-3-Clause",
+});
+const APPROVED_FAST_URI=Object.freeze({
+  version:"3.1.7",
+  resolved:"https://registry.npmjs.org/fast-uri/-/fast-uri-3.1.7.tgz",
+  integrity:"sha512-dOvZVzjdZdz7phd9v6jCbwxrBW3fK6n8Rc0CtdmM4bumzMnxywBYhuph6J819RRw/ku+rLbelwfMunktuzVVHg==",
+  funding:[
+    {type:"github",url:"https://github.com/sponsors/fastify"},
+    {type:"opencollective",url:"https://opencollective.com/fastify"},
+  ],
+  license:"BSD-3-Clause",
+});
 
-function hasExactBin(value,expected) {
-  const keys=Object.keys(expected);
-  return value!==null && typeof value==="object" && !Array.isArray(value) &&
-    Object.keys(value).length===keys.length &&
-    keys.every(key => value[key]===expected[key]);
+function hasExactRecord(value,expected) {
+  return isDeepStrictEqual(value,expected);
 }
 
-function normalizedReleaseVersionLock(value) {
+function normalizedReleaseVersionLock(value,{normalizeHistoricalFastUri=false}={}) {
   const normalized=structuredClone(value);
   normalized.version="<release-version>";
   normalized.packages[""].version="<release-version>";
-  // The v2.1.1 capture predates the approved second executable. Normalize
-  // only that exact historical root metadata, never arbitrary bin drift.
-  if (hasExactBin(normalized.packages[""].bin,HISTORICAL_ROOT_BIN)) {
-    normalized.packages[""].bin=structuredClone(CORE_DUAL_BIN);
+  // The sole dependency normalization is the reviewed security repair. Any
+  // field-level drift prevents an exact match and remains visible to the diff.
+  if (normalizeHistoricalFastUri &&
+    hasExactRecord(normalized.packages[FAST_URI_PATH],HISTORICAL_FAST_URI)) {
+    normalized.packages[FAST_URI_PATH]=structuredClone(APPROVED_FAST_URI);
   }
   return normalized;
+}
+
+function normalizedHistoricalReleaseVersionLock(value) {
+  return normalizedReleaseVersionLock(value,{normalizeHistoricalFastUri:true});
 }
 
 function median(samples,field) {
@@ -57,7 +79,7 @@ function assertBaselineIntegrity(candidate,source=baselineSource) {
     createHash("sha256").update(historicalLockSource).digest("hex"),
   );
   assert.deepEqual(
-    normalizedReleaseVersionLock(historicalLock),
+    normalizedHistoricalReleaseVersionLock(historicalLock),
     normalizedReleaseVersionLock(currentLock),
   );
   assert.equal(candidate.samples.length,3);
@@ -86,27 +108,75 @@ test("v2.1.1 baseline is exact and cannot relax its budgets",() => {
   assertBaselineIntegrity(baseline);
 });
 
-test("historical performance lock permits only the release-root version and approved dual-bin update",() => {
+test("historical performance lock permits only approved metadata and fast-uri security updates",() => {
   assert.equal(
     createHash("sha256").update(historicalLockSource).digest("hex"),
     baseline.identity.lock_sha256,
   );
   assert.deepEqual(
-    normalizedReleaseVersionLock(historicalLock),
+    normalizedHistoricalReleaseVersionLock(historicalLock),
     normalizedReleaseVersionLock(currentLock),
+  );
+  assert.deepEqual(currentLock.packages[FAST_URI_PATH],APPROVED_FAST_URI);
+
+  const fastUriReversion=structuredClone(currentLock);
+  fastUriReversion.packages[FAST_URI_PATH]=structuredClone(HISTORICAL_FAST_URI);
+  assert.notDeepEqual(
+    normalizedHistoricalReleaseVersionLock(historicalLock),
+    normalizedReleaseVersionLock(fastUriReversion),
+  );
+
+  const formerDualBinCandidate=structuredClone(currentLock);
+  formerDualBinCandidate.packages[""].bin={
+    toss:"bin/toss.js",
+    "toss-core":"bin/toss-core.js",
+  };
+  assert.notDeepEqual(
+    normalizedHistoricalReleaseVersionLock(historicalLock),
+    normalizedReleaseVersionLock(formerDualBinCandidate),
   );
 
   const dependencyDrift=structuredClone(currentLock);
   dependencyDrift.packages["node_modules/ajv"].integrity="sha512-drift";
   assert.notDeepEqual(
-    normalizedReleaseVersionLock(historicalLock),
+    normalizedHistoricalReleaseVersionLock(historicalLock),
     normalizedReleaseVersionLock(dependencyDrift),
+  );
+
+  const fastUriVersionDrift=structuredClone(currentLock);
+  fastUriVersionDrift.packages[FAST_URI_PATH].version="3.1.6";
+  assert.notDeepEqual(
+    normalizedHistoricalReleaseVersionLock(historicalLock),
+    normalizedReleaseVersionLock(fastUriVersionDrift),
+  );
+
+  const fastUriIntegrityDrift=structuredClone(currentLock);
+  fastUriIntegrityDrift.packages[FAST_URI_PATH].integrity="sha512-drift";
+  assert.notDeepEqual(
+    normalizedHistoricalReleaseVersionLock(historicalLock),
+    normalizedReleaseVersionLock(fastUriIntegrityDrift),
+  );
+
+  const fastUriResolutionDrift=structuredClone(currentLock);
+  fastUriResolutionDrift.packages[FAST_URI_PATH].resolved=
+    "https://registry.npmjs.org/fast-uri/-/fast-uri-3.1.8.tgz";
+  assert.notDeepEqual(
+    normalizedHistoricalReleaseVersionLock(historicalLock),
+    normalizedReleaseVersionLock(fastUriResolutionDrift),
+  );
+
+  const fastUriFundingDrift=structuredClone(currentLock);
+  fastUriFundingDrift.packages[FAST_URI_PATH].funding[0].url=
+    "https://example.invalid/fast-uri";
+  assert.notDeepEqual(
+    normalizedHistoricalReleaseVersionLock(historicalLock),
+    normalizedReleaseVersionLock(fastUriFundingDrift),
   );
 
   const binDrift=structuredClone(currentLock);
   binDrift.packages[""].bin={toss:"bin/toss.js",forged:"bin/forged.js"};
   assert.notDeepEqual(
-    normalizedReleaseVersionLock(historicalLock),
+    normalizedHistoricalReleaseVersionLock(historicalLock),
     normalizedReleaseVersionLock(binDrift),
   );
 });

@@ -390,7 +390,7 @@ test("the release contracts remain release-owned in ASCII order",async () => {
     "test/coverage-audit.test.js",
     "test/release-evidence.test.js",
     "test/release-metadata.test.js",
-    "test/release-v2.1.2.test.js",
+    "test/release-v2.1.3.test.js",
     "test/test-lanes.test.js",
   ]);
 });
